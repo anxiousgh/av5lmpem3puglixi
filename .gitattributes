@@ -1,0 +1,4 @@
+# Keep line endings LF for files served raw and executed by Roblox.
+*.lua text eol=lf
+*.txt text eol=lf
+*.md  text eol=lf
