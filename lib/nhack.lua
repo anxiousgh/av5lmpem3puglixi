@@ -2889,24 +2889,14 @@ do
                         DynamicText = tostring(DynamicTextProvider(WatermarkDisplayedFps) or "")
                     end
                     local PlainText = DynamicTextProvider and DynamicText or (PrefixText .. WatermarkStatsText)
-                    local ShineWidth = 6
-                    local ShinePos = WatermarkShimmerPhase * (#PlainText + ShineWidth)
-                    local Rich = {}
-                    for Index = 1, #PlainText do
-                        local Distance = math.abs(Index - ShinePos)
-                        local Alpha = math.clamp(1 - (Distance / ShineWidth), 0, 1)
-                        local Color = Library.Theme["Text"]:Lerp(Library.Theme["Accent"], Alpha)
-                        Rich[#Rich + 1] = string.format(
-                            '<font color="rgb(%d,%d,%d)">%s</font>',
-                            math.floor(Color.R * 255),
-                            math.floor(Color.G * 255),
-                            math.floor(Color.B * 255),
-                            PlainText:sub(Index, Index)
-                        )
-                    end
 
+                    -- [wh] Solid text only. The original effect wrapped every
+                    -- character in its own <font color> tag for a shimmer, but
+                    -- that many tags renders as literal markup here. Show plain
+                    -- text (white via Theme["Text"]); the AccentGradient underline
+                    -- below still animates for flair.
                     Items["AccentGradient"].Instance.Offset = Vector2.new((WatermarkShimmerPhase * 2) - 1, 0)
-                    Items["Text"].Instance.Text = table.concat(Rich)
+                    Items["Text"].Instance.Text = PlainText
                 end
 
                 if CurrentTick - WatermarkTick >= 1 then
