@@ -81,7 +81,7 @@ local BlockedWindowInputs = {
 
 local Library = {
     Flags = {},
-    MenuKeybind = tostring(Enum.KeyCode.X),
+    MenuKeybind = tostring(Enum.KeyCode.RightAlt), -- [wh] AltGr / right alt
 
     Directory = "niggahack",
     Folders = {
@@ -10615,7 +10615,7 @@ do
                     SettingsSection:Label({ Name = "UI Bind" }):Keybind({
                         Flag = "UIBind",
                         Mode = "Toggle",
-                        Default = Enum.KeyCode.RightShift,
+                        Default = Enum.KeyCode.RightAlt, -- [wh] AltGr / right alt
                         Callback = function(Value)
                             Library.MenuKeybind = Flags["UIBind"].Key
                         end
