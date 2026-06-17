@@ -806,12 +806,20 @@ do
                 Enum.UserInputType.MouseButton3
             )
 
-            ContextActionService:BindActionAtPriority(Self.InputBlockAction .. "_KEYS", function(_, State)
+            ContextActionService:BindActionAtPriority(Self.InputBlockAction .. "_KEYS", function(_, State, Input)
                 if State ~= Enum.UserInputState.Begin and State ~= Enum.UserInputState.Change then
                     return Enum.ContextActionResult.Pass
                 end
 
                 if not Self.WindowOpenState or UserInputService:GetFocusedTextBox() then
+                    return Enum.ContextActionResult.Pass
+                end
+
+                -- [wh] Never sink the menu toggle key. If it's in BlockedWindowInputs
+                -- and gets sunk while the menu is open, it reaches widgets as a
+                -- GameProcessedEvent and they ignore it -- so every 2nd toggle
+                -- failed to update the keybind list.
+                if Input and (tostring(Input.KeyCode) == Self.MenuKeybind or tostring(Input.UserInputType) == Self.MenuKeybind) then
                     return Enum.ContextActionResult.Pass
                 end
 
