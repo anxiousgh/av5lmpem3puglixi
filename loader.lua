@@ -88,33 +88,11 @@ local ESPPreview = Library:ESPPreview({
 
 local TargetIndicator = Library:TargetIndicator()
 
-local Radar = Library:RadarWidget({
-    Name = "Radar"
-})
-
 local Logger = Library:ConsoleLogger({
     Name = "Console",
     Callback = function(Text, Log)
         Log:AddOutput(Text)
     end
-})
-
-local ModeratorList = Library:ModeratorList({
-    Name = "Moderators"
-})
-
-local StatList = Library:StatListWidget({
-    Name = "Stats"
-})
-
-StatList:SetLines({
-    "Kills: 0",
-    "Deaths: 0",
-    "KDR: 0.00"
-})
-
-local ChargeShot = Library:ChargeShotWidget({
-    Name = "Charge Shot"
 })
 
 local Inventory = Library:InventoryViewer({
@@ -163,42 +141,10 @@ Library:RegisterSettingsWidget({
 })
 
 Library:RegisterSettingsWidget({
-    Name = "Radar",
-    Default = false,
-    Callback = function(Value)
-        Radar:SetVisibility(Value)
-    end
-})
-
-Library:RegisterSettingsWidget({
     Name = "Console",
     Default = false,
     Callback = function(Value)
         Logger:SetVisibility(Value)
-    end
-})
-
-Library:RegisterSettingsWidget({
-    Name = "Moderator List",
-    Default = false,
-    Callback = function(Value)
-        ModeratorList:SetVisibility(Value)
-    end
-})
-
-Library:RegisterSettingsWidget({
-    Name = "Stat List",
-    Default = false,
-    Callback = function(Value)
-        StatList:SetVisibility(Value)
-    end
-})
-
-Library:RegisterSettingsWidget({
-    Name = "Charge Shot",
-    Default = false,
-    Callback = function(Value)
-        ChargeShot:SetVisibility(Value)
     end
 })
 
