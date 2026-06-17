@@ -255,10 +255,8 @@ do
             return Font.new(getcustomasset(`{Library.Directory .. Library.Folders.Assets}/{Name}.font`))
         end
 
-        Library.Font = CustomFont:New("SmallestPixel7", 400, "Regular", {
-            Id = "SmallestPixel7",
-            Url = "https://github.com/sametexe001/luas/raw/refs/heads/main/smallest_pixel-7.ttf"
-        })
+        -- [wh] Default to the built-in monospace "Code" font.
+        Library.Font = Font.fromEnum(Enum.Font.Code)
     end
 
     Library.Exit = function(Self)
@@ -858,6 +856,16 @@ do
             Library:SafeCall(Callback, Library.WindowOpenState)
         end
     end
+
+    -- [wh] Keep the mouse free while the menu is open. The game's camera /
+    -- shiftlock scripts re-lock MouseBehavior to LockCenter every frame, which
+    -- otherwise traps the cursor in the screen centre. SetWindowVisibilityState
+    -- only sets Default once on open, so re-assert it each frame here.
+    Library:Connect(RunService.RenderStepped, function()
+        if Library.WindowOpenState and UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
+            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        end
+    end)
 
     Library.RegisterSettingsWidget = function(Self, Data)
         if type(Data) ~= "table" then
