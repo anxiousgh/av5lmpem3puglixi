@@ -71,11 +71,11 @@ if getgenv then getgenv().WH.lib = Library end
 --  vendored library loads and renders. Replace with real per-game UI later.
 -- ============================================================
 local Watermark = Library:Watermark({
-    Name = "Landryhaxx"
+    Name = "wrath.cc"
 })
 
 Watermark:SetDynamicTextProvider(function(Fps)
-    return string.format("Landryhaxx | %dfps | %s", Fps, os.date("%X"))
+    return string.format("wrath.cc | %dfps | %s", Fps, os.date("%X"))
 end)
 
 local KeybindList = Library:KeybindList({
