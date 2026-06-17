@@ -38,22 +38,16 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local Mouse = cloneref(LocalPlayer:GetMouse())
 local GuiInset = GuiService:GetGuiInset().Y
+-- [wh] Keys sunk (priority 5000) while the window is open. Movement keys
+-- (WASD / Space / sprint+crouch modifiers / arrows) are intentionally left OUT
+-- so you can still walk around with the GUI open. The toggle keybind still
+-- works regardless (it fires via UserInputService.InputBegan, which CAS sinking
+-- doesn't block).
 local BlockedWindowInputs = {
-    Enum.KeyCode.W,
-    Enum.KeyCode.A,
-    Enum.KeyCode.S,
-    Enum.KeyCode.D,
-    Enum.KeyCode.Space,
-    Enum.KeyCode.LeftShift,
     Enum.KeyCode.RightShift,
-    Enum.KeyCode.LeftControl,
     Enum.KeyCode.RightControl,
     Enum.KeyCode.LeftAlt,
     Enum.KeyCode.RightAlt,
-    Enum.KeyCode.Up,
-    Enum.KeyCode.Down,
-    Enum.KeyCode.Left,
-    Enum.KeyCode.Right,
     Enum.KeyCode.Return,
     Enum.KeyCode.KeypadEnter,
     Enum.KeyCode.Slash,
