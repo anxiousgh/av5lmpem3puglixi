@@ -193,8 +193,6 @@ end
 -- ============================================================
 --  COMBAT  (scaffold -- per-game modules fill these subpages)
 -- ============================================================
-Window:Category("Main")
-
 local CombatPage = Window:Page({ Name = "Combat" })
 do
     local Aimbot = CombatPage:SubPage({ Name = "Aimbot" })
