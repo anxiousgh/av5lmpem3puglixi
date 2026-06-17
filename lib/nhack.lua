@@ -213,21 +213,21 @@ do
     end
 
     local Themes = {
-        -- [wh] Purple palette: #c8b7f7 (accent/text), #3e394d (outline/element),
-        -- #8378a2 (hover/inactive). Backgrounds/borders are darker shades of the
-        -- same hue, derived for contrast/readability.
+        -- [wh] Neutral dark-gray UI with the purple palette as accents:
+        -- #c8b7f7 = Accent, #3e394d = Outline, #8378a2 = Inactive Text.
+        -- Background/elements are neutral grays; Text is white.
         ["Preset"] = {
-            ["Background"] = Color3.fromRGB(18, 16, 24),
+            ["Background"] = Color3.fromRGB(22, 22, 25),
             ["Outline"] = Color3.fromRGB(62, 57, 77),        -- #3e394d
-            ["Border"] = Color3.fromRGB(10, 9, 14),
+            ["Border"] = Color3.fromRGB(10, 10, 12),
             ["Accent"] = Color3.fromRGB(200, 183, 247),      -- #c8b7f7
             ["Risky"] = Color3.fromRGB(255, 70, 80),
-            ["Light Border"] = Color3.fromRGB(16, 14, 22),
-            ["Border 2"] = Color3.fromRGB(8, 7, 12),
-            ["Text"] = Color3.fromRGB(200, 183, 247),        -- #c8b7f7
-            ["Section"] = Color3.fromRGB(26, 24, 33),
-            ["Element"] = Color3.fromRGB(46, 42, 58),
-            ["Hovered Element"] = Color3.fromRGB(131, 120, 162), -- #8378a2
+            ["Light Border"] = Color3.fromRGB(16, 16, 19),
+            ["Border 2"] = Color3.fromRGB(7, 7, 9),
+            ["Text"] = Color3.fromRGB(240, 240, 242),        -- white
+            ["Section"] = Color3.fromRGB(28, 28, 32),
+            ["Element"] = Color3.fromRGB(40, 40, 45),
+            ["Hovered Element"] = Color3.fromRGB(54, 54, 60),
             ["Inactive Text"] = Color3.fromRGB(131, 120, 162)    -- #8378a2
         }
     }

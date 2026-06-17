@@ -74,8 +74,10 @@ local Watermark = Library:Watermark({
     Name = "wrath.cc"
 })
 
+-- NOTE: the watermark shimmer-colors each character itself (Text -> Accent),
+-- so it can't take <font> markup -- feeding it tags renders them literally.
 Watermark:SetDynamicTextProvider(function(Fps)
-    return string.format('wrath<font color="#c8b7f7">.cc</font> | %dfps | %s', Fps, os.date("%X"))
+    return string.format("wrath.cc | %dfps | %s", Fps, os.date("%X"))
 end)
 
 local KeybindList = Library:KeybindList({
