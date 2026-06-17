@@ -75,7 +75,7 @@ local Watermark = Library:Watermark({
 })
 
 Watermark:SetDynamicTextProvider(function(Fps)
-    return string.format("wrath.cc | %dfps | %s", Fps, os.date("%X"))
+    return string.format('wrath<font color="#c8b7f7">.cc</font> | %dfps | %s', Fps, os.date("%X"))
 end)
 
 local KeybindList = Library:KeybindList({
@@ -104,7 +104,7 @@ local Playerlist = Library:Playerlist({
 })
 
 local Window = Library:Window({
-    Title = "Landryhaxx",
+    Title = "wrath.cc",
     ButtonName = "Main UI"
 })
 
@@ -198,7 +198,7 @@ RightSection:Toggle({
     end
 })
 
-Library:Notification("Landryhaxx Loaded", 3, Library.Theme["Accent"])
+Library:Notification('wrath<font color="#c8b7f7">.cc</font> Loaded', 3, Library.Theme["Accent"])
 
 Window:CreateSettingsPage()
 

@@ -213,19 +213,22 @@ do
     end
 
     local Themes = {
+        -- [wh] Purple palette: #c8b7f7 (accent/text), #3e394d (outline/element),
+        -- #8378a2 (hover/inactive). Backgrounds/borders are darker shades of the
+        -- same hue, derived for contrast/readability.
         ["Preset"] = {
-            ["Background"] = Color3.fromRGB(16, 17, 20),
-            ["Outline"] = Color3.fromRGB(36, 38, 45),
-            ["Border"] = Color3.fromRGB(7, 8, 10),
-            ["Accent"] = Color3.fromRGB(152, 188, 255),
-            ["Risky"] = Color3.fromRGB(255, 50, 50),
-            ["Light Border"] = Color3.fromRGB(12, 8, 12),
-            ["Border 2"] = Color3.fromRGB(5, 10, 14),
-            ["Text"] = Color3.fromRGB(180, 180, 180),
-            ["Section"] = Color3.fromRGB(20, 21, 25),
-            ["Element"] = Color3.fromRGB(28, 29, 35),
-            ["Hovered Element"] = Color3.fromRGB(36, 38, 45),
-            ["Inactive Text"] = Color3.fromRGB(100, 100, 100)
+            ["Background"] = Color3.fromRGB(18, 16, 24),
+            ["Outline"] = Color3.fromRGB(62, 57, 77),        -- #3e394d
+            ["Border"] = Color3.fromRGB(10, 9, 14),
+            ["Accent"] = Color3.fromRGB(200, 183, 247),      -- #c8b7f7
+            ["Risky"] = Color3.fromRGB(255, 70, 80),
+            ["Light Border"] = Color3.fromRGB(16, 14, 22),
+            ["Border 2"] = Color3.fromRGB(8, 7, 12),
+            ["Text"] = Color3.fromRGB(200, 183, 247),        -- #c8b7f7
+            ["Section"] = Color3.fromRGB(26, 24, 33),
+            ["Element"] = Color3.fromRGB(46, 42, 58),
+            ["Hovered Element"] = Color3.fromRGB(131, 120, 162), -- #8378a2
+            ["Inactive Text"] = Color3.fromRGB(131, 120, 162)    -- #8378a2
         }
     }
 
@@ -3129,6 +3132,7 @@ do
                     FontFace = Library.Font,
                     TextSize = Library.FontSize,
                     Parent = Items["Notification"].Instance,
+                    RichText = true, -- [wh] allow <font color> markup in notifications
                     TextColor3 = Library.Theme["Text"],
                     Text = Name,
                     AnchorPoint = Vector2.new(0, 0.5),
