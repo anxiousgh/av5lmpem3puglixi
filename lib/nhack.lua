@@ -113,8 +113,12 @@ local Library = {
     WindowOpenState = true,
     InputBlockAction = "NH_UI_INPUT_BLOCK",
     BackgroundEffects = nil,
-    BackgroundBlurEnabled = true,
-    BackgroundSnowEnabled = true,
+    -- [wh] Off by default: when the window opens the lib darkens the whole
+    -- screen (full-screen 0.5 black frame) + blurs the world whenever blur OR
+    -- snow is on. That dark/blurred frame is the "border" effect we don't want.
+    -- Both are still re-enableable from the Settings page.
+    BackgroundBlurEnabled = false,
+    BackgroundSnowEnabled = false,
     CopiedColor = nil,
     LayoutRegistry = {},
     SettingsWidgets = {},
