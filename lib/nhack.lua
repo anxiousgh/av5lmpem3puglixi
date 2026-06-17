@@ -113,12 +113,8 @@ local Library = {
     WindowOpenState = true,
     InputBlockAction = "NH_UI_INPUT_BLOCK",
     BackgroundEffects = nil,
-    -- [wh] Off by default: when the window opens the lib darkens the whole
-    -- screen (full-screen 0.5 black frame) + blurs the world whenever blur OR
-    -- snow is on. That dark/blurred frame is the "border" effect we don't want.
-    -- Both are still re-enableable from the Settings page.
-    BackgroundBlurEnabled = false,
-    BackgroundSnowEnabled = false,
+    BackgroundBlurEnabled = true,
+    BackgroundSnowEnabled = true,
     CopiedColor = nil,
     LayoutRegistry = {},
     SettingsWidgets = {},
@@ -7666,7 +7662,10 @@ do
                     PaddingRight = UDim.new(0, 2)
                 })
 
-                Items["Header"].Instance.Visible = Window.IsOpen
+                -- [wh] Hide the full-screen chrome: the screen-edge border AND
+                -- the top bar (title + "Main UI" dock button). The menu panel
+                -- and the MenuKeybind toggle (default X) are unaffected.
+                Items["Header"].Instance.Visible = false
 
                 Items["PagesOutline"] = Library:Create("Frame", {
                     Name = "\0",
@@ -7857,7 +7856,7 @@ do
                 Debounce = true
 
                 Window.IsOpen = Bool
-                Items["Header"].Instance.Visible = Bool
+                Items["Header"].Instance.Visible = false -- [wh] keep screen border + top bar hidden
                 Library:SetWindowVisibilityState(Bool)
                 Library:SetBackgroundEffectsVisible(Bool)
                 UpdateDockState()
