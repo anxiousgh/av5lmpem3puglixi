@@ -74,10 +74,11 @@ local Watermark = Library:Watermark({
     Name = "wrath.cc"
 })
 
--- NOTE: the watermark shimmer-colors each character itself (Text -> Accent),
--- so it can't take <font> markup -- feeding it tags renders them literally.
+-- The brand "wrath.cc" (with ".cc" in accent) is drawn by the watermark itself
+-- from the Name above, as separate labels. This provider returns only the
+-- dynamic suffix that follows it.
 Watermark:SetDynamicTextProvider(function(Fps)
-    return string.format("wrath.cc | %dfps | %s", Fps, os.date("%X"))
+    return string.format(" | %dfps | %s", Fps, os.date("%X"))
 end)
 
 local KeybindList = Library:KeybindList({
@@ -200,7 +201,8 @@ RightSection:Toggle({
     end
 })
 
-Library:Notification('wrath<font color="#c8b7f7">.cc</font> Loaded', 3, Library.Theme["Accent"])
+-- Plain text: RichText markup renders literally in this executor, so no <font>.
+Library:Notification("wrath.cc Loaded", 3, Library.Theme["Accent"])
 
 Window:CreateSettingsPage()
 

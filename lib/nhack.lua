@@ -2811,18 +2811,74 @@ do
                     })
                 })
 
+                -- [wh] The brand is split across separate labels so the
+                -- extension (e.g. ".cc") can be a different colour. RichText
+                -- <font> markup renders as literal tags in this executor, so
+                -- colouring a substring inside one label isn't possible --
+                -- separate labels are reliable. Layout (left -> right):
+                --   [Brand "wrath"][BrandExt ".cc" accent][Text dynamic suffix]
+                Items["TextHolder"] = Library:Create("Frame", {
+                    Name = "\0",
+                    Parent = Items["Watermark"].Instance,
+                    AnchorPoint = Vector2.new(0, 0.5),
+                    Position = UDim2.new(0, 0, 0.5, 0),
+                    Size = UDim2.new(0, 0, 0, 15),
+                    BackgroundTransparency = 1,
+                    BorderSizePixel = 0,
+                    AutomaticSize = Enum.AutomaticSize.X
+                })
+
+                Library:Create("UIListLayout", {
+                    Name = "\0",
+                    Parent = Items["TextHolder"].Instance,
+                    FillDirection = Enum.FillDirection.Horizontal,
+                    VerticalAlignment = Enum.VerticalAlignment.Center,
+                    SortOrder = Enum.SortOrder.LayoutOrder
+                })
+
+                -- Split the name at the first dot: "wrath.cc" -> "wrath" + ".cc"
+                local DotPos = string.find(PrefixText, "%.")
+                local BrandMain = DotPos and PrefixText:sub(1, DotPos - 1) or PrefixText
+                local BrandExt = DotPos and PrefixText:sub(DotPos) or ""
+
+                Items["Brand"] = Library:Create("TextLabel", {
+                    Name = "\0",
+                    FontFace = Library.Font,
+                    TextSize = Library.FontSize,
+                    Parent = Items["TextHolder"].Instance,
+                    LayoutOrder = 1,
+                    TextColor3 = Library.Theme["Text"],
+                    Text = BrandMain,
+                    BackgroundTransparency = 1,
+                    Size = UDim2.new(0, 0, 0, 15),
+                    BorderSizePixel = 0,
+                    AutomaticSize = Enum.AutomaticSize.X
+                }):AddToTheme({ TextColor3 = 'Text' })
+
+                Items["BrandExt"] = Library:Create("TextLabel", {
+                    Name = "\0",
+                    FontFace = Library.Font,
+                    TextSize = Library.FontSize,
+                    Parent = Items["TextHolder"].Instance,
+                    LayoutOrder = 2,
+                    TextColor3 = Library.Theme["Accent"],
+                    Text = BrandExt,
+                    BackgroundTransparency = 1,
+                    Size = UDim2.new(0, 0, 0, 15),
+                    BorderSizePixel = 0,
+                    AutomaticSize = Enum.AutomaticSize.X
+                }):AddToTheme({ TextColor3 = 'Accent' })
+
                 Items["Text"] = Library:Create("TextLabel", {
                     Name = "\0",
                     FontFace = Library.Font,
                     TextSize = Library.FontSize,
-                    Parent = Items["Watermark"].Instance,
-                    RichText = true,
+                    Parent = Items["TextHolder"].Instance,
+                    LayoutOrder = 3,
                     TextColor3 = Library.Theme["Text"],
-                    Text = PrefixText,
-                    AnchorPoint = Vector2.new(0, 0.5),
-                    Size = UDim2.new(0, 0, 0, 15),
+                    Text = "",
                     BackgroundTransparency = 1,
-                    Position = UDim2.new(0, 0, 0.5, 0),
+                    Size = UDim2.new(0, 0, 0, 15),
                     BorderSizePixel = 0,
                     AutomaticSize = Enum.AutomaticSize.X
                 }):AddToTheme({ TextColor3 = 'Text' })
@@ -2888,13 +2944,10 @@ do
                         DynamicTextTick = CurrentTick
                         DynamicText = tostring(DynamicTextProvider(WatermarkDisplayedFps) or "")
                     end
-                    local PlainText = DynamicTextProvider and DynamicText or (PrefixText .. WatermarkStatsText)
+                    -- Brand ("wrath.cc") lives in its own labels now; this
+                    -- label only shows the dynamic suffix (e.g. " | 737fps | time").
+                    local PlainText = DynamicTextProvider and DynamicText or WatermarkStatsText
 
-                    -- [wh] Solid text only. The original effect wrapped every
-                    -- character in its own <font color> tag for a shimmer, but
-                    -- that many tags renders as literal markup here. Show plain
-                    -- text (white via Theme["Text"]); the AccentGradient underline
-                    -- below still animates for flair.
                     Items["AccentGradient"].Instance.Offset = Vector2.new((WatermarkShimmerPhase * 2) - 1, 0)
                     Items["Text"].Instance.Text = PlainText
                 end
