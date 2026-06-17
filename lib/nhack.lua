@@ -1049,8 +1049,13 @@ do
         Library:SetBackgroundEffectsVisible(Library.WindowOpenState, true)
     end
 
-    Library.Round = function(Self, Number, Float)
-        local Multiplier = 1 / (Float or 1)
+    -- [wh fix] Treat the 2nd arg as DECIMAL PLACES (matches the "Decimals"
+    -- slider param). The original used `1 / (Float or 1)`, but in Lua `0` is
+    -- truthy, so the common/default `Decimals = 0` gave `1/0 = inf` and the
+    -- slider value rounded to NaN (broken fill bar + "nan" text). Using
+    -- 10^Decimals handles 0 correctly and rounds to N decimals as intended.
+    Library.Round = function(Self, Number, Decimals)
+        local Multiplier = 10 ^ (Decimals or 0)
         return math.floor(Number * Multiplier) / Multiplier
     end
 
