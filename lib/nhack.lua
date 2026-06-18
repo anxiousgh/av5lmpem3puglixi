@@ -2775,7 +2775,7 @@ do
                     BackgroundColor3 = Library.Theme["Background"]
                 }):AddToTheme({ BackgroundColor3 = 'Background' })
 
-                Items["Watermark"]:MakeDraggable()
+                -- [wh] not draggable: keep it fixed, centred at the top.
 
                 Library:Create("UIStroke", {
                     Name = "\0",
@@ -2980,7 +2980,10 @@ do
                 end
             end)
 
-            Watermark:Center()
+            -- [wh] No Center() -- it captured AbsolutePosition before the text
+            -- width was computed and anchored the LEFT edge at screen-centre,
+            -- pushing the watermark right. The frame's (0.5, 0) anchor already
+            -- keeps it truly centred horizontally, ~42px below the top.
 
             return Watermark
         end
@@ -3369,7 +3372,12 @@ do
                     Parent = Items["Background"].Instance,
                     BackgroundTransparency = 1,
                     Size = UDim2.new(1, 0, 1, 0),
-                    BorderSizePixel = 0
+                    BorderSizePixel = 0,
+                    -- [wh] light the viewport so the cloned character is visible
+                    -- (without this it renders pitch-black -> looks empty)
+                    Ambient = Color3.fromRGB(200, 200, 200),
+                    LightColor = Color3.fromRGB(255, 255, 255),
+                    LightDirection = Vector3.new(-0.2, -1, -0.3)
                 })
             end
 
@@ -3458,6 +3466,7 @@ do
                 Object.Archivable = IsArchivable
 
                 if Object:IsA("BasePart") then
+                    Clone.Anchored = true   -- [wh] viewport renders anchored parts reliably
                     RenderObjects[Object] = Clone
                 elseif Object:IsA("Accoutrement") then
                     if Object:FindFirstChild("Handle") and Clone:FindFirstChild("Handle") then
