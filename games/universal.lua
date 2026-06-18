@@ -205,7 +205,7 @@ end
 --  CAMLOCK  (camera lock to the nearest target inside the FOV)
 -- ============================================================
 local CamLock = {
-    enabled = false, fov = 120, smoothing = 0.5,
+    enabled = false, fov = 120, smoothing = 0.5, sticky = false,
     teamCheck = true, hitPart = "Head", visibleCheck = false, showFov = false,
 }
 do
@@ -213,24 +213,41 @@ do
         Thickness = 1, NumSides = 64, Filled = false, Visible = false,
         Transparency = 1, Color = Color3.fromRGB(200, 183, 247),
     })
+    local stickyTarget = nil   -- Player held while sticky is on
 
-    local function findTarget()
+    local function resolvePart(plr)
+        local char = aliveChar(plr); if not char then return nil end
+        return char:FindFirstChild(CamLock.hitPart) or char:FindFirstChild("HumanoidRootPart")
+    end
+
+    -- A held sticky target stays valid while alive + team-ok + (visible if
+    -- checked). Returns its part when still valid, otherwise nil.
+    local function stickyPart(plr)
+        if not plr or plr == LocalPlayer or not plr.Parent then return nil end
+        if not teamOk(plr, CamLock.teamCheck) then return nil end
+        local part = resolvePart(plr); if not part then return nil end
+        if CamLock.visibleCheck and not visibleTo(part) then return nil end
+        return part
+    end
+
+    -- Nearest valid target to the crosshair within the FOV radius.
+    local function findClosest()
         local cam = Workspace.CurrentCamera
         local mouse = UserInputService:GetMouseLocation()
-        local best, bestDist
+        local bestPlr, bestPart, bestDist
         for _, plr in ipairs(Players:GetPlayers()) do
             if plr == LocalPlayer then continue end
             if not teamOk(plr, CamLock.teamCheck) then continue end
-            local char = aliveChar(plr); if not char then continue end
-            local part = char:FindFirstChild(CamLock.hitPart) or char:FindFirstChild("HumanoidRootPart")
-            if not part then continue end
+            local part = resolvePart(plr); if not part then continue end
             if CamLock.visibleCheck and not visibleTo(part) then continue end
             local sp, on = cam:WorldToViewportPoint(part.Position)
             if not on then continue end
             local d = (mouse - Vector2.new(sp.X, sp.Y)).Magnitude
-            if d <= CamLock.fov and (not bestDist or d < bestDist) then best, bestDist = part, d end
+            if d <= CamLock.fov and (not bestDist or d < bestDist) then
+                bestPlr, bestPart, bestDist = plr, part, d
+            end
         end
-        return best
+        return bestPlr, bestPart
     end
 
     RunService.RenderStepped:Connect(function(dt)
@@ -241,9 +258,23 @@ do
                 fovCircle.Position = UserInputService:GetMouseLocation()
             end
         end
-        if not CamLock.enabled then return end
+        if not CamLock.enabled then stickyTarget = nil; return end
         if Library.WindowOpenState then return end   -- don't fight you while in the menu
-        local part = findTarget(); if not part then return end
+
+        local part
+        if CamLock.sticky then
+            -- keep the current target while valid; only re-acquire when it drops
+            part = stickyPart(stickyTarget)
+            if not part then
+                stickyTarget, part = findClosest()
+            end
+        else
+            stickyTarget = nil
+            local _, p = findClosest()
+            part = p
+        end
+        if not part then return end
+
         local cam = Workspace.CurrentCamera
         local alpha = math.clamp(1 - (CamLock.smoothing ^ (dt * 60)), 0, 1)
         cam.CFrame = cam.CFrame:Lerp(CFrame.new(cam.CFrame.Position, part.Position), alpha)
@@ -410,6 +441,8 @@ do
     })
 
     local Sec2 = AimSub:Section({ Name = "Checks", Side = 2 })
+    Sec2:Toggle({ Name = "Sticky target", Flag = "CamLockSticky", Default = false,
+        Callback = function(v) CamLock.sticky = v end })
     Sec2:Toggle({ Name = "Team check", Flag = "CamLockTeam", Default = true,
         Callback = function(v) CamLock.teamCheck = v end })
     Sec2:Toggle({ Name = "Visible check (walls)", Flag = "CamLockVisible", Default = false,
