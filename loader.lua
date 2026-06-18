@@ -222,6 +222,4 @@ Window:CreateSettingsPage()
 
 Library:Notification("wrath.cc Loaded", 3, Library.Theme["Accent"])
 
-Window:Init()
-
 print("[wh] loaded")
