@@ -335,8 +335,7 @@ local Esp = {
     tracer = false, tracerOrigin = "Bottom",   -- "Bottom" | "Top" | "Mouse"
     chams = false,
     chamsFill = Color3.fromRGB(200, 183, 247),
-    chamsOutline = Color3.fromRGB(255, 255, 255),
-    chamsTransparency = 0.6,
+    chamsOpacity = 0.4,               -- Drawing alpha (1 = solid)
     skeleton = false,
 }
 -- expose for the ESP Preview widget (it reads these to draw a live preview box)
@@ -360,6 +359,35 @@ do
 
     local function newLine() return mkDraw("Line", { Thickness = 1, Visible = false, Transparency = 1 }) end
 
+    -- DrawingChams: a filled square is drawn over each body part's screen rect
+    local CHAMS_PARTS = {
+        "Head", "UpperTorso", "LowerTorso",
+        "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand",
+        "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot",
+        "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg",
+    }
+    local CORNER_SIGNS = {
+        Vector3.new(1, 1, 1), Vector3.new(1, 1, -1), Vector3.new(1, -1, 1), Vector3.new(1, -1, -1),
+        Vector3.new(-1, 1, 1), Vector3.new(-1, 1, -1), Vector3.new(-1, -1, 1), Vector3.new(-1, -1, -1),
+    }
+    -- screen-space bounding rect (x, y, w, h) of a part's 8 corners
+    local function partRect(cam, part)
+        local cf, h = part.CFrame, part.Size * 0.5
+        local minX, minY, maxX, maxY, any = math.huge, math.huge, -math.huge, -math.huge, false
+        for _, s in ipairs(CORNER_SIGNS) do
+            local sp, on = cam:WorldToViewportPoint((cf * CFrame.new(s.X * h.X, s.Y * h.Y, s.Z * h.Z)).Position)
+            if on then
+                any = true
+                if sp.X < minX then minX = sp.X end
+                if sp.Y < minY then minY = sp.Y end
+                if sp.X > maxX then maxX = sp.X end
+                if sp.Y > maxY then maxY = sp.Y end
+            end
+        end
+        if not any then return nil end
+        return minX, minY, maxX - minX, maxY - minY
+    end
+
     local function add(plr)
         if plr == LocalPlayer or objs[plr] or not hasDrawing then return end
         objs[plr] = {
@@ -378,7 +406,7 @@ do
         end
         if o.corners then for _, d in ipairs(o.corners) do pcall(function() d:Remove() end) end end
         if o.skel then for _, d in ipairs(o.skel) do pcall(function() d:Remove() end) end end
-        if o.chams then pcall(function() o.chams:Destroy() end) end
+        if o.chams then for _, d in ipairs(o.chams) do pcall(function() d:Remove() end) end end
         objs[plr] = nil
     end
 
@@ -392,14 +420,13 @@ do
         local s = {}; for i = 1, #BONES do s[i] = newLine() end
         o.skel = s; return s
     end
-    local function ensureChams(o, char)
-        if o.chams and o.chams.Parent then return o.chams end
-        if o.chams then pcall(function() o.chams:Destroy() end) end
-        local h = Instance.new("Highlight")
-        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        h.Adornee = char
-        h.Parent = char
-        o.chams = h; return h
+    local function ensureChams(o)
+        if o.chams then return o.chams end
+        local sq = {}
+        for i = 1, #CHAMS_PARTS do
+            sq[i] = mkDraw("Square", { Filled = true, Thickness = 0, Visible = false, Transparency = 0.4, ZIndex = 0 })
+        end
+        o.chams = sq; return sq
     end
 
     for _, p in ipairs(Players:GetPlayers()) do add(p) end
@@ -422,22 +449,30 @@ do
             o.health.Visible = false; o.tracer.Visible = false
             if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
             if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
+            if o.chams then for _, d in ipairs(o.chams) do d.Visible = false end end
 
             local active = Esp.enabled and teamOk(plr, Esp.teamCheck)
             local char, hum = nil, nil
             if active then char, hum = aliveChar(plr) end
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
-            -- chams (3D highlight; works even off-screen)
+            -- chams: filled squares over each on-screen body part (Drawing-only)
             if active and char and Esp.chams then
-                local h = ensureChams(o, char)
-                h.Enabled = true
-                h.FillColor = Esp.chamsFill
-                h.OutlineColor = Esp.chamsOutline
-                h.FillTransparency = Esp.chamsTransparency
-                h.OutlineTransparency = 0
-            elseif o.chams then
-                o.chams.Enabled = false
+                local sq = ensureChams(o)
+                for i, pname in ipairs(CHAMS_PARTS) do
+                    local part = char:FindFirstChild(pname)
+                    local s = sq[i]
+                    if part and s and part:IsA("BasePart") then
+                        local rx, ry, rw, rh = partRect(cam, part)
+                        if rx and rw > 0 and rh > 0 then
+                            s.Color = Esp.chamsFill
+                            s.Transparency = Esp.chamsOpacity
+                            s.Position = Vector2.new(rx, ry)
+                            s.Size = Vector2.new(rw, rh)
+                            s.Visible = true
+                        end
+                    end
+                end
             end
 
             if active and hrp then
@@ -881,12 +916,9 @@ do
     Sec2:Label({ Name = "Chams fill" }):Colorpicker({
         Flag = "EspChamsFill", Default = Color3.fromRGB(200, 183, 247),
         Callback = function(c) Esp.chamsFill = c end })
-    Sec2:Label({ Name = "Chams outline" }):Colorpicker({
-        Flag = "EspChamsOutline", Default = Color3.fromRGB(255, 255, 255),
-        Callback = function(c) Esp.chamsOutline = c end })
-    Sec2:Slider({ Name = "Chams fill opacity", Flag = "EspChamsOp",
+    Sec2:Slider({ Name = "Chams opacity", Flag = "EspChamsOp",
         Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
-        Callback = function(v) Esp.chamsTransparency = 1 - (v / 100) end })
+        Callback = function(v) Esp.chamsOpacity = v / 100 end })
 end
 
 -- ============================================================
