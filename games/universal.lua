@@ -493,14 +493,14 @@ do
                 -- tracer: drawn for EVERY target in front of the camera, including
                 -- ones off-screen / not in view (the line just runs off the screen
                 -- edge toward them). center.Z > 0 == in front; behind-camera points
-                -- project inverted, so we skip those. Slightly sub-1px so it matches
-                -- the thin Drawing box outline instead of looking fatter.
+                -- project inverted, so we skip those. 1px is the GUI floor (sub-1px
+                -- frames render nothing), so this is as thin as a GUI line goes.
                 if Esp.tracer and center.Z > 0 then
                     local origin
                     if Esp.tracerOrigin == "Top" then origin = Vector2.new(vp.X / 2, 0)
                     elseif Esp.tracerOrigin == "Mouse" then origin = mouse
                     else origin = Vector2.new(vp.X / 2, vp.Y) end
-                    setLine(o.tracer, origin, Vector2.new(center.X, y + height), Esp.color, 0.5)
+                    setLine(o.tracer, origin, Vector2.new(center.X, y + height), Esp.color, 1)
                 end
 
                 if on then
