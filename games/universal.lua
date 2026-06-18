@@ -504,16 +504,18 @@ do
                             c[i].From = Vector2.new(p[1], p[2]); c[i].To = Vector2.new(p[3], p[4])
                             c[i].Visible = true
                         end
-                    elseif Esp.boxType == "Fill" then
-                        -- filled convex-hull silhouette (works on any rig)
+                    elseif Esp.boxType == "Filled" then
+                        -- filled convex-hull silhouette (works on any rig). Use
+                        -- depth (Z > 0 = in front of camera) instead of in-viewport
+                        -- so edge corners don't flip in/out and flicker the hull.
                         local pts = {}
                         for _, part in ipairs(char:GetDescendants()) do
                             if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" and part.Transparency < 1 then
                                 local cf, hsz = part.CFrame, part.Size * 0.5
                                 for _, s in ipairs(CORNER_SIGNS) do
-                                    local sp, sOn = cam:WorldToViewportPoint(
+                                    local sp = cam:WorldToViewportPoint(
                                         (cf * CFrame.new(s.X * hsz.X, s.Y * hsz.Y, s.Z * hsz.Z)).Position)
-                                    if sOn then pts[#pts + 1] = Vector2.new(sp.X, sp.Y) end
+                                    if sp.Z > 0 then pts[#pts + 1] = Vector2.new(sp.X, sp.Y) end
                                 end
                             end
                         end
@@ -917,8 +919,8 @@ do
         Callback = function(v) Esp.enabled = v end })
     Sec:Toggle({ Name = "Box", Flag = "EspBox", Default = true,
         Callback = function(v) Esp.box = v end })
-    Sec:Dropdown({ Name = "Box type", Flag = "EspBoxType", Default = "Full", Multi = false,
-        Items = { "Full", "Corner", "Fill" },
+    Sec:Dropdown({ Name = "Box style", Flag = "EspBoxType", Default = "Full", Multi = false,
+        Items = { "Full", "Corner", "Filled" },
         Callback = function(v) Esp.boxType = (type(v) == "table" and v[1]) or v or "Full" end })
     Sec:Toggle({ Name = "Names", Flag = "EspNames", Default = false,
         Callback = function(v) Esp.names = v end })
@@ -942,7 +944,7 @@ do
     Sec2:Label({ Name = "ESP color" }):Colorpicker({
         Flag = "EspColor", Default = Color3.fromRGB(200, 183, 247),
         Callback = function(c) Esp.color = c end })
-    Sec2:Slider({ Name = "Fill opacity", Flag = "EspFillOp",
+    Sec2:Slider({ Name = "Filled box opacity", Flag = "EspFillOp",
         Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
         Callback = function(v) Esp.fillOpacity = v / 100 end })
     Sec2:Label({ Name = "Chams fill" }):Colorpicker({

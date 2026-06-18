@@ -3381,11 +3381,14 @@ do
                 })
             end
 
-            -- [wh] ESP overlay: previews box/name/distance/health using the live
-            -- ESP settings (getgenv().WH.espPreview). The character is framed
-            -- consistently, so a calibrated box around it reads well.
+            -- [wh] ESP preview overlay: mirrors the live ESP settings
+            -- (getgenv().WH.espPreview) -- box style (Full/Corner/Filled), name,
+            -- distance, health and tracer. (Chams and skeleton aren't previewed:
+            -- Highlights don't render in a ViewportFrame and skeleton needs live
+            -- limb positions.)
             local OverlayBox = Library:Create("Frame", {
                 Name = "\0", Parent = Items["Background"].Instance, ZIndex = 5,
+                BackgroundColor3 = Color3.fromRGB(200, 183, 247),
                 BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
                 AnchorPoint = Vector2.new(0.5, 0),
                 Position = UDim2.new(0.5, 0, 0.34, 0), Size = UDim2.new(0.24, 0, 0.42, 0),
@@ -3394,6 +3397,28 @@ do
                 Name = "\0", Parent = OverlayBox.Instance, Thickness = 1,
                 Color = Color3.fromRGB(200, 183, 247),
             })
+            -- corner brackets (shown for the "Corner" style)
+            local Corners = {}
+            do
+                local specs = {
+                    { Vector2.new(0, 0), UDim2.new(0, 0, 0, 0), UDim2.new(0.3, 0, 0, 1) },
+                    { Vector2.new(0, 0), UDim2.new(0, 0, 0, 0), UDim2.new(0, 1, 0.3, 0) },
+                    { Vector2.new(1, 0), UDim2.new(1, 0, 0, 0), UDim2.new(0.3, 0, 0, 1) },
+                    { Vector2.new(1, 0), UDim2.new(1, 0, 0, 0), UDim2.new(0, 1, 0.3, 0) },
+                    { Vector2.new(0, 1), UDim2.new(0, 0, 1, 0), UDim2.new(0.3, 0, 0, 1) },
+                    { Vector2.new(0, 1), UDim2.new(0, 0, 1, 0), UDim2.new(0, 1, 0.3, 0) },
+                    { Vector2.new(1, 1), UDim2.new(1, 0, 1, 0), UDim2.new(0.3, 0, 0, 1) },
+                    { Vector2.new(1, 1), UDim2.new(1, 0, 1, 0), UDim2.new(0, 1, 0.3, 0) },
+                }
+                for i, sp in ipairs(specs) do
+                    Corners[i] = Library:Create("Frame", {
+                        Name = "\0", Parent = OverlayBox.Instance, ZIndex = 6,
+                        BorderSizePixel = 0, Visible = false,
+                        BackgroundColor3 = Color3.fromRGB(200, 183, 247),
+                        AnchorPoint = sp[1], Position = sp[2], Size = sp[3],
+                    })
+                end
+            end
             local OverlayName = Library:Create("TextLabel", {
                 Name = "\0", Parent = Items["Background"].Instance, ZIndex = 5,
                 FontFace = Library.Font, TextSize = Library.FontSize, Visible = false,
@@ -3415,16 +3440,37 @@ do
                 AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(0.38, -2, 0.34, 0),
                 Size = UDim2.new(0, 2, 0.42, 0),
             })
+            -- tracer (vertical line from the preview bottom up to the box bottom)
+            local OverlayTracer = Library:Create("Frame", {
+                Name = "\0", Parent = Items["Background"].Instance, ZIndex = 4,
+                BorderSizePixel = 0, Visible = false,
+                BackgroundColor3 = Color3.fromRGB(200, 183, 247),
+                AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, 0),
+                Size = UDim2.new(0, 1, 0.24, 0),
+            })
 
             Library:Connect(RunService.RenderStepped, function()
                 local s = getgenv and getgenv().WH and getgenv().WH.espPreview
                 local on = (s and s.enabled and Items["ESPPreview"].Instance.Visible) and true or false
-                OverlayBox.Instance.Visible = on
                 local col = (s and s.color) or Color3.fromRGB(200, 183, 247)
+                local style = (s and s.boxType) or "Full"
+                local showBox = on and (not s or s.box ~= false)
+
+                OverlayBox.Instance.Visible = showBox
+                OverlayBox.Instance.BackgroundColor3 = col
+                OverlayBox.Instance.BackgroundTransparency = (style == "Filled") and (1 - ((s and s.fillOpacity) or 0.4)) or 1
                 OverlayStroke.Instance.Color = col
+                OverlayStroke.Instance.Enabled = showBox and style ~= "Corner"
+                for _, c in ipairs(Corners) do
+                    c.Instance.Visible = showBox and style == "Corner"
+                    c.Instance.BackgroundColor3 = col
+                end
+
                 OverlayName.Instance.Visible = on and (s.names and true or false)
                 OverlayDist.Instance.Visible = on and (s.distance and true or false)
                 OverlayHealth.Instance.Visible = on and (s.health and true or false)
+                OverlayTracer.Instance.Visible = on and (s.tracer and true or false)
+                OverlayTracer.Instance.BackgroundColor3 = col
                 if on then
                     OverlayName.Instance.TextColor3 = col
                     OverlayName.Instance.Text = LocalPlayer.Name
