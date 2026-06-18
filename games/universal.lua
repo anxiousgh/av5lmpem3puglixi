@@ -482,6 +482,121 @@ do
 end
 
 -- ============================================================
+--  DESYNC  (server sees a fake position; you stay put locally)
+--   void / spin / velocity / custom -> spoof the HRP on Heartbeat (this is
+--     what replicates), then restore your real CFrame each RenderStep so YOU
+--     still see yourself correctly.
+--   freeze -> RakNet: block the outbound physics packet (0x1B) so the server
+--     stops getting position updates. Needs an executor with a `raknet` API.
+-- ============================================================
+local Desync = {
+    enabled = false, method = "Void",
+    voidMin = 5000, voidMax = 20000,
+    spinSpeed = 2, velMag = 16384,
+    customX = 0, customY = 0, customZ = 0,
+}
+do
+    local RESTORE = "WH_DesyncRestore"
+    local realCF, realLV, realAV
+    local spinAngle = 0
+
+    -- raknet state lives on getgenv so the hook closure survives reloads
+    getgenv()._WH_DESYNC = getgenv()._WH_DESYNC or {}
+    local SHARED = getgenv()._WH_DESYNC
+
+    local function randVoid()
+        local function axis()
+            local mag = Desync.voidMin + math.random() * math.max(Desync.voidMax - Desync.voidMin, 0)
+            return (math.random() < 0.5) and -mag or mag
+        end
+        return Vector3.new(axis(), axis(), axis())
+    end
+
+    local function applySpoof(hrp)
+        local m = Desync.method
+        if m == "Void" then
+            hrp.CFrame = CFrame.new(randVoid())
+        elseif m == "Spin" then
+            spinAngle = (spinAngle + Desync.spinSpeed) % 360
+            hrp.CFrame = hrp.CFrame * CFrame.Angles(
+                math.rad(spinAngle), math.rad(spinAngle * 2), math.rad(spinAngle * 0.5))
+        elseif m == "Velocity" then
+            hrp.AssemblyLinearVelocity = Vector3.one * Desync.velMag
+        elseif m == "Custom" then
+            local rot = hrp.CFrame - hrp.CFrame.Position
+            hrp.CFrame = CFrame.new(Desync.customX, Desync.customY, Desync.customZ) * rot
+        end
+    end
+
+    -- ---- RakNet freeze ----
+    local function findRaknet()
+        local r = rawget(getgenv(), "raknet")
+        if r then return r end
+        local ok, v = pcall(function() return raknet end)
+        if ok then return v end
+        return nil
+    end
+    local function ensureRaknetHook()
+        if SHARED.hookInstalled then return true end
+        local r = findRaknet()
+        if not r or not r.add_send_hook then return false end
+        SHARED.hookFn = function(packet)
+            if not SHARED.freeze then return end
+            if packet.PacketId == 0x1B then     -- outbound physics replication
+                pcall(function() packet:SetCanBeSent(false) end)
+                pcall(function() packet:Drop() end)
+                return false
+            end
+        end
+        local ok = pcall(function() r.add_send_hook(SHARED.hookFn) end)
+        if ok then SHARED.hookInstalled = true end
+        return ok
+    end
+
+    -- ---- heartbeat spoof + renderstep restore (non-freeze methods) ----
+    track(RunService.Heartbeat:Connect(function()
+        if not Desync.enabled or Desync.method == "Freeze" then return end
+        local hrp = getHRP(); if not hrp then return end
+        realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
+        pcall(applySpoof, hrp)
+    end))
+
+    RunService:BindToRenderStep(RESTORE, Enum.RenderPriority.First.Value, function()
+        if not Desync.enabled or Desync.method == "Freeze" then return end
+        local hrp = getHRP(); if not hrp or not realCF then return end
+        pcall(function()
+            if Desync.method ~= "Velocity" then hrp.CFrame = realCF end
+            if realLV then hrp.AssemblyLinearVelocity = realLV end
+            if realAV then hrp.AssemblyAngularVelocity = realAV end
+        end)
+    end)
+
+    local function applyFreezeState()
+        local on = Desync.enabled and Desync.method == "Freeze"
+        SHARED.freeze = on
+        if on and not ensureRaknetHook() then
+            SHARED.freeze = false
+            Desync.enabled = false
+            Library:Notification("RakNet not available in this executor", 3, Library.Theme["Risky"])
+        end
+    end
+
+    function Desync.setEnabled(on)
+        Desync.enabled = on and true or false
+        applyFreezeState()
+    end
+    function Desync.setMethod(m)
+        Desync.method = m
+        applyFreezeState()   -- re-evaluate freeze when switching methods
+    end
+    function Desync.stop()
+        Desync.enabled = false
+        SHARED.freeze = false
+        pcall(function() RunService:UnbindFromRenderStep(RESTORE) end)
+    end
+end
+
+-- ============================================================
 --  PLAYER  (working universal movement)
 -- ============================================================
 local PlayerPage = Window:Page({ Name = "Player" })
@@ -518,6 +633,65 @@ FlySec:Label({ Name = "Fly toggle key" }):Keybind({
 local UtilSec = Move:Section({ Name = "Utility", Side = 2 })
 UtilSec:Toggle({ Name = "Noclip", Flag = "NoclipEnabled", Default = false,
     Callback = function(v) Movement.setNoclip(v) end })
+
+-- ---- Player > Desync subpage ----
+local DesyncSub = PlayerPage:SubPage({ Name = "Desync" })
+do
+    local Sec = DesyncSub:Section({ Name = "Desync", Side = 1 })
+    local showFor   -- forward-declared; defined after the controls exist
+
+    Sec:Toggle({ Name = "Enabled", Flag = "DesyncEnabled", Default = false,
+        Callback = function(v) Desync.setEnabled(v) end })
+
+    Sec:Dropdown({
+        Name = "Method", Flag = "DesyncMethod", Default = "Void", Multi = false,
+        Items = { "Void", "Spin", "Velocity", "Freeze", "Custom" },
+        Callback = function(v)
+            local m = (type(v) == "table" and v[1]) or v or "Void"
+            Desync.setMethod(m)
+            if showFor then showFor(m) end
+        end,
+    })
+
+    -- All controls are created up front; the dropdown shows only the chosen
+    -- method's controls (the rest are hidden).
+    local voidMin = Sec:Slider({ Name = "Void min", Flag = "DesyncVoidMin",
+        Min = 500, Max = 1000000, Default = 5000, Decimals = 0, Suffix = " studs",
+        Callback = function(v) Desync.voidMin = v end })
+    local voidMax = Sec:Slider({ Name = "Void max", Flag = "DesyncVoidMax",
+        Min = 500, Max = 1000000, Default = 20000, Decimals = 0, Suffix = " studs",
+        Callback = function(v) Desync.voidMax = v end })
+    local spin = Sec:Slider({ Name = "Spin speed", Flag = "DesyncSpin",
+        Min = 1, Max = 90, Default = 2, Decimals = 0,
+        Callback = function(v) Desync.spinSpeed = v end })
+    local vel = Sec:Slider({ Name = "Velocity magnitude", Flag = "DesyncVel",
+        Min = 50, Max = 16384, Default = 16384, Decimals = 0,
+        Callback = function(v) Desync.velMag = v end })
+    local freezeNote = Sec:Label({ Name = "Freeze uses RakNet (executor-dependent)." })
+    local cx = Sec:Textbox({ Name = "Custom X", Flag = "DesyncX", Default = "0",
+        Numeric = true, Placeholder = "X", Callback = function(v) Desync.customX = tonumber(v) or 0 end })
+    local cy = Sec:Textbox({ Name = "Custom Y", Flag = "DesyncY", Default = "0",
+        Numeric = true, Placeholder = "Y", Callback = function(v) Desync.customY = tonumber(v) or 0 end })
+    local cz = Sec:Textbox({ Name = "Custom Z", Flag = "DesyncZ", Default = "0",
+        Numeric = true, Placeholder = "Z", Callback = function(v) Desync.customZ = tonumber(v) or 0 end })
+
+    local CONTROLS = {
+        Void     = { voidMin, voidMax },
+        Spin     = { spin },
+        Velocity = { vel },
+        Freeze   = { freezeNote },
+        Custom   = { cx, cy, cz },
+    }
+    function showFor(method)
+        for name, list in pairs(CONTROLS) do
+            for _, el in ipairs(list) do
+                pcall(function() el:SetVisibility(name == method) end)
+            end
+        end
+    end
+
+    showFor("Void")   -- initial visibility matches the default method
+end
 
 -- ============================================================
 --  VISUALS  (ESP)
@@ -686,6 +860,7 @@ local function disableAll()
     CamLock.enabled = false
     Trig.enabled = false
     Esp.enabled, Esp.names, Esp.distance, Esp.health = false, false, false, false
+    pcall(function() if Desync.stop then Desync.stop() end end)
     -- player actions
     pcall(function() if PlayerActions.stopFollow then PlayerActions.stopFollow() end end)
     pcall(function() if PlayerActions.stopView then PlayerActions.stopView() end end)
