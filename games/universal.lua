@@ -500,3 +500,115 @@ do
         Flag = "EspColor", Default = Color3.fromRGB(200, 183, 247),
         Callback = function(c) Esp.color = c end })
 end
+
+-- ============================================================
+--  PLAYER TARGET ACTIONS  (operate on the player selected in the
+--  floating Players widget): Goto / Fling / View / Follow.
+-- ============================================================
+local PlayerActions = {}
+
+function PlayerActions.gotoPlayer(plr)
+    local tc = plr.Character; local th = tc and tc:FindFirstChild("HumanoidRootPart")
+    local h = getHRP()
+    if th and h then h.CFrame = th.CFrame * CFrame.new(0, 0, 3) end
+end
+
+-- velocity-glue touch fling: snap behind the target with huge velocity for ~1.5s
+function PlayerActions.fling(plr)
+    task.spawn(function()
+        local conn
+        conn = RunService.Heartbeat:Connect(function()
+            local h = getHRP()
+            local tc = plr.Character; local th = tc and tc:FindFirstChild("HumanoidRootPart")
+            if not h or not th then return end
+            h.CFrame = th.CFrame * CFrame.new(0, 0, 1)
+            h.AssemblyLinearVelocity = Vector3.one * 9e4
+        end)
+        local deadline = tick() + 1.5
+        while tick() < deadline do
+            if not plr.Character or not getChar() then break end
+            task.wait()
+        end
+        if conn then conn:Disconnect() end
+        local h = getHRP()
+        if h then h.AssemblyLinearVelocity = Vector3.zero; h.AssemblyAngularVelocity = Vector3.zero end
+    end)
+end
+
+do  -- View (spectate) -- toggles on the same target
+    local viewing, prevSubject, charConn = nil, nil, nil
+    function PlayerActions.view(plr)
+        local cam = Workspace.CurrentCamera
+        if charConn then charConn:Disconnect(); charConn = nil end
+        if viewing == plr then
+            cam.CameraSubject = getHum() or prevSubject
+            viewing = nil
+            return
+        end
+        if not viewing then prevSubject = cam.CameraSubject end
+        viewing = plr
+        local function apply()
+            local tc = plr.Character; local hum = tc and tc:FindFirstChildOfClass("Humanoid")
+            if hum then cam.CameraSubject = hum end
+        end
+        apply()
+        charConn = plr.CharacterAdded:Connect(function()
+            task.wait(0.2); if viewing == plr then apply() end
+        end)
+    end
+end
+
+do  -- Follow (pathfinding) -- toggles on the same target
+    local PathfindingService = game:GetService("PathfindingService")
+    local target, path = nil, nil
+    function PlayerActions.follow(plr)
+        if target == plr then target = nil; return end
+        target = plr
+        path = PathfindingService:CreatePath({
+            AgentRadius = 2, AgentHeight = 5, AgentCanJump = true,
+            AgentJumpHeight = 7.2, AgentMaxSlope = 45,
+        })
+        task.spawn(function()
+            local t = plr
+            while target == t do
+                local hum, hrp = getHum(), getHRP()
+                local tc = t.Character; local thrp = tc and tc:FindFirstChild("HumanoidRootPart")
+                if not (hum and hrp and thrp) then task.wait(0.2); continue end
+                if (hrp.Position - thrp.Position).Magnitude < 8 then
+                    pcall(function() hum:MoveTo(thrp.Position) end); task.wait(0.1); continue
+                end
+                local ok = pcall(function() path:ComputeAsync(hrp.Position, thrp.Position) end)
+                if ok and path.Status == Enum.PathStatus.Success then
+                    local wp = path:GetWaypoints()[2]
+                    if wp then
+                        if wp.Action == Enum.PathWaypointAction.Jump then pcall(function() hum.Jump = true end) end
+                        pcall(function() hum:MoveTo(wp.Position) end)
+                    end
+                    task.wait(0.1)
+                else
+                    pcall(function() hum:MoveTo(thrp.Position) end); task.wait(0.1)
+                end
+            end
+        end)
+    end
+end
+
+-- wire the buttons onto the floating Players widget
+do
+    local PL = ctx.Playerlist
+    if PL and PL.AddAction then
+        local function needTarget(fn)
+            return function(plr)
+                if not plr then
+                    Library:Notification("Select a player first", 2, Library.Theme["Accent"])
+                    return
+                end
+                fn(plr)
+            end
+        end
+        PL:AddAction("Goto",   needTarget(PlayerActions.gotoPlayer))
+        PL:AddAction("Fling",  needTarget(PlayerActions.fling))
+        PL:AddAction("View",   needTarget(PlayerActions.view))
+        PL:AddAction("Follow", needTarget(PlayerActions.follow))
+    end
+end

@@ -6996,7 +6996,7 @@ do
                     Name = "\0",
                     Parent = Items["Playerlist"].Instance,
                     Position = UDim2.new(0, 10, 0, 30),
-                    Size = UDim2.new(1, -20, 1, -90),
+                    Size = UDim2.new(1, -20, 1, -120),   -- [wh] shrink to fit the action-button row
                     BorderSizePixel = 0,
                     BackgroundColor3 = Library.Theme["Section"]
                 }):AddToTheme({ BackgroundColor3 = 'Section' })
@@ -7093,7 +7093,65 @@ do
                     AutomaticSize = Enum.AutomaticSize.X
                 }):AddToTheme({ TextColor3 = 'Accent' })
 
+                -- [wh] action-button row (Goto / Fling / View / Follow) sits just
+                -- above the Status dropdown; buttons are added via :AddAction.
+                Items["Actions"] = Library:Create("Frame", {
+                    Name = "\0",
+                    Parent = Items["Playerlist"].Instance,
+                    AnchorPoint = Vector2.new(0, 1),
+                    Position = UDim2.new(0, 10, 1, -52),
+                    Size = UDim2.new(1, -20, 0, 22),
+                    BackgroundTransparency = 1,
+                    BorderSizePixel = 0
+                })
+
+                Library:Create("UIListLayout", {
+                    Name = "\0",
+                    Parent = Items["Actions"].Instance,
+                    FillDirection = Enum.FillDirection.Horizontal,
+                    HorizontalFlex = Enum.UIFlexAlignment.Fill,
+                    Padding = UDim.new(0, 4),
+                    SortOrder = Enum.SortOrder.LayoutOrder
+                })
+
                 Playerlist.Items = Items
+            end
+
+            -- Add a button to the action row. Callback receives the currently
+            -- selected Player (or nil if nothing is selected).
+            function Playerlist:AddAction(Name, Callback)
+                local Btn = Library:Create("TextButton", {
+                    Name = "\0",
+                    FontFace = Library.Font,
+                    TextSize = Library.FontSize,
+                    Parent = Items["Actions"].Instance,
+                    AutoButtonColor = false,
+                    Text = Name,
+                    TextColor3 = Library.Theme["Text"],
+                    Size = UDim2.new(0, 0, 1, 0),
+                    BorderSizePixel = 0,
+                    BackgroundColor3 = Library.Theme["Section"]
+                }):AddToTheme({ BackgroundColor3 = 'Section', TextColor3 = 'Text' })
+
+                Library:Create("UIStroke", {
+                    Name = "\0",
+                    Parent = Btn.Instance,
+                    ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+                    LineJoinMode = Enum.LineJoinMode.Miter,
+                    Color = Library.Theme["Outline"]
+                }):AddToTheme({ Color = 'Outline' })
+
+                Btn:OnHover(function()
+                    Btn:Tween({ BackgroundColor3 = Library.Theme["Hovered Element"] })
+                end, function()
+                    Btn:Tween({ BackgroundColor3 = Library.Theme["Section"] })
+                end)
+
+                Btn:Connect("MouseButton1Down", function()
+                    Library:SafeCall(Callback, Playerlist.Selected and Playerlist.Selected.Player or nil)
+                end)
+
+                return Btn
             end
 
             function Playerlist:Add(Player)

@@ -175,6 +175,7 @@ local ctx = {
     Window      = Window,
     Watermark   = Watermark,
     KeybindList = KeybindList,
+    Playerlist  = Playerlist,
     fetch       = fetch,
     load        = load,
     base        = BASE,
