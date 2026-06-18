@@ -432,6 +432,7 @@ do
         Callback = function(v) CamLock.enabled = v end,
     })
     Sec:Label({ Name = "Toggle key" }):Keybind({
+        Name = "Aimlock",
         Flag = "CamLockKey", Mode = "Toggle", Default = Enum.KeyCode.E,
         Callback = function(state) Enabled:Set(state and true or false) end,
     })
@@ -468,6 +469,7 @@ do
         Callback = function(v) Trig.enabled = v end,
     })
     Sec:Label({ Name = "Toggle key" }):Keybind({
+        Name = "Triggerbot",
         Flag = "TrigKey", Mode = "Toggle", Default = Enum.KeyCode.G,
         Callback = function(state) Enabled:Set(state and true or false) end,
     })
@@ -509,6 +511,7 @@ local FlyToggle = FlySec:Toggle({ Name = "Fly", Flag = "FlyEnabled", Default = f
 FlySec:Slider({ Name = "Fly speed", Flag = "FlyValue", Min = 10, Max = 300, Default = 60, Decimals = 0,
     Callback = function(v) Movement.setFlyValue(v) end })
 FlySec:Label({ Name = "Fly toggle key" }):Keybind({
+    Name = "Fly",
     Flag = "FlyKey", Mode = "Toggle", Default = Enum.KeyCode.F,
     Callback = function(state) FlyToggle:Set(state and true or false) end })
 
