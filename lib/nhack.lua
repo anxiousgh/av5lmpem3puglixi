@@ -3382,7 +3382,7 @@ do
             end
 
             -- [wh] ESP preview overlay: mirrors the live ESP settings
-            -- (getgenv().WH.espPreview) -- box style (Full/Corner/Filled), name,
+            -- (getgenv().WH.espPreview) -- box style (Full/Corner/Silhouette), name,
             -- distance, health and tracer. (Chams and skeleton aren't previewed:
             -- Highlights don't render in a ViewportFrame and skeleton needs live
             -- limb positions.)
@@ -3458,7 +3458,7 @@ do
 
                 OverlayBox.Instance.Visible = showBox
                 OverlayBox.Instance.BackgroundColor3 = col
-                OverlayBox.Instance.BackgroundTransparency = (style == "Filled") and (1 - ((s and s.fillOpacity) or 0.4)) or 1
+                OverlayBox.Instance.BackgroundTransparency = (style == "Silhouette") and (1 - ((s and s.fillOpacity) or 0.4)) or 1
                 OverlayStroke.Instance.Color = col
                 OverlayStroke.Instance.Enabled = showBox and style ~= "Corner"
                 for _, c in ipairs(Corners) do
