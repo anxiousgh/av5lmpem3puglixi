@@ -457,7 +457,7 @@ do
             -- chams: fill the character's convex-hull silhouette (Drawing-only)
             if active and char and Esp.chams then
                 local pts = {}
-                for _, part in ipairs(char:GetChildren()) do
+                for _, part in ipairs(char:GetDescendants()) do
                     if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" and part.Transparency < 1 then
                         local cf, hsz = part.CFrame, part.Size * 0.5
                         for _, s in ipairs(CORNER_SIGNS) do
