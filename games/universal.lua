@@ -554,30 +554,32 @@ do
         return ok
     end
 
-    -- ---- heartbeat spoof + renderstep restore (non-freeze methods) ----
+    -- ---- non-freeze methods (void/spin/velocity/custom) ----
+    -- Spoof the HRP on Heartbeat, then HOLD that spoofed state through one
+    -- RenderStep (RenderStepped:Wait) before restoring. The spoof -- including a
+    -- high velocity that keeps the physics assembly "awake" -- is therefore what
+    -- actually replicates to the server, so the SERVER position keeps updating
+    -- even while you stand still (not only while walking). Restored each cycle so
+    -- you never actually move locally.
     track(RunService.Heartbeat:Connect(function()
         if not Desync.enabled or Desync.method == "Freeze" then return end
         local hrp = getHRP(); if not hrp then return end
-        realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
+        local cf, lv, av = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
+        realCF, realLV, realAV = cf, lv, av
         pcall(applySpoof, hrp)
-        -- Force continuous replication even while standing still: a non-zero
-        -- velocity keeps the physics assembly "awake", so Roblox keeps streaming
-        -- the spoofed position to the server. Without it the server only updates
-        -- while you walk. Velocity mode sets its own; restored each RenderStep.
         if Desync.method ~= "Velocity" then
             pcall(function() hrp.AssemblyLinearVelocity = Vector3.one * 16384 end)
         end
+        RunService.RenderStepped:Wait()
+        local h = getHRP()
+        if h then
+            pcall(function()
+                h.CFrame = cf
+                h.AssemblyLinearVelocity = lv
+                h.AssemblyAngularVelocity = av
+            end)
+        end
     end))
-
-    RunService:BindToRenderStep(RESTORE, Enum.RenderPriority.First.Value, function()
-        if not Desync.enabled or Desync.method == "Freeze" then return end
-        local hrp = getHRP(); if not hrp or not realCF then return end
-        pcall(function()
-            if Desync.method ~= "Velocity" then hrp.CFrame = realCF end
-            if realLV then hrp.AssemblyLinearVelocity = realLV end
-            if realAV then hrp.AssemblyAngularVelocity = realAV end
-        end)
-    end)
 
     local function removeRaknetHook()
         if SHARED.hookInstalled and SHARED.hookFn then
