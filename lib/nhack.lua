@@ -3381,6 +3381,57 @@ do
                 })
             end
 
+            -- [wh] ESP overlay: previews box/name/distance/health using the live
+            -- ESP settings (getgenv().WH.espPreview). The character is framed
+            -- consistently, so a calibrated box around it reads well.
+            local OverlayBox = Library:Create("Frame", {
+                Name = "\0", Parent = Items["Background"].Instance, ZIndex = 5,
+                BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
+                AnchorPoint = Vector2.new(0.5, 0),
+                Position = UDim2.new(0.5, 0, 0.34, 0), Size = UDim2.new(0.24, 0, 0.42, 0),
+            })
+            local OverlayStroke = Library:Create("UIStroke", {
+                Name = "\0", Parent = OverlayBox.Instance, Thickness = 1,
+                Color = Color3.fromRGB(200, 183, 247),
+            })
+            local OverlayName = Library:Create("TextLabel", {
+                Name = "\0", Parent = Items["Background"].Instance, ZIndex = 5,
+                FontFace = Library.Font, TextSize = Library.FontSize, Visible = false,
+                BackgroundTransparency = 1, AutomaticSize = Enum.AutomaticSize.X,
+                AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 0.335, 0),
+                Size = UDim2.new(0, 0, 0, 12), Text = "Player",
+            })
+            local OverlayDist = Library:Create("TextLabel", {
+                Name = "\0", Parent = Items["Background"].Instance, ZIndex = 5,
+                FontFace = Library.Font, TextSize = Library.FontSize, Visible = false,
+                BackgroundTransparency = 1, AutomaticSize = Enum.AutomaticSize.X,
+                AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.77, 0),
+                Size = UDim2.new(0, 0, 0, 12), Text = "12m",
+            })
+            local OverlayHealth = Library:Create("Frame", {
+                Name = "\0", Parent = Items["Background"].Instance, ZIndex = 5,
+                BorderSizePixel = 0, Visible = false,
+                BackgroundColor3 = Color3.fromRGB(80, 255, 80),
+                AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(0.38, -2, 0.34, 0),
+                Size = UDim2.new(0, 2, 0.42, 0),
+            })
+
+            Library:Connect(RunService.RenderStepped, function()
+                local s = getgenv and getgenv().WH and getgenv().WH.espPreview
+                local on = (s and s.enabled and Items["ESPPreview"].Instance.Visible) and true or false
+                OverlayBox.Instance.Visible = on
+                local col = (s and s.color) or Color3.fromRGB(200, 183, 247)
+                OverlayStroke.Instance.Color = col
+                OverlayName.Instance.Visible = on and (s.names and true or false)
+                OverlayDist.Instance.Visible = on and (s.distance and true or false)
+                OverlayHealth.Instance.Visible = on and (s.health and true or false)
+                if on then
+                    OverlayName.Instance.TextColor3 = col
+                    OverlayName.Instance.Text = LocalPlayer.Name
+                    OverlayDist.Instance.TextColor3 = col
+                end
+            end)
+
             AlignPreviewToWindow(Items["ESPPreview"].Instance)
 
             local IsVisible = true

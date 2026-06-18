@@ -332,6 +332,11 @@ local Esp = {
     enabled = false, names = false, distance = false, health = false,
     teamCheck = false, color = Color3.fromRGB(200, 183, 247),
 }
+-- expose for the ESP Preview widget (it reads these to draw a live preview box)
+if getgenv then
+    local g = getgenv()
+    if g.WH then g.WH.espPreview = Esp end
+end
 do
     local objs = {}   -- plr -> { box, name, dist, health }
 
