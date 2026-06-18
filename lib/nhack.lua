@@ -9097,11 +9097,14 @@ do
                     }
                 })
 
+                -- [wh] Value sits at the top-RIGHT of the row (beside the name)
+                -- instead of riding the fill bar -- otherwise a small fill (e.g.
+                -- 5000 of 1,000,000) pushed the text far left and it clipped out.
                 Items["Value"] = Library:Create("TextLabel", {
                     Name = "\0",
                     FontFace = Library.Font,
                     TextSize = Library.FontSize,
-                    Parent = Items["Accent"].Instance,
+                    Parent = Items["Slider"].Instance,
                     TextColor3 = Library.Theme["Text"],
                     Text = "100%",
                     AnchorPoint = Vector2.new(1, 0),
