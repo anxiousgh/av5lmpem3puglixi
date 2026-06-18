@@ -385,11 +385,15 @@ do
         f.Parent = espGui
         return f
     end
-    -- aim a thin frame from screen-point a to screen-point b (a rotated 1px bar)
+    -- aim a thin frame from screen-point a to screen-point b (a rotated 1px bar).
+    -- Center it on a pixel (floor + 0.5) so the 1px bar renders crisp instead of
+    -- smearing across two rows -- a half-pixel-straddled line reads as a fat ~2px
+    -- blur, so snapping it makes the tracer look properly thin.
     local function setLine(f, a, b, color)
         local d = b - a
         f.Size = UDim2.fromOffset(math.max(d.Magnitude, 1), 1)
-        f.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+        f.Position = UDim2.fromOffset(
+            math.floor((a.X + b.X) / 2) + 0.5, math.floor((a.Y + b.Y) / 2) + 0.5)
         f.Rotation = math.deg(math.atan2(d.Y, d.X))
         f.BackgroundColor3 = color
         f.Visible = true
