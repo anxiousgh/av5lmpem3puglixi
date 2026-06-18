@@ -2394,7 +2394,10 @@ do
 
             local KeybindObject
 
-            if Library.KeyList then
+            -- [wh] HideFromList: don't register a keybind-list entry. Used by the
+            -- menu toggle, whose toggled state is inverted from the window open
+            -- state, so its entry would otherwise flicker in/out of the list.
+            if Library.KeyList and not (Data and Data.HideFromList) then
                 KeybindObject = Library.KeyList:Add("", "", "")
             end
 
@@ -8819,6 +8822,7 @@ do
                     Flag = Keybind.Flag,
                     Default = Keybind.Default,
                     Mode = Keybind.Mode,
+                    HideFromList = Data.HideFromList, -- [wh] forward keybind-list opt-out
                     Callback = Keybind.Callback
                 })
 
@@ -9727,6 +9731,7 @@ do
                     Flag = Keybind.Flag,
                     Default = Keybind.Default,
                     Mode = Keybind.Mode,
+                    HideFromList = Data.HideFromList, -- [wh] forward keybind-list opt-out
                     Callback = Keybind.Callback
                 })
 
@@ -10673,6 +10678,7 @@ do
                         Flag = "UIBind",
                         Mode = "Toggle",
                         Default = Enum.KeyCode.RightAlt, -- [wh] AltGr / right alt
+                        HideFromList = true,             -- [wh] keep it out of the keybind list
                         Callback = function(Value)
                             Library.MenuKeybind = Flags["UIBind"].Key
                         end
