@@ -359,33 +359,31 @@ do
 
     local function newLine() return mkDraw("Line", { Thickness = 1, Visible = false, Transparency = 1 }) end
 
-    -- DrawingChams: a filled square is drawn over each body part's screen rect
-    local CHAMS_PARTS = {
-        "Head", "UpperTorso", "LowerTorso",
-        "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand",
-        "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot",
-        "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg",
-    }
+    -- DrawingChams: fill the character's convex-hull silhouette. Projects every
+    -- visible part's corners (works on ANY rig, not a fixed name list) and fills
+    -- the 2D hull with triangles -- a clean solid silhouette instead of blocks.
     local CORNER_SIGNS = {
         Vector3.new(1, 1, 1), Vector3.new(1, 1, -1), Vector3.new(1, -1, 1), Vector3.new(1, -1, -1),
         Vector3.new(-1, 1, 1), Vector3.new(-1, 1, -1), Vector3.new(-1, -1, 1), Vector3.new(-1, -1, -1),
     }
-    -- screen-space bounding rect (x, y, w, h) of a part's 8 corners
-    local function partRect(cam, part)
-        local cf, h = part.CFrame, part.Size * 0.5
-        local minX, minY, maxX, maxY, any = math.huge, math.huge, -math.huge, -math.huge, false
-        for _, s in ipairs(CORNER_SIGNS) do
-            local sp, on = cam:WorldToViewportPoint((cf * CFrame.new(s.X * h.X, s.Y * h.Y, s.Z * h.Z)).Position)
-            if on then
-                any = true
-                if sp.X < minX then minX = sp.X end
-                if sp.Y < minY then minY = sp.Y end
-                if sp.X > maxX then maxX = sp.X end
-                if sp.Y > maxY then maxY = sp.Y end
-            end
+    -- Andrew's monotone-chain convex hull of a list of Vector2 points
+    local function convexHull(pts)
+        table.sort(pts, function(a, b) return a.X < b.X or (a.X == b.X and a.Y < b.Y) end)
+        local n = #pts
+        if n < 3 then return pts end
+        local function cross(o, a, b) return (a.X - o.X) * (b.Y - o.Y) - (a.Y - o.Y) * (b.X - o.X) end
+        local h = {}
+        for i = 1, n do
+            while #h >= 2 and cross(h[#h - 1], h[#h], pts[i]) <= 0 do h[#h] = nil end
+            h[#h + 1] = pts[i]
         end
-        if not any then return nil end
-        return minX, minY, maxX - minX, maxY - minY
+        local floor = #h + 1
+        for i = n - 1, 1, -1 do
+            while #h >= floor and cross(h[#h - 1], h[#h], pts[i]) <= 0 do h[#h] = nil end
+            h[#h + 1] = pts[i]
+        end
+        h[#h] = nil   -- drop the duplicated start point
+        return h
     end
 
     local function add(plr)
@@ -422,11 +420,11 @@ do
     end
     local function ensureChams(o)
         if o.chams then return o.chams end
-        local sq = {}
-        for i = 1, #CHAMS_PARTS do
-            sq[i] = mkDraw("Square", { Filled = true, Thickness = 0, Visible = false, Transparency = 0.4, ZIndex = 0 })
+        local tris = {}
+        for i = 1, 28 do
+            tris[i] = mkDraw("Triangle", { Filled = true, Thickness = 0, Visible = false, Transparency = 0.4 })
         end
-        o.chams = sq; return sq
+        o.chams = tris; return tris
     end
 
     for _, p in ipairs(Players:GetPlayers()) do add(p) end
@@ -456,21 +454,30 @@ do
             if active then char, hum = aliveChar(plr) end
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
-            -- chams: filled squares over each on-screen body part (Drawing-only)
+            -- chams: fill the character's convex-hull silhouette (Drawing-only)
             if active and char and Esp.chams then
-                local sq = ensureChams(o)
-                for i, pname in ipairs(CHAMS_PARTS) do
-                    local part = char:FindFirstChild(pname)
-                    local s = sq[i]
-                    if part and s and part:IsA("BasePart") then
-                        local rx, ry, rw, rh = partRect(cam, part)
-                        if rx and rw > 0 and rh > 0 then
-                            s.Color = Esp.chamsFill
-                            s.Transparency = Esp.chamsOpacity
-                            s.Position = Vector2.new(rx, ry)
-                            s.Size = Vector2.new(rw, rh)
-                            s.Visible = true
+                local pts = {}
+                for _, part in ipairs(char:GetChildren()) do
+                    if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" and part.Transparency < 1 then
+                        local cf, hsz = part.CFrame, part.Size * 0.5
+                        for _, s in ipairs(CORNER_SIGNS) do
+                            local sp, on = cam:WorldToViewportPoint(
+                                (cf * CFrame.new(s.X * hsz.X, s.Y * hsz.Y, s.Z * hsz.Z)).Position)
+                            if on then pts[#pts + 1] = Vector2.new(sp.X, sp.Y) end
                         end
+                    end
+                end
+                if #pts >= 3 then
+                    local hull = convexHull(pts)
+                    local tris = ensureChams(o)
+                    local used = 0
+                    for i = 2, #hull - 1 do
+                        used = used + 1
+                        local t = tris[used]; if not t then break end
+                        t.PointA = hull[1]; t.PointB = hull[i]; t.PointC = hull[i + 1]
+                        t.Color = Esp.chamsFill
+                        t.Transparency = Esp.chamsOpacity
+                        t.Visible = true
                     end
                 end
             end
