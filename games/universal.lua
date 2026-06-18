@@ -542,7 +542,8 @@ do
         if not r or not r.add_send_hook then return false end
         SHARED.hookFn = function(packet)
             if not SHARED.freeze then return end
-            if packet.PacketId == 0x1B then     -- outbound physics replication
+            local id; pcall(function() id = packet.PacketId end)
+            if id == 0x1B then     -- outbound physics replication
                 pcall(function() packet:SetCanBeSent(false) end)
                 pcall(function() packet:Drop() end)
                 return false
@@ -571,27 +572,54 @@ do
         end)
     end)
 
-    local function applyFreezeState()
-        local on = Desync.enabled and Desync.method == "Freeze"
-        SHARED.freeze = on
-        if on and not ensureRaknetHook() then
-            SHARED.freeze = false
-            Desync.enabled = false
-            Library:Notification("RakNet not available in this executor", 3, Library.Theme["Risky"])
+    local function removeRaknetHook()
+        if SHARED.hookInstalled and SHARED.hookFn then
+            local r = findRaknet()
+            if r and r.remove_send_hook then pcall(function() r.remove_send_hook(SHARED.hookFn) end) end
+        end
+        SHARED.hookInstalled = false
+        SHARED.hookFn = nil
+    end
+
+    -- restore your REAL position (fixes being left at the fake spot on disable)
+    local function restoreReal()
+        local hrp = getHRP()
+        if hrp and realCF then
+            pcall(function()
+                hrp.CFrame = realCF
+                if realLV then hrp.AssemblyLinearVelocity = realLV end
+                if realAV then hrp.AssemblyAngularVelocity = realAV end
+            end)
         end
     end
 
+    -- Enabled drives the heartbeat-spoof methods ONLY (void/spin/velocity/custom);
+    -- it never touches raknet.
     function Desync.setEnabled(on)
         Desync.enabled = on and true or false
-        applyFreezeState()
+        if not Desync.enabled then restoreReal() end
     end
-    function Desync.setMethod(m)
-        Desync.method = m
-        applyFreezeState()   -- re-evaluate freeze when switching methods
-    end
-    function Desync.stop()
-        Desync.enabled = false
+    function Desync.setMethod(m) Desync.method = m end
+
+    -- Freeze is the ONLY raknet mode, behind its own explicit toggle. RakNet can
+    -- get accounts terminated, so the hook is only installed while this is on and
+    -- removed the moment it's turned off. Returns false if raknet is unavailable
+    -- so the UI can flip the toggle back off.
+    function Desync.setFreeze(on)
+        if on then
+            if not ensureRaknetHook() then SHARED.freeze = false; return false end
+            SHARED.freeze = true
+            return true
+        end
         SHARED.freeze = false
+        removeRaknetHook()
+        return true
+    end
+
+    function Desync.stop()
+        Desync.setEnabled(false)   -- restores real position
+        SHARED.freeze = false
+        removeRaknetHook()
         pcall(function() RunService:UnbindFromRenderStep(RESTORE) end)
     end
 end
@@ -638,23 +666,38 @@ UtilSec:Toggle({ Name = "Noclip", Flag = "NoclipEnabled", Default = false,
 local DesyncSub = PlayerPage:SubPage({ Name = "Desync" })
 do
     local Sec = DesyncSub:Section({ Name = "Desync", Side = 1 })
-    local showFor   -- forward-declared; defined after the controls exist
-
-    Sec:Toggle({ Name = "Enabled", Flag = "DesyncEnabled", Default = false,
-        Callback = function(v) Desync.setEnabled(v) end })
+    local showFor, enabledToggle, freezeToggle, freezeWarn  -- forward-declared
 
     Sec:Dropdown({
         Name = "Method", Flag = "DesyncMethod", Default = "Void", Multi = false,
         Items = { "Void", "Spin", "Velocity", "Freeze", "Custom" },
         Callback = function(v)
             local m = (type(v) == "table" and v[1]) or v or "Void"
+            -- switching method = clean slate: turn both toggles off so a spoof
+            -- (or raknet) never keeps running across a method change
+            pcall(function() enabledToggle:Set(false) end)
+            pcall(function() freezeToggle:Set(false) end)
             Desync.setMethod(m)
             if showFor then showFor(m) end
         end,
     })
 
-    -- All controls are created up front; the dropdown shows only the chosen
-    -- method's controls (the rest are hidden).
+    -- Enabled = heartbeat-spoof methods (void/spin/velocity/custom). No raknet.
+    enabledToggle = Sec:Toggle({ Name = "Enabled", Flag = "DesyncEnabled", Default = false,
+        Callback = function(v) Desync.setEnabled(v) end })
+
+    -- RakNet freeze = the ONLY raknet path, behind its own explicit toggle.
+    freezeToggle = Sec:Toggle({ Name = "RakNet freeze", Flag = "DesyncFreeze", Default = false,
+        Callback = function(v)
+            local ok = Desync.setFreeze(v)
+            if v and not ok then
+                Library:Notification("RakNet not available in this executor", 3, Library.Theme["Risky"])
+                pcall(function() freezeToggle:Set(false) end)
+            end
+        end })
+    freezeWarn = Sec:Label({ Name = "RakNet -- detection/ban risk." })
+
+    -- value controls (shown only for their method)
     local voidMin = Sec:Slider({ Name = "Void min", Flag = "DesyncVoidMin",
         Min = 500, Max = 1000000, Default = 5000, Decimals = 0, Suffix = " studs",
         Callback = function(v) Desync.voidMin = v end })
@@ -667,7 +710,6 @@ do
     local vel = Sec:Slider({ Name = "Velocity magnitude", Flag = "DesyncVel",
         Min = 50, Max = 16384, Default = 16384, Decimals = 0,
         Callback = function(v) Desync.velMag = v end })
-    local freezeNote = Sec:Label({ Name = "Freeze uses RakNet (executor-dependent)." })
     local cx = Sec:Textbox({ Name = "Custom X", Flag = "DesyncX", Default = "0",
         Numeric = true, Placeholder = "X", Callback = function(v) Desync.customX = tonumber(v) or 0 end })
     local cy = Sec:Textbox({ Name = "Custom Y", Flag = "DesyncY", Default = "0",
@@ -675,15 +717,15 @@ do
     local cz = Sec:Textbox({ Name = "Custom Z", Flag = "DesyncZ", Default = "0",
         Numeric = true, Placeholder = "Z", Callback = function(v) Desync.customZ = tonumber(v) or 0 end })
 
-    local CONTROLS = {
-        Void     = { voidMin, voidMax },
-        Spin     = { spin },
-        Velocity = { vel },
-        Freeze   = { freezeNote },
-        Custom   = { cx, cy, cz },
+    local VALUE_CONTROLS = {
+        Void = { voidMin, voidMax }, Spin = { spin }, Velocity = { vel }, Custom = { cx, cy, cz },
     }
     function showFor(method)
-        for name, list in pairs(CONTROLS) do
+        local isFreeze = (method == "Freeze")
+        pcall(function() enabledToggle:SetVisibility(not isFreeze) end)
+        pcall(function() freezeToggle:SetVisibility(isFreeze) end)
+        pcall(function() freezeWarn:SetVisibility(isFreeze) end)
+        for name, list in pairs(VALUE_CONTROLS) do
             for _, el in ipairs(list) do
                 pcall(function() el:SetVisibility(name == method) end)
             end
