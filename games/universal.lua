@@ -329,8 +329,15 @@ end
 --  ESP  (box / name / distance / health via Drawing)
 -- ============================================================
 local Esp = {
-    enabled = false, names = false, distance = false, health = false,
+    enabled = false, box = true, names = false, distance = false, health = false,
     teamCheck = false, color = Color3.fromRGB(200, 183, 247),
+    boxType = "Full",                 -- "Full" | "Corner"
+    tracer = false, tracerOrigin = "Bottom",   -- "Bottom" | "Top" | "Mouse"
+    chams = false,
+    chamsFill = Color3.fromRGB(200, 183, 247),
+    chamsOutline = Color3.fromRGB(255, 255, 255),
+    chamsTransparency = 0.6,
+    skeleton = false,
 }
 -- expose for the ESP Preview widget (it reads these to draw a live preview box)
 if getgenv then
@@ -338,7 +345,20 @@ if getgenv then
     if g.WH then g.WH.espPreview = Esp end
 end
 do
-    local objs = {}   -- plr -> { box, name, dist, health }
+    local objs = {}   -- plr -> { box, name, dist, health, tracer, corners?, skel?, chams? }
+
+    -- skeleton bone pairs (R15 first, then R6; missing parts are skipped)
+    local BONES = {
+        { "Head", "UpperTorso" }, { "UpperTorso", "LowerTorso" },
+        { "UpperTorso", "LeftUpperArm" }, { "LeftUpperArm", "LeftLowerArm" }, { "LeftLowerArm", "LeftHand" },
+        { "UpperTorso", "RightUpperArm" }, { "RightUpperArm", "RightLowerArm" }, { "RightLowerArm", "RightHand" },
+        { "LowerTorso", "LeftUpperLeg" }, { "LeftUpperLeg", "LeftLowerLeg" }, { "LeftLowerLeg", "LeftFoot" },
+        { "LowerTorso", "RightUpperLeg" }, { "RightUpperLeg", "RightLowerLeg" }, { "RightLowerLeg", "RightFoot" },
+        { "Head", "Torso" }, { "Torso", "Left Arm" }, { "Torso", "Right Arm" },
+        { "Torso", "Left Leg" }, { "Torso", "Right Leg" },
+    }
+
+    local function newLine() return mkDraw("Line", { Thickness = 1, Visible = false, Transparency = 1 }) end
 
     local function add(plr)
         if plr == LocalPlayer or objs[plr] or not hasDrawing then return end
@@ -347,79 +367,158 @@ do
             name   = mkDraw("Text",   { Size = 13, Center = true, Outline = true, Visible = false }),
             dist   = mkDraw("Text",   { Size = 12, Center = true, Outline = true, Visible = false }),
             health = mkDraw("Square", { Thickness = 1, Filled = true, Visible = false }),
+            tracer = newLine(),
+            corners = nil, skel = nil, chams = nil,   -- created lazily when used
         }
     end
     local function remove(plr)
         local o = objs[plr]; if not o then return end
-        for _, d in pairs(o) do if d then pcall(function() d:Remove() end) end end
+        for _, k in ipairs({ "box", "name", "dist", "health", "tracer" }) do
+            if o[k] then pcall(function() o[k]:Remove() end) end
+        end
+        if o.corners then for _, d in ipairs(o.corners) do pcall(function() d:Remove() end) end end
+        if o.skel then for _, d in ipairs(o.skel) do pcall(function() d:Remove() end) end end
+        if o.chams then pcall(function() o.chams:Destroy() end) end
         objs[plr] = nil
+    end
+
+    local function ensureCorners(o)
+        if o.corners then return o.corners end
+        local c = {}; for i = 1, 8 do c[i] = newLine() end
+        o.corners = c; return c
+    end
+    local function ensureSkel(o)
+        if o.skel then return o.skel end
+        local s = {}; for i = 1, #BONES do s[i] = newLine() end
+        o.skel = s; return s
+    end
+    local function ensureChams(o, char)
+        if o.chams and o.chams.Parent then return o.chams end
+        if o.chams then pcall(function() o.chams:Destroy() end) end
+        local h = Instance.new("Highlight")
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Adornee = char
+        h.Parent = char
+        o.chams = h; return h
     end
 
     for _, p in ipairs(Players:GetPlayers()) do add(p) end
     track(Players.PlayerAdded:Connect(add))
     track(Players.PlayerRemoving:Connect(remove))
 
-    function Esp.clear()   -- remove all ESP drawings (used on unload)
+    function Esp.clear()   -- remove all ESP objects (used on unload)
         for plr in pairs(objs) do remove(plr) end
-    end
-
-    local function hideAll(o)
-        if o.box then o.box.Visible = false end
-        if o.name then o.name.Visible = false end
-        if o.dist then o.dist.Visible = false end
-        if o.health then o.health.Visible = false end
     end
 
     track(RunService.RenderStepped:Connect(function()
         local cam = Workspace.CurrentCamera
+        local vp = cam.ViewportSize
+        local mouse = UserInputService:GetMouseLocation()
         local myHRP = getHRP()
         for plr, o in pairs(objs) do
             if not o.box then continue end
-            local shown = false
-            if Esp.enabled and teamOk(plr, Esp.teamCheck) then
-                local char, hum = aliveChar(plr)
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    local center, on = cam:WorldToViewportPoint(hrp.Position)
-                    if on then
-                        local top = cam:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
-                        local bot = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
-                        local height = math.max(math.abs(top.Y - bot.Y), 1)
-                        local width  = height * 0.55
-                        local x, y = center.X - width / 2, center.Y - height / 2
-                        shown = true
+            -- hide all 2D drawings first
+            o.box.Visible = false; o.name.Visible = false; o.dist.Visible = false
+            o.health.Visible = false; o.tracer.Visible = false
+            if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
+            if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
 
+            local active = Esp.enabled and teamOk(plr, Esp.teamCheck)
+            local char, hum = nil, nil
+            if active then char, hum = aliveChar(plr) end
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+
+            -- chams (3D highlight; works even off-screen)
+            if active and char and Esp.chams then
+                local h = ensureChams(o, char)
+                h.Enabled = true
+                h.FillColor = Esp.chamsFill
+                h.OutlineColor = Esp.chamsOutline
+                h.FillTransparency = Esp.chamsTransparency
+                h.OutlineTransparency = 0
+            elseif o.chams then
+                o.chams.Enabled = false
+            end
+
+            if active and hrp then
+                local center, on = cam:WorldToViewportPoint(hrp.Position)
+                if on then
+                    local top = cam:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
+                    local bot = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+                    local height = math.max(math.abs(top.Y - bot.Y), 1)
+                    local width  = height * 0.55
+                    local x, y = center.X - width / 2, center.Y - height / 2
+
+                    -- box: full square or corner brackets
+                    if not Esp.box then
+                        -- box disabled; leave it hidden
+                    elseif Esp.boxType == "Corner" then
+                        local c = ensureCorners(o)
+                        local cl = math.min(width, height) * 0.3
+                        local pts = {
+                            { x, y, x + cl, y }, { x, y, x, y + cl },                              -- TL
+                            { x + width, y, x + width - cl, y }, { x + width, y, x + width, y + cl }, -- TR
+                            { x, y + height, x + cl, y + height }, { x, y + height, x, y + height - cl }, -- BL
+                            { x + width, y + height, x + width - cl, y + height }, { x + width, y + height, x + width, y + height - cl }, -- BR
+                        }
+                        for i, p in ipairs(pts) do
+                            c[i].Color = Esp.color
+                            c[i].From = Vector2.new(p[1], p[2]); c[i].To = Vector2.new(p[3], p[4])
+                            c[i].Visible = true
+                        end
+                    else
                         o.box.Color = Esp.color
                         o.box.Size = Vector2.new(width, height)
                         o.box.Position = Vector2.new(x, y)
                         o.box.Visible = true
+                    end
 
-                        o.name.Visible = Esp.names
-                        if Esp.names then
-                            o.name.Text = plr.Name
-                            o.name.Color = Esp.color
-                            o.name.Position = Vector2.new(center.X, y - 14)
-                        end
+                    if Esp.names then
+                        o.name.Text = plr.Name; o.name.Color = Esp.color
+                        o.name.Position = Vector2.new(center.X, y - 14); o.name.Visible = true
+                    end
+                    if Esp.distance then
+                        local d = myHRP and math.floor((myHRP.Position - hrp.Position).Magnitude) or 0
+                        o.dist.Text = tostring(d) .. "m"; o.dist.Color = Esp.color
+                        o.dist.Position = Vector2.new(center.X, y + height + 2); o.dist.Visible = true
+                    end
+                    if Esp.health then
+                        local hp = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                        o.health.Size = Vector2.new(2, height * hp)
+                        o.health.Position = Vector2.new(x - 4, y + height * (1 - hp))
+                        o.health.Color = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(80, 255, 80), hp)
+                        o.health.Visible = true
+                    end
+                    if Esp.tracer then
+                        local origin
+                        if Esp.tracerOrigin == "Top" then origin = Vector2.new(vp.X / 2, 0)
+                        elseif Esp.tracerOrigin == "Mouse" then origin = mouse
+                        else origin = Vector2.new(vp.X / 2, vp.Y) end
+                        o.tracer.Color = Esp.color
+                        o.tracer.From = origin
+                        o.tracer.To = Vector2.new(center.X, y + height)
+                        o.tracer.Visible = true
+                    end
+                end
 
-                        o.dist.Visible = Esp.distance
-                        if Esp.distance then
-                            local d = myHRP and math.floor((myHRP.Position - hrp.Position).Magnitude) or 0
-                            o.dist.Text = tostring(d) .. "m"
-                            o.dist.Color = Esp.color
-                            o.dist.Position = Vector2.new(center.X, y + height + 2)
-                        end
-
-                        o.health.Visible = Esp.health
-                        if Esp.health then
-                            local hp = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-                            o.health.Size = Vector2.new(2, height * hp)
-                            o.health.Position = Vector2.new(x - 4, y + height * (1 - hp))
-                            o.health.Color = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(80, 255, 80), hp)
+                -- skeleton (per-part on-screen)
+                if Esp.skeleton and char then
+                    local s = ensureSkel(o)
+                    for i, bone in ipairs(BONES) do
+                        local p1, p2 = char:FindFirstChild(bone[1]), char:FindFirstChild(bone[2])
+                        local line = s[i]
+                        if p1 and p2 and line then
+                            local a, aOn = cam:WorldToViewportPoint(p1.Position)
+                            local b, bOn = cam:WorldToViewportPoint(p2.Position)
+                            if aOn and bOn then
+                                line.Color = Esp.color
+                                line.From = Vector2.new(a.X, a.Y); line.To = Vector2.new(b.X, b.Y)
+                                line.Visible = true
+                            end
                         end
                     end
                 end
             end
-            if not shown then hideAll(o) end
         end
     end))
 end
@@ -750,21 +849,44 @@ do
     if not hasDrawing then
         Sec:Label({ Name = "ESP needs a Drawing-capable executor." })
     end
-    Sec:Toggle({ Name = "Enabled (box)", Flag = "EspEnabled", Default = false,
+    Sec:Toggle({ Name = "Enabled", Flag = "EspEnabled", Default = false,
         Callback = function(v) Esp.enabled = v end })
+    Sec:Toggle({ Name = "Box", Flag = "EspBox", Default = true,
+        Callback = function(v) Esp.box = v end })
+    Sec:Dropdown({ Name = "Box type", Flag = "EspBoxType", Default = "Full", Multi = false,
+        Items = { "Full", "Corner" },
+        Callback = function(v) Esp.boxType = (type(v) == "table" and v[1]) or v or "Full" end })
     Sec:Toggle({ Name = "Names", Flag = "EspNames", Default = false,
         Callback = function(v) Esp.names = v end })
     Sec:Toggle({ Name = "Distance", Flag = "EspDistance", Default = false,
         Callback = function(v) Esp.distance = v end })
     Sec:Toggle({ Name = "Health bar", Flag = "EspHealth", Default = false,
         Callback = function(v) Esp.health = v end })
+    Sec:Toggle({ Name = "Tracer", Flag = "EspTracer", Default = false,
+        Callback = function(v) Esp.tracer = v end })
+    Sec:Toggle({ Name = "Skeleton", Flag = "EspSkeleton", Default = false,
+        Callback = function(v) Esp.skeleton = v end })
+    Sec:Toggle({ Name = "Chams", Flag = "EspChams", Default = false,
+        Callback = function(v) Esp.chams = v end })
 
     local Sec2 = EspSub:Section({ Name = "Options", Side = 2 })
     Sec2:Toggle({ Name = "Team check", Flag = "EspTeam", Default = false,
         Callback = function(v) Esp.teamCheck = v end })
-    Sec2:Label({ Name = "Box color" }):Colorpicker({
+    Sec2:Dropdown({ Name = "Tracer origin", Flag = "EspTracerOrigin", Default = "Bottom", Multi = false,
+        Items = { "Bottom", "Top", "Mouse" },
+        Callback = function(v) Esp.tracerOrigin = (type(v) == "table" and v[1]) or v or "Bottom" end })
+    Sec2:Label({ Name = "ESP color" }):Colorpicker({
         Flag = "EspColor", Default = Color3.fromRGB(200, 183, 247),
         Callback = function(c) Esp.color = c end })
+    Sec2:Label({ Name = "Chams fill" }):Colorpicker({
+        Flag = "EspChamsFill", Default = Color3.fromRGB(200, 183, 247),
+        Callback = function(c) Esp.chamsFill = c end })
+    Sec2:Label({ Name = "Chams outline" }):Colorpicker({
+        Flag = "EspChamsOutline", Default = Color3.fromRGB(255, 255, 255),
+        Callback = function(c) Esp.chamsOutline = c end })
+    Sec2:Slider({ Name = "Chams fill opacity", Flag = "EspChamsOp",
+        Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
+        Callback = function(v) Esp.chamsTransparency = 1 - (v / 100) end })
 end
 
 -- ============================================================
