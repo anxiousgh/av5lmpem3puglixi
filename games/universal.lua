@@ -560,6 +560,13 @@ do
         local hrp = getHRP(); if not hrp then return end
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
         pcall(applySpoof, hrp)
+        -- Force continuous replication even while standing still: a non-zero
+        -- velocity keeps the physics assembly "awake", so Roblox keeps streaming
+        -- the spoofed position to the server. Without it the server only updates
+        -- while you walk. Velocity mode sets its own; restored each RenderStep.
+        if Desync.method ~= "Velocity" then
+            pcall(function() hrp.AssemblyLinearVelocity = Vector3.one * 16384 end)
+        end
     end))
 
     RunService:BindToRenderStep(RESTORE, Enum.RenderPriority.First.Value, function()
