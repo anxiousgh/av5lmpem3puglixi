@@ -65,6 +65,11 @@ local function mkDraw(class, props)
     return d
 end
 
+-- Every persistent feature connection is tracked here so the whole module can
+-- be torn down on unload / re-execution (see disableAll at the bottom).
+local Connections = {}
+local function track(c) Connections[#Connections + 1] = c; return c end
+
 -- ============================================================
 --  MOVEMENT BACKEND  (enforced per-frame, survives respawn)
 -- ============================================================
@@ -250,7 +255,7 @@ do
         return bestPlr, bestPart
     end
 
-    RunService.RenderStepped:Connect(function(dt)
+    track(RunService.RenderStepped:Connect(function(dt)
         if fovCircle then
             fovCircle.Visible = CamLock.showFov
             if CamLock.showFov then
@@ -278,7 +283,7 @@ do
         local cam = Workspace.CurrentCamera
         local alpha = math.clamp(1 - (CamLock.smoothing ^ (dt * 60)), 0, 1)
         cam.CFrame = cam.CFrame:Lerp(CFrame.new(cam.CFrame.Position, part.Position), alpha)
-    end)
+    end))
 end
 
 -- ============================================================
@@ -297,7 +302,7 @@ do
         end)
     end
 
-    RunService.Heartbeat:Connect(function()
+    track(RunService.Heartbeat:Connect(function()
         if not Trig.enabled then return end
         if Library.WindowOpenState then return end   -- don't fire while clicking the menu
         local cam = Workspace.CurrentCamera
@@ -317,7 +322,7 @@ do
         if (tick() - lastShot) * 1000 < Trig.delay then return end
         lastShot = tick()
         fire()
-    end)
+    end))
 end
 
 -- ============================================================
@@ -346,8 +351,12 @@ do
     end
 
     for _, p in ipairs(Players:GetPlayers()) do add(p) end
-    Players.PlayerAdded:Connect(add)
-    Players.PlayerRemoving:Connect(remove)
+    track(Players.PlayerAdded:Connect(add))
+    track(Players.PlayerRemoving:Connect(remove))
+
+    function Esp.clear()   -- remove all ESP drawings (used on unload)
+        for plr in pairs(objs) do remove(plr) end
+    end
 
     local function hideAll(o)
         if o.box then o.box.Visible = false end
@@ -356,7 +365,7 @@ do
         if o.health then o.health.Visible = false end
     end
 
-    RunService.RenderStepped:Connect(function()
+    track(RunService.RenderStepped:Connect(function()
         local cam = Workspace.CurrentCamera
         local myHRP = getHRP()
         for plr, o in pairs(objs) do
@@ -407,7 +416,7 @@ do
             end
             if not shown then hideAll(o) end
         end
-    end)
+    end))
 end
 
 -- ============================================================
@@ -589,11 +598,19 @@ do  -- View (spectate) -- toggles on the same target
             task.wait(0.2); if viewing == plr then apply() end
         end)
     end
+    function PlayerActions.stopView()
+        if charConn then charConn:Disconnect(); charConn = nil end
+        if viewing then
+            Workspace.CurrentCamera.CameraSubject = getHum() or prevSubject
+            viewing = nil
+        end
+    end
 end
 
 do  -- Follow (pathfinding) -- toggles on the same target
     local PathfindingService = game:GetService("PathfindingService")
     local target, path = nil, nil
+    function PlayerActions.stopFollow() target = nil end
     function PlayerActions.follow(plr)
         if target == plr then target = nil; return end
         target = plr
@@ -644,4 +661,41 @@ do
         PL:AddAction("View",   needTarget(PlayerActions.view))
         PL:AddAction("Follow", needTarget(PlayerActions.follow))
     end
+end
+
+-- ============================================================
+--  TEARDOWN
+--  Turn EVERYTHING off and disconnect every feature connection. Runs when the
+--  GUI unloads (hooked to Library.OnExit, fired by Library:Exit / the Unload
+--  button) and when the loader re-executes (it calls the previous instance's
+--  disableAll). This is what stops you being stuck in cframe/camlock/etc. after
+--  a reload.
+-- ============================================================
+local function disableAll()
+    -- reset state-changing toggles (walkspeed->16, collide->true, velocity 0, ...)
+    pcall(Movement.setWalkSpeed, false)
+    pcall(Movement.setJump, false)
+    pcall(Movement.setCFrame, false)
+    pcall(Movement.setFly, false)
+    pcall(Movement.setNoclip, false)
+    pcall(Movement.setInfJump, false)
+    -- combat / visuals: flag off (their connections are disconnected below)
+    CamLock.enabled = false
+    Trig.enabled = false
+    Esp.enabled, Esp.names, Esp.distance, Esp.health = false, false, false, false
+    -- player actions
+    pcall(function() if PlayerActions.stopFollow then PlayerActions.stopFollow() end end)
+    pcall(function() if PlayerActions.stopView then PlayerActions.stopView() end end)
+    pcall(function() if Esp.clear then Esp.clear() end end)
+    -- disconnect every tracked connection
+    for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
+    Connections = {}
+end
+
+-- Fire teardown on unload (Library:Exit calls Library.OnExit) and expose it so
+-- the loader can tear this instance down before re-executing.
+Library.OnExit = disableAll
+if getgenv then
+    local g = getgenv()
+    if g.WH then g.WH.disableAll = disableAll end
 end

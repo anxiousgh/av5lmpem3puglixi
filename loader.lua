@@ -13,16 +13,18 @@
 -- ============================================================
 
 -- ---------- single-instance guard ----------
--- Refuse a second execution while a live instance exists, so we never stack
--- duplicate GUIs. Re-execution is allowed again once unloaded.
+-- On re-execution, tear the PREVIOUS instance down first: turn off every
+-- feature/exploit (disableAll) and destroy the old GUI (lib:Exit). Otherwise
+-- the old instance's loops (cframe speed, camlock, ...) keep running and you
+-- get stuck. Then we continue and build a fresh instance.
 if getgenv then
     local g = getgenv()
     local prev = g.WH
-    if prev and prev.lib and not prev.lib.Unloaded then
-        warn("[wh] already loaded - ignoring duplicate execution")
-        return
+    if prev then
+        pcall(function() if prev.disableAll then prev.disableAll() end end)
+        pcall(function() if prev.lib and prev.lib.Exit then prev.lib:Exit() end end)
     end
-    g.WH = { lib = false }
+    g.WH = { lib = false, disableAll = false }
 end
 
 -- ---------- config ----------

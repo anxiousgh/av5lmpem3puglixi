@@ -263,6 +263,7 @@ do
     end
 
     Library.Exit = function(Self)
+        if Self.OnExit then pcall(Self.OnExit) end -- [wh] teardown hook (turns features off)
         Self:ApplyWindowInputState(false)
 
         if Self.BackgroundEffects then
