@@ -366,7 +366,10 @@ do
     local espGui = Instance.new("ScreenGui")
     espGui.Name = "\0"
     espGui.ResetOnSpawn = false
-    espGui.IgnoreGuiInset = false   -- match WorldToViewportPoint / ViewportSize space
+    espGui.IgnoreGuiInset = true    -- (0,0) at the very top, matching the 3D
+                                    -- viewport that WorldToViewportPoint/Drawing use
+                                    -- (false would push every line down by the 36px
+                                    -- topbar inset -> lines land below the player)
     espGui.DisplayOrder = 5
     pcall(function() espGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
     if not espGui.Parent then
