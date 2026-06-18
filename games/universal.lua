@@ -331,11 +331,13 @@ end
 local Esp = {
     enabled = false, box = true, names = false, distance = false, health = false,
     teamCheck = false, color = Color3.fromRGB(200, 183, 247),
-    boxType = "Full",                 -- "Full" | "Corner"
+    boxType = "Full",                 -- "Full" | "Corner" | "Fill"
+    fillOpacity = 0.4,                -- Drawing alpha for the "Fill" box type
     tracer = false, tracerOrigin = "Bottom",   -- "Bottom" | "Top" | "Mouse"
-    chams = false,
+    chams = false,                    -- in-game Highlight
     chamsFill = Color3.fromRGB(200, 183, 247),
-    chamsOpacity = 0.4,               -- Drawing alpha (1 = solid)
+    chamsOutline = Color3.fromRGB(255, 255, 255),
+    chamsTransparency = 0.6,          -- Highlight FillTransparency (0 = solid)
     skeleton = false,
 }
 -- expose for the ESP Preview widget (it reads these to draw a live preview box)
@@ -394,7 +396,7 @@ do
             dist   = mkDraw("Text",   { Size = 12, Center = true, Outline = true, Visible = false }),
             health = mkDraw("Square", { Thickness = 1, Filled = true, Visible = false }),
             tracer = newLine(),
-            corners = nil, skel = nil, chams = nil,   -- created lazily when used
+            corners = nil, skel = nil, fill = nil, chams = nil,   -- created lazily when used
         }
     end
     local function remove(plr)
@@ -404,7 +406,8 @@ do
         end
         if o.corners then for _, d in ipairs(o.corners) do pcall(function() d:Remove() end) end end
         if o.skel then for _, d in ipairs(o.skel) do pcall(function() d:Remove() end) end end
-        if o.chams then for _, d in ipairs(o.chams) do pcall(function() d:Remove() end) end end
+        if o.fill then for _, d in ipairs(o.fill) do pcall(function() d:Remove() end) end end
+        if o.chams then pcall(function() o.chams:Destroy() end) end
         objs[plr] = nil
     end
 
@@ -418,13 +421,22 @@ do
         local s = {}; for i = 1, #BONES do s[i] = newLine() end
         o.skel = s; return s
     end
-    local function ensureChams(o)
-        if o.chams then return o.chams end
+    local function ensureFill(o)   -- triangle pool for the "Fill" box type
+        if o.fill then return o.fill end
         local tris = {}
         for i = 1, 28 do
             tris[i] = mkDraw("Triangle", { Filled = true, Thickness = 0, Visible = false, Transparency = 0.4 })
         end
-        o.chams = tris; return tris
+        o.fill = tris; return tris
+    end
+    local function ensureChams(o, char)   -- in-game Highlight
+        if o.chams and o.chams.Parent then return o.chams end
+        if o.chams then pcall(function() o.chams:Destroy() end) end
+        local h = Instance.new("Highlight")
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Adornee = char
+        h.Parent = char
+        o.chams = h; return h
     end
 
     for _, p in ipairs(Players:GetPlayers()) do add(p) end
@@ -447,39 +459,23 @@ do
             o.health.Visible = false; o.tracer.Visible = false
             if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
             if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
-            if o.chams then for _, d in ipairs(o.chams) do d.Visible = false end end
+            if o.fill then for _, d in ipairs(o.fill) do d.Visible = false end end
 
             local active = Esp.enabled and teamOk(plr, Esp.teamCheck)
             local char, hum = nil, nil
             if active then char, hum = aliveChar(plr) end
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
-            -- chams: fill the character's convex-hull silhouette (Drawing-only)
+            -- chams: in-game Highlight (works even off-screen)
             if active and char and Esp.chams then
-                local pts = {}
-                for _, part in ipairs(char:GetDescendants()) do
-                    if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" and part.Transparency < 1 then
-                        local cf, hsz = part.CFrame, part.Size * 0.5
-                        for _, s in ipairs(CORNER_SIGNS) do
-                            local sp, on = cam:WorldToViewportPoint(
-                                (cf * CFrame.new(s.X * hsz.X, s.Y * hsz.Y, s.Z * hsz.Z)).Position)
-                            if on then pts[#pts + 1] = Vector2.new(sp.X, sp.Y) end
-                        end
-                    end
-                end
-                if #pts >= 3 then
-                    local hull = convexHull(pts)
-                    local tris = ensureChams(o)
-                    local used = 0
-                    for i = 2, #hull - 1 do
-                        used = used + 1
-                        local t = tris[used]; if not t then break end
-                        t.PointA = hull[1]; t.PointB = hull[i]; t.PointC = hull[i + 1]
-                        t.Color = Esp.chamsFill
-                        t.Transparency = Esp.chamsOpacity
-                        t.Visible = true
-                    end
-                end
+                local h = ensureChams(o, char)
+                h.Enabled = true
+                h.FillColor = Esp.chamsFill
+                h.OutlineColor = Esp.chamsOutline
+                h.FillTransparency = Esp.chamsTransparency
+                h.OutlineTransparency = 0
+            elseif o.chams then
+                o.chams.Enabled = false
             end
 
             if active and hrp then
@@ -491,7 +487,7 @@ do
                     local width  = height * 0.55
                     local x, y = center.X - width / 2, center.Y - height / 2
 
-                    -- box: full square or corner brackets
+                    -- box: full square / corner brackets / convex-hull fill
                     if not Esp.box then
                         -- box disabled; leave it hidden
                     elseif Esp.boxType == "Corner" then
@@ -507,6 +503,32 @@ do
                             c[i].Color = Esp.color
                             c[i].From = Vector2.new(p[1], p[2]); c[i].To = Vector2.new(p[3], p[4])
                             c[i].Visible = true
+                        end
+                    elseif Esp.boxType == "Fill" then
+                        -- filled convex-hull silhouette (works on any rig)
+                        local pts = {}
+                        for _, part in ipairs(char:GetDescendants()) do
+                            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" and part.Transparency < 1 then
+                                local cf, hsz = part.CFrame, part.Size * 0.5
+                                for _, s in ipairs(CORNER_SIGNS) do
+                                    local sp, sOn = cam:WorldToViewportPoint(
+                                        (cf * CFrame.new(s.X * hsz.X, s.Y * hsz.Y, s.Z * hsz.Z)).Position)
+                                    if sOn then pts[#pts + 1] = Vector2.new(sp.X, sp.Y) end
+                                end
+                            end
+                        end
+                        if #pts >= 3 then
+                            local hull = convexHull(pts)
+                            local tris = ensureFill(o)
+                            local used = 0
+                            for i = 2, #hull - 1 do
+                                used = used + 1
+                                local t = tris[used]; if not t then break end
+                                t.PointA = hull[1]; t.PointB = hull[i]; t.PointC = hull[i + 1]
+                                t.Color = Esp.color
+                                t.Transparency = Esp.fillOpacity
+                                t.Visible = true
+                            end
                         end
                     else
                         o.box.Color = Esp.color
@@ -896,7 +918,7 @@ do
     Sec:Toggle({ Name = "Box", Flag = "EspBox", Default = true,
         Callback = function(v) Esp.box = v end })
     Sec:Dropdown({ Name = "Box type", Flag = "EspBoxType", Default = "Full", Multi = false,
-        Items = { "Full", "Corner" },
+        Items = { "Full", "Corner", "Fill" },
         Callback = function(v) Esp.boxType = (type(v) == "table" and v[1]) or v or "Full" end })
     Sec:Toggle({ Name = "Names", Flag = "EspNames", Default = false,
         Callback = function(v) Esp.names = v end })
@@ -920,12 +942,18 @@ do
     Sec2:Label({ Name = "ESP color" }):Colorpicker({
         Flag = "EspColor", Default = Color3.fromRGB(200, 183, 247),
         Callback = function(c) Esp.color = c end })
+    Sec2:Slider({ Name = "Fill opacity", Flag = "EspFillOp",
+        Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
+        Callback = function(v) Esp.fillOpacity = v / 100 end })
     Sec2:Label({ Name = "Chams fill" }):Colorpicker({
         Flag = "EspChamsFill", Default = Color3.fromRGB(200, 183, 247),
         Callback = function(c) Esp.chamsFill = c end })
+    Sec2:Label({ Name = "Chams outline" }):Colorpicker({
+        Flag = "EspChamsOutline", Default = Color3.fromRGB(255, 255, 255),
+        Callback = function(c) Esp.chamsOutline = c end })
     Sec2:Slider({ Name = "Chams opacity", Flag = "EspChamsOp",
         Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
-        Callback = function(v) Esp.chamsOpacity = v / 100 end })
+        Callback = function(v) Esp.chamsTransparency = 1 - (v / 100) end })
 end
 
 -- ============================================================
