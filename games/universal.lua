@@ -389,9 +389,9 @@ do
     -- Center it on a pixel (floor + 0.5) so the 1px bar renders crisp instead of
     -- smearing across two rows -- a half-pixel-straddled line reads as a fat ~2px
     -- blur, so snapping it makes the tracer look properly thin.
-    local function setLine(f, a, b, color)
+    local function setLine(f, a, b, color, thickness)
         local d = b - a
-        f.Size = UDim2.fromOffset(math.max(d.Magnitude, 1), 1)
+        f.Size = UDim2.fromOffset(math.max(d.Magnitude, 1), thickness or 1)
         f.Position = UDim2.fromOffset(
             math.floor((a.X + b.X) / 2) + 0.5, math.floor((a.Y + b.Y) / 2) + 0.5)
         f.Rotation = math.deg(math.atan2(d.Y, d.X))
@@ -484,13 +484,26 @@ do
 
             if active and hrp then
                 local center, on = cam:WorldToViewportPoint(hrp.Position)
-                if on then
-                    local top = cam:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
-                    local bot = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
-                    local height = math.max(math.abs(top.Y - bot.Y), 1)
-                    local width  = height * 0.55
-                    local x, y = center.X - width / 2, center.Y - height / 2
+                local top = cam:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
+                local bot = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+                local height = math.max(math.abs(top.Y - bot.Y), 1)
+                local width  = height * 0.55
+                local x, y = center.X - width / 2, center.Y - height / 2
 
+                -- tracer: drawn for EVERY target in front of the camera, including
+                -- ones off-screen / not in view (the line just runs off the screen
+                -- edge toward them). center.Z > 0 == in front; behind-camera points
+                -- project inverted, so we skip those. Slightly sub-1px so it matches
+                -- the thin Drawing box outline instead of looking fatter.
+                if Esp.tracer and center.Z > 0 then
+                    local origin
+                    if Esp.tracerOrigin == "Top" then origin = Vector2.new(vp.X / 2, 0)
+                    elseif Esp.tracerOrigin == "Mouse" then origin = mouse
+                    else origin = Vector2.new(vp.X / 2, vp.Y) end
+                    setLine(o.tracer, origin, Vector2.new(center.X, y + height), Esp.color, 0.5)
+                end
+
+                if on then
                     -- box: full outline / corner brackets / solid filled box
                     if not Esp.box then
                         -- box disabled; leave it hidden
@@ -536,13 +549,6 @@ do
                         o.health.Position = Vector2.new(x - 4, y + height * (1 - hp))
                         o.health.Color = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(80, 255, 80), hp)
                         o.health.Visible = true
-                    end
-                    if Esp.tracer then
-                        local origin
-                        if Esp.tracerOrigin == "Top" then origin = Vector2.new(vp.X / 2, 0)
-                        elseif Esp.tracerOrigin == "Mouse" then origin = mouse
-                        else origin = Vector2.new(vp.X / 2, vp.Y) end
-                        setLine(o.tracer, origin, Vector2.new(center.X, y + height), Esp.color)
                     end
                 end
 
