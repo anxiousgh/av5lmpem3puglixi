@@ -331,8 +331,8 @@ end
 local Esp = {
     enabled = false, box = true, names = false, distance = false, health = false,
     teamCheck = false, color = Color3.fromRGB(200, 183, 247),
-    boxType = "Full",                 -- "Full" | "Corner" | "Silhouette"
-    fillOpacity = 0.4,                -- Drawing alpha for the "Silhouette" box style
+    boxType = "Full",                 -- "Full" | "Corner" | "Solid"
+    fillOpacity = 0.4,                -- Drawing alpha for the "Solid" filled box
     tracer = false, tracerOrigin = "Bottom",   -- "Bottom" | "Top" | "Mouse"
     chams = false,                    -- in-game Highlight
     chamsFill = Color3.fromRGB(200, 183, 247),
@@ -346,7 +346,7 @@ if getgenv then
     if g.WH then g.WH.espPreview = Esp end
 end
 do
-    local objs = {}   -- plr -> { box, name, dist, health, tracer, corners?, skel?, chams? }
+    local objs = {}   -- plr -> { box, solid, name, dist, health, tracer, corners?, skel?, chams? }
 
     -- skeleton bone pairs (R15 first, then R6; missing parts are skipped)
     local BONES = {
@@ -359,71 +359,72 @@ do
         { "Torso", "Left Leg" }, { "Torso", "Right Leg" },
     }
 
-    local function newLine() return mkDraw("Line", { Thickness = 1, Visible = false, Transparency = 1 }) end
+    -- Drawing.Line and Drawing.Triangle flicker on some executors, while
+    -- Drawing.Square / Text and in-game GUI frames are rock-steady. So the
+    -- lines (tracer / corner brackets / skeleton) are drawn as thin rotated
+    -- GUI frames on our own ScreenGui, and the body fill is a filled Square.
+    local espGui = Instance.new("ScreenGui")
+    espGui.Name = "\0"
+    espGui.ResetOnSpawn = false
+    espGui.IgnoreGuiInset = false   -- match WorldToViewportPoint / ViewportSize space
+    espGui.DisplayOrder = 5
+    pcall(function() espGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not espGui.Parent then
+        pcall(function() espGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end)
+    end
 
-    -- "Silhouette" box style: fill the character's convex-hull silhouette.
-    -- Projects every visible part's center (works on ANY rig, not a fixed name
-    -- list), hulls them and fills with triangles -- a clean solid body shape.
-    -- Andrew's monotone-chain convex hull of a list of Vector2 points
-    local function convexHull(pts)
-        table.sort(pts, function(a, b) return a.X < b.X or (a.X == b.X and a.Y < b.Y) end)
-        local n = #pts
-        if n < 3 then return pts end
-        local function cross(o, a, b) return (a.X - o.X) * (b.Y - o.Y) - (a.Y - o.Y) * (b.X - o.X) end
-        local h = {}
-        for i = 1, n do
-            while #h >= 2 and cross(h[#h - 1], h[#h], pts[i]) <= 0 do h[#h] = nil end
-            h[#h + 1] = pts[i]
-        end
-        local floor = #h + 1
-        for i = n - 1, 1, -1 do
-            while #h >= floor and cross(h[#h - 1], h[#h], pts[i]) <= 0 do h[#h] = nil end
-            h[#h + 1] = pts[i]
-        end
-        h[#h] = nil   -- drop the duplicated start point
-        return h
+    local function lineFrame()
+        local f = Instance.new("Frame")
+        f.AnchorPoint = Vector2.new(0.5, 0.5)
+        f.BorderSizePixel = 0
+        f.BackgroundColor3 = Esp.color
+        f.Visible = false
+        f.Parent = espGui
+        return f
+    end
+    -- aim a thin frame from screen-point a to screen-point b (a rotated 1px bar)
+    local function setLine(f, a, b, color)
+        local d = b - a
+        f.Size = UDim2.fromOffset(math.max(d.Magnitude, 1), 1)
+        f.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+        f.Rotation = math.deg(math.atan2(d.Y, d.X))
+        f.BackgroundColor3 = color
+        f.Visible = true
     end
 
     local function add(plr)
         if plr == LocalPlayer or objs[plr] or not hasDrawing then return end
         objs[plr] = {
             box    = mkDraw("Square", { Thickness = 1, Filled = false, Visible = false, Transparency = 1 }),
+            solid  = mkDraw("Square", { Thickness = 0, Filled = true, Visible = false }),
             name   = mkDraw("Text",   { Size = 13, Center = true, Outline = true, Visible = false }),
             dist   = mkDraw("Text",   { Size = 12, Center = true, Outline = true, Visible = false }),
             health = mkDraw("Square", { Thickness = 1, Filled = true, Visible = false }),
-            tracer = newLine(),
-            corners = nil, skel = nil, fill = nil, chams = nil,   -- created lazily when used
+            tracer = lineFrame(),
+            corners = nil, skel = nil, chams = nil,   -- created lazily when used
         }
     end
     local function remove(plr)
         local o = objs[plr]; if not o then return end
-        for _, k in ipairs({ "box", "name", "dist", "health", "tracer" }) do
-            if o[k] then pcall(function() o[k]:Remove() end) end
+        for _, k in ipairs({ "box", "solid", "name", "dist", "health" }) do
+            if o[k] then pcall(function() o[k]:Remove() end) end   -- Drawing objects
         end
-        if o.corners then for _, d in ipairs(o.corners) do pcall(function() d:Remove() end) end end
-        if o.skel then for _, d in ipairs(o.skel) do pcall(function() d:Remove() end) end end
-        if o.fill then for _, d in ipairs(o.fill) do pcall(function() d:Remove() end) end end
+        if o.tracer then pcall(function() o.tracer:Destroy() end) end
+        if o.corners then for _, d in ipairs(o.corners) do pcall(function() d:Destroy() end) end end
+        if o.skel then for _, d in ipairs(o.skel) do pcall(function() d:Destroy() end) end end
         if o.chams then pcall(function() o.chams:Destroy() end) end
         objs[plr] = nil
     end
 
     local function ensureCorners(o)
         if o.corners then return o.corners end
-        local c = {}; for i = 1, 8 do c[i] = newLine() end
+        local c = {}; for i = 1, 8 do c[i] = lineFrame() end
         o.corners = c; return c
     end
     local function ensureSkel(o)
         if o.skel then return o.skel end
-        local s = {}; for i = 1, #BONES do s[i] = newLine() end
+        local s = {}; for i = 1, #BONES do s[i] = lineFrame() end
         o.skel = s; return s
-    end
-    local function ensureFill(o)   -- triangle pool for the "Silhouette" box style
-        if o.fill then return o.fill end
-        local tris = {}
-        for i = 1, 28 do
-            tris[i] = mkDraw("Triangle", { Filled = true, Thickness = 0, Visible = false, Transparency = 0.4 })
-        end
-        o.fill = tris; return tris
     end
     local function ensureChams(o, char)   -- in-game Highlight
         if o.chams and o.chams.Parent then return o.chams end
@@ -441,6 +442,7 @@ do
 
     function Esp.clear()   -- remove all ESP objects (used on unload)
         for plr in pairs(objs) do remove(plr) end
+        pcall(function() espGui:Destroy() end)
     end
 
     track(RunService.RenderStepped:Connect(function()
@@ -450,12 +452,11 @@ do
         local myHRP = getHRP()
         for plr, o in pairs(objs) do
             if not o.box then continue end
-            -- hide all 2D drawings first
-            o.box.Visible = false; o.name.Visible = false; o.dist.Visible = false
-            o.health.Visible = false; o.tracer.Visible = false
+            -- hide everything first
+            o.box.Visible = false; o.solid.Visible = false; o.name.Visible = false
+            o.dist.Visible = false; o.health.Visible = false; o.tracer.Visible = false
             if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
             if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
-            if o.fill then for _, d in ipairs(o.fill) do d.Visible = false end end
 
             local active = Esp.enabled and teamOk(plr, Esp.teamCheck)
             local char, hum = nil, nil
@@ -483,7 +484,7 @@ do
                     local width  = height * 0.55
                     local x, y = center.X - width / 2, center.Y - height / 2
 
-                    -- box: full square / corner brackets / convex-hull fill
+                    -- box: full outline / corner brackets / solid filled box
                     if not Esp.box then
                         -- box disabled; leave it hidden
                     elseif Esp.boxType == "Corner" then
@@ -496,47 +497,16 @@ do
                             { x + width, y + height, x + width - cl, y + height }, { x + width, y + height, x + width, y + height - cl }, -- BR
                         }
                         for i, p in ipairs(pts) do
-                            c[i].Color = Esp.color
-                            c[i].From = Vector2.new(p[1], p[2]); c[i].To = Vector2.new(p[3], p[4])
-                            c[i].Visible = true
+                            setLine(c[i], Vector2.new(p[1], p[2]), Vector2.new(p[3], p[4]), Esp.color)
                         end
-                    elseif Esp.boxType == "Silhouette" then
-                        -- filled body silhouette (works on any rig). Build the hull
-                        -- from each visible part's CENTER, not its 8 corners: centers
-                        -- move smoothly frame-to-frame, so the hull edges don't snap
-                        -- between corners as limbs idle-animate -- that corner-swapping
-                        -- was the flicker. Round to whole pixels (kills sub-pixel
-                        -- shimmer) and inflate the hull outward so it wraps the body
-                        -- instead of cutting through the part centers.
-                        local pts = {}
-                        for _, part in ipairs(char:GetDescendants()) do
-                            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" and part.Transparency < 1 then
-                                local sp = cam:WorldToViewportPoint(part.Position)
-                                if sp.Z > 0 then pts[#pts + 1] = Vector2.new(math.round(sp.X), math.round(sp.Y)) end
-                            end
-                        end
-                        if #pts >= 3 then
-                            local hull = convexHull(pts)
-                            -- inflate each hull vertex outward from the centroid
-                            local cx, cy = 0, 0
-                            for _, v in ipairs(hull) do cx = cx + v.X; cy = cy + v.Y end
-                            local cen = Vector2.new(cx / #hull, cy / #hull)
-                            local pad = math.clamp(height * 0.12, 6, 48)
-                            for i, v in ipairs(hull) do
-                                local d = v - cen
-                                if d.Magnitude > 0.001 then hull[i] = v + d.Unit * pad end
-                            end
-                            local tris = ensureFill(o)
-                            local used = 0
-                            for i = 2, #hull - 1 do
-                                used = used + 1
-                                local t = tris[used]; if not t then break end
-                                t.PointA = hull[1]; t.PointB = hull[i]; t.PointC = hull[i + 1]
-                                t.Color = Esp.color
-                                t.Transparency = Esp.fillOpacity
-                                t.Visible = true
-                            end
-                        end
+                    elseif Esp.boxType == "Solid" then
+                        -- filled translucent box (a Drawing.Square -- no flicker,
+                        -- unlike the triangle-fan silhouette)
+                        o.solid.Color = Esp.color
+                        o.solid.Size = Vector2.new(width, height)
+                        o.solid.Position = Vector2.new(x, y)
+                        o.solid.Transparency = Esp.fillOpacity
+                        o.solid.Visible = true
                     else
                         o.box.Color = Esp.color
                         o.box.Size = Vector2.new(width, height)
@@ -565,10 +535,7 @@ do
                         if Esp.tracerOrigin == "Top" then origin = Vector2.new(vp.X / 2, 0)
                         elseif Esp.tracerOrigin == "Mouse" then origin = mouse
                         else origin = Vector2.new(vp.X / 2, vp.Y) end
-                        o.tracer.Color = Esp.color
-                        o.tracer.From = origin
-                        o.tracer.To = Vector2.new(center.X, y + height)
-                        o.tracer.Visible = true
+                        setLine(o.tracer, origin, Vector2.new(center.X, y + height), Esp.color)
                     end
                 end
 
@@ -582,9 +549,7 @@ do
                             local a, aOn = cam:WorldToViewportPoint(p1.Position)
                             local b, bOn = cam:WorldToViewportPoint(p2.Position)
                             if aOn and bOn then
-                                line.Color = Esp.color
-                                line.From = Vector2.new(a.X, a.Y); line.To = Vector2.new(b.X, b.Y)
-                                line.Visible = true
+                                setLine(line, Vector2.new(a.X, a.Y), Vector2.new(b.X, b.Y), Esp.color)
                             end
                         end
                     end
@@ -925,7 +890,7 @@ do
     Sec:Toggle({ Name = "Box", Flag = "EspBox", Default = true,
         Callback = function(v) Esp.box = v end })
     Sec:Dropdown({ Name = "Box style", Flag = "EspBoxType", Default = "Full", Multi = false,
-        Items = { "Full", "Corner", "Silhouette" },
+        Items = { "Full", "Corner", "Solid" },
         Callback = function(v) Esp.boxType = (type(v) == "table" and v[1]) or v or "Full" end })
     Sec:Toggle({ Name = "Names", Flag = "EspNames", Default = false,
         Callback = function(v) Esp.names = v end })
@@ -949,7 +914,7 @@ do
     Sec2:Label({ Name = "ESP color" }):Colorpicker({
         Flag = "EspColor", Default = Color3.fromRGB(200, 183, 247),
         Callback = function(c) Esp.color = c end })
-    Sec2:Slider({ Name = "Silhouette opacity", Flag = "EspFillOp",
+    Sec2:Slider({ Name = "Solid box opacity", Flag = "EspFillOp",
         Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
         Callback = function(v) Esp.fillOpacity = v / 100 end })
     Sec2:Label({ Name = "Chams fill" }):Colorpicker({
