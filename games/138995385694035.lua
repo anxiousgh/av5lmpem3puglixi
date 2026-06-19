@@ -637,6 +637,8 @@ do
     local Sec = CombatSub:Section({ Name = "Target", Side = 1 })
     Sec:Label({ Name = "Lock targets" }):Keybind({ Name = "Lock targets", Flag = "HC_LockKey", Mode = "Hold", Default = Enum.KeyCode.C,
         Callback = function(state) if state then lockTarget() end end })
+    Sec:Label({ Name = "Unlock targets" }):Keybind({ Name = "Unlock targets", Flag = "HC_UnlockKey", Mode = "Hold", Default = Enum.KeyCode.X,
+        Callback = function(state) if state then clearTargets() end end })
     Sec:Button({ Name = "Unlock targets", Callback = function() clearTargets() end })
     Sec:Toggle({ Name = "Auto switch", Flag = "HC_AutoSwitch", Default = false,
         Callback = function(v) HC.autoSwitch = v end })
