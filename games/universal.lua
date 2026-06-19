@@ -460,8 +460,8 @@ do
         if o.glow and o.glow.Parent == part then return o.glow end
         if o.glow then pcall(function() o.glow:Destroy() end) end
         local light = Instance.new("PointLight")
-        light.Range = 4          -- small, so the glow hugs the target and barely
-        light.Brightness = 5     -- bleeds onto nearby players (incl. the local one)
+        light.Range = 2.5        -- tiny, so the glow barely haloes the target and
+        light.Brightness = 2     -- hardly bleeds onto nearby players (incl. local)
         light.Shadows = false
         light.Parent = part
         o.glow = light; return light
