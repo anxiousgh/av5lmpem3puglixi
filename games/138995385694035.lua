@@ -76,10 +76,11 @@ local HC = {
     checkVisible = false, visibleOrigin = "Head",
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
-    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false,
+    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 12,
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
     hitSoundEnabled = true, hitSoundId = 135698842254153, hitSoundVolume = 1.0,
+    ammoHud = false,
     autoShoot = false, autoShootDist = 250, autoShootCooldown = 0.15, autoShootVis = true,
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
@@ -282,18 +283,26 @@ local function fireShootAt(part)
     local g = gv()
     local sent = g and g._WH_HC_SENT
     local origin = (sent and sent.Position) or root.Position
-    -- WALLBANG: the server raycasts origin -> reported hit Position and rejects a
-    -- blocked LoS ("wallbang"). We can't move origin (mismatch), so instead we
-    -- report the hit Position AT our origin (zero-length ray = always clear) while
-    -- keeping Instance/thePart = the TARGET's part, so damage still lands on them.
-    -- Skipped while voidshooting (origin is already point-blank on the target).
-    local reportPos = part.Position
-    if HC.wallbang and not sent then reportPos = origin end
+    -- WALLBANG: the server raycasts origin -> the hit on the part, and a blocked
+    -- LoS = "wallbang". The hit must stay on the part (faking the Position errors),
+    -- so instead we NUDGE origin a few studs toward the target -- enough to clear
+    -- thin cover / a corner without moving far enough to trip "origin mismatch".
+    -- Tune HC.wallbangOffset until it lands without an error. Skipped while
+    -- voidshooting (origin is already point-blank on the target).
+    if HC.wallbang and not sent then
+        local toTarget = part.Position - origin
+        local d = toTarget.Magnitude
+        if d > 0 then
+            origin = origin + toTarget.Unit * math.min(HC.wallbangOffset, math.max(0, d - 2))
+        end
+    end
+    local hitPos = part.Position
     local hits, targets = table.create(pellets), table.create(pellets)
     for i = 1, pellets do
-        hits[i]    = { Normal = reportPos, Instance = part, Position = reportPos }
-        targets[i] = { thePart = part, theOffset = part.CFrame:PointToObjectSpace(reportPos) }
+        hits[i]    = { Normal = hitPos, Instance = part, Position = hitPos }
+        targets[i] = { thePart = part, theOffset = part.CFrame:PointToObjectSpace(hitPos) }
     end
+    -- aim == origin keeps the spread PRNG check happy (degenerate ray).
     local payload = { hits, targets, origin, origin, Workspace:GetServerTimeNow() }
     return pcall(function() me:FireServer("Shoot", payload) end)
 end
@@ -420,31 +429,29 @@ local function forceShotPart(char)
     return targetParts(char)
 end
 -- ============================================================
---  EVENT-DRIVEN FX  -- the synth never touches the gun script, so we fake the
---  tracer + hit sound:
---    * tracer -> on a real shot: Force Hit/manual fire it off the gun's client
---                ammo dropping; Auto Shoot triggers it directly (no ammo change)
---    * hit FX -> only when the engaged target loses HP within a short window of
---                that shot (you shot AND it landed)
+--  EVENT-DRIVEN FX  -- the synth never renders gun visuals, so we fake the
+--  tracer + hit sound off the gun's SERVER ammo (Script.Ammo) dropping. The
+--  server decrements that on EVERY shot it accepts -- manual AND our synth -- so
+--  one ammo-drop == one real shot. Hit sound only when the engaged target loses
+--  HP within a short window of that drop.
 -- ============================================================
 local FX_WINDOW = 0.6
-local _shotT = 0  -- tick() of the last real shot (ammo decrement)
+local _shotT = 0  -- tick() of the last real shot (server ammo decrement)
 
--- equipped gun's client ammo value (Tool.Script.Ammo.CLIENT)
-local function findClientAmmo()
+local function equippedGunScript()
     local c = LocalPlayer.Character
     local tool = c and c:FindFirstChildOfClass("Tool")
-    local scr = tool and tool:FindFirstChild("Script")
+    return tool and tool:FindFirstChild("Script")
+end
+-- the SERVER ammo value (Script.Ammo) -- drops once per server-accepted shot
+local function findServerAmmo()
+    local scr = equippedGunScript()
     local ammo = scr and scr:FindFirstChild("Ammo")
-    local client = ammo and ammo:FindFirstChild("CLIENT")
-    if client and (client:IsA("IntValue") or client:IsA("NumberValue")) then return client end
     if ammo and (ammo:IsA("IntValue") or ammo:IsA("NumberValue")) then return ammo end
     return nil
 end
 
--- stamp a shot (so the hit-sound watcher fires) and draw a tracer to hitPos.
--- Called by BOTH the ammo watcher (manual / Force Hit shots) and Auto Shoot
--- (which fires the synth directly and never decrements ammo).
+-- stamp a shot (so the hit-sound watcher fires) and draw a tracer to hitPos
 local function fxShotFired(hitPos)
     _shotT = tick()
     if not HC.tracerEnabled or not hitPos then return end
@@ -452,14 +459,12 @@ local function fxShotFired(hitPos)
     spawnTracer(origin, hitPos)
 end
 
--- a real trigger pull (ammo dropped): tracer to the Force-Hit target or crosshair
+-- a real shot landed (server ammo dropped): tracer to the engaged target, else crosshair
 local function onAmmoShot()
     local hitPos
-    if HC.forceHit then
-        local plr = getTarget()
-        local part = plr and plr.Character and forceShotPart(plr.Character)
-        if part then hitPos = part.Position end
-    end
+    local plr = getTarget()
+    local part = plr and plr.Character and forceShotPart(plr.Character)
+    if part then hitPos = part.Position end
     if not hitPos then
         local cam = Workspace.CurrentCamera
         local mp = UIS:GetMouseLocation()
@@ -476,10 +481,10 @@ local function onAmmoShot()
     fxShotFired(hitPos)
 end
 
--- ammo watcher: re-attaches when the equipped gun changes; each decrease = a shot
+-- ammo watcher: re-attaches when the equipped gun changes; each decrease = one shot
 local _watchedAmmo, _watchedAmmoConn, _watchedAmmoLast
 local function ensureAmmoWatch()
-    local av = findClientAmmo()
+    local av = findServerAmmo()
     if av == _watchedAmmo then return end
     if _watchedAmmoConn then _watchedAmmoConn:Disconnect(); _watchedAmmoConn = nil end
     _watchedAmmo = av
@@ -511,13 +516,63 @@ local function ensureHumWatch()
     end)
 end
 
--- keep both watchers attached to the current gun / target (cheap when unchanged)
+-- ============================================================
+--  FAKE AMMO HUD  -- Force Hit / Auto Shoot spend SERVER ammo (Script.Ammo) but
+--  never the client counter the game's own HUD shows, so your real count is
+--  hidden. This panel shows the REAL (server) ammo, with the client value too.
+-- ============================================================
+local ammoGui, ammoMainLbl, ammoSubLbl
+local function destroyAmmoHud()
+    if ammoGui then pcall(function() ammoGui:Destroy() end); ammoGui = nil end
+end
+local function ensureAmmoHud()
+    if ammoGui and ammoGui.Parent then return end
+    ammoGui = Instance.new("ScreenGui")
+    ammoGui.Name = "_wh_ammo_hud"
+    ammoGui.ResetOnSpawn = false
+    ammoGui.IgnoreGuiInset = true
+    local ok = pcall(function() ammoGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not ok or not ammoGui.Parent then ammoGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    local frame = Instance.new("Frame")
+    frame.Size, frame.AnchorPoint = UDim2.fromOffset(150, 56), Vector2.new(1, 1)
+    frame.Position = UDim2.new(1, -20, 1, -120)
+    frame.BackgroundColor3, frame.BackgroundTransparency, frame.BorderSizePixel = Color3.fromRGB(15,15,15), 0.35, 0
+    frame.Parent = ammoGui
+    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 8); corner.Parent = frame
+    local stroke = Instance.new("UIStroke"); stroke.Color, stroke.Transparency = Color3.fromRGB(80,80,80), 0.4; stroke.Parent = frame
+    ammoMainLbl = Instance.new("TextLabel")
+    ammoMainLbl.Size, ammoMainLbl.Position = UDim2.new(1,-8,0,30), UDim2.new(0,4,0,4)
+    ammoMainLbl.BackgroundTransparency, ammoMainLbl.TextColor3 = 1, Color3.fromRGB(255,255,255)
+    ammoMainLbl.TextStrokeTransparency, ammoMainLbl.TextSize, ammoMainLbl.Font = 0.5, 22, Enum.Font.GothamBold
+    ammoMainLbl.Text, ammoMainLbl.Parent = "-", frame
+    ammoSubLbl = Instance.new("TextLabel")
+    ammoSubLbl.Size, ammoSubLbl.Position = UDim2.new(1,-8,0,16), UDim2.new(0,4,0,36)
+    ammoSubLbl.BackgroundTransparency, ammoSubLbl.TextColor3 = 1, Color3.fromRGB(180,180,180)
+    ammoSubLbl.TextSize, ammoSubLbl.Font = 12, Enum.Font.Gotham
+    ammoSubLbl.Text, ammoSubLbl.Parent = "real ammo", frame
+end
+local function updateAmmoHud()
+    if not HC.ammoHud then if ammoGui then destroyAmmoHud() end return end
+    ensureAmmoHud()
+    local scr = equippedGunScript()
+    local ammo = scr and scr:FindFirstChild("Ammo")
+    if not (ammo and (ammo:IsA("IntValue") or ammo:IsA("NumberValue"))) then
+        ammoMainLbl.Text = "—"; ammoSubLbl.Text = "no gun equipped"; return
+    end
+    local maxV    = scr:FindFirstChild("MaxAmmo")
+    local clientV = ammo:FindFirstChild("CLIENT")
+    ammoMainLbl.Text = tostring(ammo.Value) .. ((maxV and maxV.Value) and (" / " .. tostring(maxV.Value)) or "")
+    ammoSubLbl.Text  = "real ammo  (client " .. (clientV and tostring(clientV.Value) or "?") .. ")"
+end
+
+-- keep watchers + ammo HUD attached to the current gun / target (cheap when idle)
 local _fxEnsureLast = 0
 track(RunService.Heartbeat:Connect(function()
     if tick() - _fxEnsureLast < 0.15 then return end
     _fxEnsureLast = tick()
     ensureAmmoWatch()
     ensureHumWatch()
+    updateAmmoHud()
 end))
 
 -- ============================================================
@@ -614,10 +669,8 @@ track(RunService.Heartbeat:Connect(function()
     else
         fireShootAt(part)
     end
-    -- drive the tracer + hit-sound off the auto-shot too (no ammo decrement here,
-    -- so we trigger the FX directly). During a voidshoot glue the muzzle sits on
-    -- the target, so the tracer self-skips and only the hit sound plays.
-    fxShotFired(part.Position)
+    -- FX (tracer + hit sound) are NOT triggered here -- they fire off the SERVER
+    -- ammo dropping (one per accepted shot), so auto shoot no longer spams tracers.
 end))
 
 -- ============================================================
@@ -836,8 +889,10 @@ do
         Callback = function(v) HC.hitPart = (type(v) == "table" and v[1]) or v or "Head" end })
     Sec2:Slider({ Name = "Cooldown", Flag = "HC_ForceHitCd", Min = 0, Max = 1000, Default = 180, Decimals = 0, Suffix = " ms",
         Callback = function(v) HC.forceHitCooldown = v / 1000 end })
-    Sec2:Toggle({ Name = "Wallbang (ignore LoS)", Flag = "HC_Wallbang", Default = false,
+    Sec2:Toggle({ Name = "Wallbang (nudge origin)", Flag = "HC_Wallbang", Default = false,
         Callback = function(v) HC.wallbang = v end })
+    Sec2:Slider({ Name = "Wallbang origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 60, Default = 12, Decimals = 0, Suffix = " studs",
+        Callback = function(v) HC.wallbangOffset = v end })
     -- fake bullet tracer + hit sound (the synth never renders gun visuals)
     Sec2:Toggle({ Name = "Bullet tracers", Flag = "HC_Tracer", Default = true,
         Callback = function(v) HC.tracerEnabled = v end })
@@ -850,6 +905,8 @@ do
         Callback = function(v) HC.hitSoundEnabled = v end })
     Sec2:Slider({ Name = "Hit sound volume", Flag = "HC_HitSoundVol", Min = 0, Max = 500, Default = 100, Decimals = 0, Suffix = "%",
         Callback = function(v) HC.hitSoundVolume = v / 100 end })
+    Sec2:Toggle({ Name = "Fake ammo HUD (real ammo)", Flag = "HC_AmmoHud", Default = false,
+        Callback = function(v) HC.ammoHud = v end })
 
     local Sec3 = CombatSub:Section({ Name = "Auto Reload", Side = 2 })
     Sec3:Toggle({ Name = "Auto reload (low ammo)", Flag = "HC_Reload", Default = false,
@@ -976,8 +1033,9 @@ local function hcCleanup()
     setForceHit(false)
     HC.autoShoot, HC.voidshoot, HC.stomp, HC.stompTargets, HC.reload = false, false, false, false, false
     HC.knifeAura, HC.knifeEquip, HC.antiAfk, HC.forceAfk = false, false, false, false
-    HC.targetLine, HC.targetOutline = false, false
+    HC.targetLine, HC.targetOutline, HC.ammoHud = false, false, false
     voidUnglue()
+    destroyAmmoHud()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_VS_RESTORE") end)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     if rbLine then pcall(function() rbLine:Remove() end) end
