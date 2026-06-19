@@ -5,6 +5,8 @@
 --    Combat   : Target, Force Hit, Auto Reload, Auto Stomp, Auto Stomp Targets
 --    Ragebot  : Auto Shoot, Auto Equip, Voidshoot
 --    Knife Bot: knife aura (attach/orbit) + auto-equip knife
+--    Checks   : visible(+origin)/knocked/grabbed/forcefield/loaded -- global
+--               target-validity filters respected by all targeting + shooting
 --    Misc     : Anti-AFK badge, Force-AFK badge
 --    Util     : Target Line, Target Outline
 --
@@ -69,7 +71,10 @@ end
 
 local HC = {
     -- target (multi-target lock list)
-    autoSwitch = false, priority = "Closest to mouse", ignoreKnocked = false,
+    autoSwitch = false, priority = "Closest to mouse",
+    -- checks (Checks tab) -- respected by all targeting + shooting
+    checkVisible = false, visibleOrigin = "Head",
+    checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
     forceHit = false, hitPart = "Head", forceHitCooldown = 0.18,
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
@@ -101,12 +106,71 @@ local RageTargets = {}
 local function targetParts(char)
     return char:FindFirstChild(HC.hitPart) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
 end
+-- ---- per-player CHECKS (Checks tab) -- respected by all targeting + shooting ----
+local function isGrabbed(plr)
+    local m = hcModel(plr)
+    local fx = m and m:FindFirstChild("BodyEffects")
+    local g = fx and fx:FindFirstChild("Grabbed")
+    return g ~= nil and g.Value ~= nil
+end
+local function hasForceField(plr)
+    local ch = plr.Character
+    if ch and ch:FindFirstChildOfClass("ForceField") then return true end
+    local m = hcModel(plr)
+    return m ~= nil and m:FindFirstChildOfClass("ForceField") ~= nil
+end
+local function isLoadedIn(plr)
+    local ch, m = plr.Character, hcModel(plr)
+    return (ch ~= nil and ch:FindFirstChild("FULLY_LOADED_CHAR") ~= nil)
+        or (m ~= nil and m:FindFirstChild("FULLY_LOADED_CHAR") ~= nil)
+end
+local function visOrigin()
+    local mode = HC.visibleOrigin
+    if mode == "Camera" then return Workspace.CurrentCamera.CFrame.Position end
+    local c = LocalPlayer.Character
+    if mode == "Root" then local r = c and c:FindFirstChild("HumanoidRootPart"); return r and r.Position end
+    local h = c and c:FindFirstChild("Head"); return h and h.Position  -- "Head" (default)
+end
+local function isVisible(plr)
+    local m = hcModel(plr)
+    local aim = m and (m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Head"))
+    if not aim then return false end
+    local origin = visOrigin(); if not origin then return true end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local ignore = {}
+    local lc = LocalPlayer.Character; if lc then ignore[#ignore + 1] = lc end
+    local ig = Workspace:FindFirstChild("Ignored"); if ig then ignore[#ignore + 1] = ig end
+    params.FilterDescendantsInstances = ignore
+    local res = Workspace:Raycast(origin, aim.Position - origin, params)
+    if not res then return true end          -- nothing in the way
+    return res.Instance:IsDescendantOf(m)     -- first hit is the target = visible
+end
+-- persistent state checks (used for validity + lock-list membership)
+local function passesChecks(plr)
+    if HC.checkKnocked and isKnocked(plr) then return false end
+    if HC.checkGrabbed and isGrabbed(plr) then return false end
+    if HC.checkFF and hasForceField(plr) then return false end
+    if HC.checkLoaded and not isLoadedIn(plr) then return false end
+    return true
+end
+
+-- base validity (alive, not dead). Deliberately does NOT apply the checks, so a
+-- locked target stays in the list even while knocked/occluded/etc. -- otherwise
+-- the knocked check would yank stomp targets out of the list the moment they go down.
 local function validTarget(plr)
     if not plr or plr == LocalPlayer or not plr.Parent then return false end
     if not isAlive(plr) then return false end
     if isDead(plr) then return false end
-    if HC.ignoreKnocked and isKnocked(plr) then return false end
     return plr.Character ~= nil and plr.Character:FindFirstChild("HumanoidRootPart") ~= nil
+end
+-- engageable right now = valid AND passes every enabled check (state + visibility).
+-- This is what all targeting/shooting selects on.
+local function canEngage(plr)
+    if not validTarget(plr) then return false end
+    if not passesChecks(plr) then return false end
+    if HC.checkVisible and not isVisible(plr) then return false end
+    return true
 end
 
 -- screen-space distance from the mouse to a player (math.huge if off-screen)
@@ -137,30 +201,16 @@ local function scorePlayer(plr)
     return mouseDist(plr)
 end
 
--- best valid player (by current priority) out of a pool
-local function bestFrom(pool)
-    local best, bestScore = nil, math.huge
-    for _, plr in ipairs(pool) do
-        if validTarget(plr) then
-            local s = scorePlayer(plr)
-            if s < bestScore then bestScore = s; best = plr end
-        end
-    end
-    return best
-end
--- auto-switch fallback: best of everyone by priority
-local function acquireTarget() return bestFrom(Players:GetPlayers()) end
-
 -- multi-target lock list
 local function isLocked(plr)
     for _, p in ipairs(RageTargets) do if p == plr then return true end end
     return false
 end
--- Lock ALWAYS adds the player nearest the mouse, regardless of priority.
+-- Lock ALWAYS adds the engageable player nearest the mouse, regardless of priority.
 local function lockTarget()
     local best, bestD = nil, math.huge
     for _, plr in ipairs(Players:GetPlayers()) do
-        if validTarget(plr) and not isLocked(plr) then
+        if canEngage(plr) and not isLocked(plr) then
             local d = mouseDist(plr)
             if d < bestD then bestD = d; best = plr end
         end
@@ -168,7 +218,7 @@ local function lockTarget()
     if best then RageTargets[#RageTargets + 1] = best end
 end
 local function clearTargets() table.clear(RageTargets) end
--- drop dead / departed entries, return the live list
+-- drop dead / departed / state-failed locked entries (keeps merely-occluded ones)
 local function liveTargets()
     local i = 1
     while i <= #RageTargets do
@@ -177,13 +227,22 @@ local function liveTargets()
     return RageTargets
 end
 
--- current target: best of the locked list; if the list is empty and Auto switch
--- is on, best of everyone; otherwise nothing.
+-- current engageable target: best by priority among the locked list (or everyone
+-- if Auto switch is on), filtered by ALL checks incl. visibility.
 local function getTarget()
     local locked = liveTargets()
-    if #locked > 0 then return bestFrom(locked) end
-    if HC.autoSwitch then return acquireTarget() end
-    return nil
+    local pool
+    if #locked > 0 then pool = locked
+    elseif HC.autoSwitch then pool = Players:GetPlayers()
+    else return nil end
+    local best, bestScore = nil, math.huge
+    for _, plr in ipairs(pool) do
+        if canEngage(plr) then
+            local s = scorePlayer(plr)
+            if s < bestScore then bestScore = s; best = plr end
+        end
+    end
+    return best
 end
 
 -- publish to the shared Target Indicator widget
@@ -742,8 +801,6 @@ do
     Sec:Button({ Name = "Unlock targets", Callback = function() clearTargets() end })
     Sec:Toggle({ Name = "Auto switch", Flag = "HC_AutoSwitch", Default = false,
         Callback = function(v) HC.autoSwitch = v end })
-    Sec:Toggle({ Name = "Skip knocked players", Flag = "HC_IgnoreKnocked", Default = false,
-        Callback = function(v) HC.ignoreKnocked = v end })
     Sec:Dropdown({ Name = "Priority (which locked target)", Flag = "HC_Priority", Default = "Closest to mouse", Multi = false,
         Items = { "Closest to mouse", "Closest to me", "Lowest HP" },
         Callback = function(v) HC.priority = (type(v) == "table" and v[1]) or v or "Closest to mouse" end })
@@ -828,7 +885,30 @@ do
         Callback = function(v) HC.knifeEquip = v end })
 end
 
--- 4) Misc
+-- 4) Checks  -- global target-validity filters; everything that targets/shoots
+--    people (Force Hit, Auto Shoot, Voidshoot, Knife Bot, Auto Stomp targets)
+--    only engages players that pass every enabled check.
+local ChecksSub = MainPage:SubPage({ Name = "Checks" })
+do
+    local Sec = ChecksSub:Section({ Name = "Visibility", Side = 1 })
+    Sec:Toggle({ Name = "Visible check", Flag = "HC_CheckVisible", Default = false,
+        Callback = function(v) HC.checkVisible = v end })
+    Sec:Dropdown({ Name = "Visible origin", Flag = "HC_VisibleOrigin", Default = "Head", Multi = false,
+        Items = { "Head", "Camera", "Root" },
+        Callback = function(v) HC.visibleOrigin = (type(v) == "table" and v[1]) or v or "Head" end })
+
+    local Sec2 = ChecksSub:Section({ Name = "State", Side = 2 })
+    Sec2:Toggle({ Name = "Knocked check", Flag = "HC_CheckKnocked", Default = false,
+        Callback = function(v) HC.checkKnocked = v end })
+    Sec2:Toggle({ Name = "Grabbed check", Flag = "HC_CheckGrabbed", Default = false,
+        Callback = function(v) HC.checkGrabbed = v end })
+    Sec2:Toggle({ Name = "Forcefield check", Flag = "HC_CheckFF", Default = false,
+        Callback = function(v) HC.checkFF = v end })
+    Sec2:Toggle({ Name = "Loaded in check", Flag = "HC_CheckLoaded", Default = false,
+        Callback = function(v) HC.checkLoaded = v end })
+end
+
+-- 5) Misc
 local MiscSub = MainPage:SubPage({ Name = "Misc" })
 do
     local Sec = MiscSub:Section({ Name = "AFK badge", Side = 1 })
@@ -838,7 +918,7 @@ do
         Callback = function(v) HC.forceAfk = v; if v then HC.antiAfk = false end end })
 end
 
--- 5) Util
+-- 6) Util
 local UtilSub = MainPage:SubPage({ Name = "Util" })
 do
     local Sec = UtilSub:Section({ Name = "Target Line", Side = 1 })
