@@ -1029,8 +1029,37 @@ do
         end
     end))
 
+    -- gate every control: the lib fires each callback once on load with its
+    -- default. Without this guard that would create Atmosphere/Sky/Clouds and
+    -- shove the world to the defaults on every game. Nothing applies until the
+    -- user actually touches a control.
+    local ready = false
+    local function gated(fn) return function(...) if ready then fn(...) end end end
+
+    -- Atmosphere / Sky / Clouds are made lazily on first use; we destroy only the
+    -- ones WE created (pre-existing ones are left alone on unload).
+    local Terrain = Workspace:FindFirstChildOfClass("Terrain")
+    local mine = {}
+    local function getAtmo()
+        local a = Lighting:FindFirstChildOfClass("Atmosphere")
+        if not a then a = Instance.new("Atmosphere"); a.Parent = Lighting; mine.atmo = a end
+        return a
+    end
+    local function getSky()
+        local s = Lighting:FindFirstChildOfClass("Sky")
+        if not s then s = Instance.new("Sky"); s.Parent = Lighting; mine.sky = s end
+        return s
+    end
+    local function getClouds()
+        if not Terrain then return nil end
+        local c = Terrain:FindFirstChildOfClass("Clouds")
+        if not c then c = Instance.new("Clouds"); c.Parent = Terrain; mine.clouds = c end
+        return c
+    end
+
     -- ---- 3D weather: a big invisible part above the camera emitting particles
-    local weather = { rain = false, snow = false, part = nil, rainE = nil, snowE = nil }
+    local weather = { rain = false, snow = false, rainRate = 600, snowRate = 170,
+        part = nil, rainE = nil, snowE = nil }
     local function ensureWeather()
         if weather.part and weather.part.Parent then return end
         local p = Instance.new("Part")
@@ -1039,17 +1068,16 @@ do
         p.Size = Vector3.new(140, 1, 140); p.Parent = Workspace
 
         local rainE = Instance.new("ParticleEmitter")
-        rainE.Color = ColorSequence.new(Color3.fromRGB(190, 210, 235))
-        rainE.Transparency = NumberSequence.new(0.35)
-        rainE.Size = NumberSequence.new(0.22)
-        rainE.Lifetime = NumberRange.new(0.6, 0.9)
-        rainE.Rate = 700
-        rainE.Speed = NumberRange.new(95, 115)
-        rainE.SpreadAngle = Vector2.new(5, 5)
-        rainE.Acceleration = Vector3.new(0, -50, 0)
-        rainE.Squash = NumberSequence.new(5)        -- stretch droplets into streaks
+        rainE.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))  -- white
+        rainE.Transparency = NumberSequence.new(0.15)                   -- more visible
+        rainE.Size = NumberSequence.new(0.3)
+        rainE.Lifetime = NumberRange.new(0.5, 0.75)
+        rainE.Speed = NumberRange.new(105, 125)
+        rainE.SpreadAngle = Vector2.new(4, 4)
+        rainE.Acceleration = Vector3.new(0, -55, 0)
+        rainE.Squash = NumberSequence.new(2)        -- short streaks
         rainE.EmissionDirection = Enum.NormalId.Bottom
-        rainE.LightEmission = 0
+        rainE.LightEmission = 0.4
         rainE.Enabled = false
         rainE.Parent = p
 
@@ -1057,14 +1085,13 @@ do
         snowE.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
         snowE.Transparency = NumberSequence.new(0.1)
         snowE.Size = NumberSequence.new(0.35)
-        snowE.Lifetime = NumberRange.new(3.5, 5.5)
-        snowE.Rate = 170
-        snowE.Speed = NumberRange.new(8, 14)
-        snowE.SpreadAngle = Vector2.new(40, 40)
-        snowE.Acceleration = Vector3.new(0, -2, 0)
+        snowE.Lifetime = NumberRange.new(6, 9)        -- long enough to reach the ground
+        snowE.Speed = NumberRange.new(10, 16)
+        snowE.SpreadAngle = Vector2.new(25, 25)
+        snowE.Acceleration = Vector3.new(0, -5, 0)
         snowE.Rotation = NumberRange.new(0, 360)
-        snowE.RotSpeed = NumberRange.new(-45, 45)
-        snowE.Drag = 3
+        snowE.RotSpeed = NumberRange.new(-40, 40)
+        snowE.Drag = 0                                -- 0 so it falls all the way down
         snowE.LightEmission = 0.2
         snowE.EmissionDirection = Enum.NormalId.Bottom
         snowE.Enabled = false
@@ -1078,8 +1105,10 @@ do
             local cam = Workspace.CurrentCamera
             if cam then
                 local pos = cam.CFrame.Position
-                weather.part.CFrame = CFrame.new(pos.X, pos.Y + 50, pos.Z)
+                weather.part.CFrame = CFrame.new(pos.X, pos.Y + 35, pos.Z)
             end
+            weather.rainE.Rate = weather.rainRate
+            weather.snowE.Rate = weather.snowRate
             weather.rainE.Enabled = weather.rain
             weather.snowE.Enabled = weather.snow
         elseif weather.part then
@@ -1092,39 +1121,59 @@ do
         locked = false
         if weather.part then pcall(function() weather.part:Destroy() end); weather.part = nil end
         for prop, value in pairs(original) do pcall(function() Lighting[prop] = value end) end
+        for _, inst in pairs(mine) do pcall(function() inst:Destroy() end) end
     end
 
     -- ---- UI ----
     local WorldSub = VisualsPage:SubPage({ Name = "World" })
+
     local LSec = WorldSub:Section({ Name = "Lighting", Side = 1 })
     LSec:Slider({ Name = "Time of day", Flag = "WorldTime", Min = 0, Max = 24,
         Default = math.clamp(math.floor(desired.ClockTime or 14), 0, 24), Decimals = 0,
-        Callback = function(v) setProp("ClockTime", v) end })
+        Callback = gated(function(v) setProp("ClockTime", v) end) })
     LSec:Slider({ Name = "Brightness", Flag = "WorldBrightness", Min = 0, Max = 10,
         Default = math.clamp(desired.Brightness or 2, 0, 10), Decimals = 1,
-        Callback = function(v) setProp("Brightness", v) end })
+        Callback = gated(function(v) setProp("Brightness", v) end) })
     LSec:Slider({ Name = "Exposure", Flag = "WorldExposure", Min = -3, Max = 3,
         Default = math.clamp(desired.ExposureCompensation or 0, -3, 3), Decimals = 1,
-        Callback = function(v) setProp("ExposureCompensation", v) end })
+        Callback = gated(function(v) setProp("ExposureCompensation", v) end) })
     LSec:Slider({ Name = "Fog start", Flag = "WorldFogStart", Min = 0, Max = 5000,
         Default = math.clamp(desired.FogStart or 0, 0, 5000), Decimals = 0,
-        Callback = function(v) setProp("FogStart", v) end })
+        Callback = gated(function(v) setProp("FogStart", v) end) })
     LSec:Slider({ Name = "Fog end", Flag = "WorldFogEnd", Min = 0, Max = 10000,
         Default = math.clamp(desired.FogEnd or 10000, 0, 10000), Decimals = 0,
-        Callback = function(v) setProp("FogEnd", v) end })
+        Callback = gated(function(v) setProp("FogEnd", v) end) })
     LSec:Label({ Name = "Fog color" }):Colorpicker({ Flag = "WorldFogColor",
         Default = desired.FogColor or Color3.fromRGB(191, 191, 191),
-        Callback = function(c) setProp("FogColor", c) end })
+        Callback = gated(function(c) setProp("FogColor", c) end) })
     LSec:Label({ Name = "Ambient" }):Colorpicker({ Flag = "WorldAmbient",
         Default = desired.Ambient or Color3.fromRGB(0, 0, 0),
-        Callback = function(c) setProp("Ambient", c) end })
+        Callback = gated(function(c) setProp("Ambient", c) end) })
     LSec:Label({ Name = "Outdoor ambient" }):Colorpicker({ Flag = "WorldOutdoor",
         Default = desired.OutdoorAmbient or Color3.fromRGB(128, 128, 128),
-        Callback = function(c) setProp("OutdoorAmbient", c) end })
+        Callback = gated(function(c) setProp("OutdoorAmbient", c) end) })
+    LSec:Label({ Name = "Color shift top" }):Colorpicker({ Flag = "WorldShiftTop",
+        Default = desired.ColorShift_Top or Color3.fromRGB(0, 0, 0),
+        Callback = gated(function(c) setProp("ColorShift_Top", c) end) })
+    LSec:Label({ Name = "Color shift bottom" }):Colorpicker({ Flag = "WorldShiftBottom",
+        Default = desired.ColorShift_Bottom or Color3.fromRGB(0, 0, 0),
+        Callback = gated(function(c) setProp("ColorShift_Bottom", c) end) })
 
-    local OSec = WorldSub:Section({ Name = "Options", Side = 2 })
-    OSec:Toggle({ Name = "Full bright", Flag = "WorldFullbright", Default = false,
-        Callback = function(v)
+    local ASec = WorldSub:Section({ Name = "Atmosphere", Side = 1 })
+    ASec:Slider({ Name = "Density", Flag = "WorldAtmoDensity", Min = 0, Max = 1, Default = 0.3, Decimals = 2,
+        Callback = gated(function(v) getAtmo().Density = v end) })
+    ASec:Slider({ Name = "Haze", Flag = "WorldAtmoHaze", Min = 0, Max = 10, Default = 0, Decimals = 1,
+        Callback = gated(function(v) getAtmo().Haze = v end) })
+    ASec:Slider({ Name = "Glare", Flag = "WorldAtmoGlare", Min = 0, Max = 10, Default = 0, Decimals = 1,
+        Callback = gated(function(v) getAtmo().Glare = v end) })
+    ASec:Label({ Name = "Color" }):Colorpicker({ Flag = "WorldAtmoColor", Default = Color3.fromRGB(199, 170, 107),
+        Callback = gated(function(c) getAtmo().Color = c end) })
+    ASec:Label({ Name = "Decay" }):Colorpicker({ Flag = "WorldAtmoDecay", Default = Color3.fromRGB(106, 112, 125),
+        Callback = gated(function(c) getAtmo().Decay = c end) })
+
+    local WSec = WorldSub:Section({ Name = "Weather & options", Side = 2 })
+    WSec:Toggle({ Name = "Full bright", Flag = "WorldFullbright", Default = false,
+        Callback = gated(function(v)
             if v then
                 setProp("Ambient", Color3.fromRGB(255, 255, 255))
                 setProp("OutdoorAmbient", Color3.fromRGB(255, 255, 255))
@@ -1134,13 +1183,37 @@ do
                 setProp("OutdoorAmbient", original.OutdoorAmbient or Color3.fromRGB(128, 128, 128))
                 setProp("GlobalShadows", original.GlobalShadows ~= false)
             end
-        end })
-    OSec:Toggle({ Name = "Lock world settings", Flag = "WorldLock", Default = false, KeybindName = "World lock",
-        Callback = function(v) locked = v end })
-    OSec:Toggle({ Name = "Rain", Flag = "WorldRain", Default = false, KeybindName = "Rain",
-        Callback = function(v) weather.rain = v end })
-    OSec:Toggle({ Name = "Snow", Flag = "WorldSnow", Default = false, KeybindName = "Snow",
-        Callback = function(v) weather.snow = v end })
+        end) })
+    WSec:Toggle({ Name = "Lock world settings", Flag = "WorldLock", Default = false, KeybindName = "World lock",
+        Callback = gated(function(v) locked = v end) })
+    WSec:Toggle({ Name = "Rain", Flag = "WorldRain", Default = false, KeybindName = "Rain",
+        Callback = gated(function(v) weather.rain = v end) })
+    WSec:Slider({ Name = "Rain intensity", Flag = "WorldRainRate", Min = 50, Max = 3000, Default = 600, Decimals = 0,
+        Callback = gated(function(v) weather.rainRate = v end) })
+    WSec:Toggle({ Name = "Snow", Flag = "WorldSnow", Default = false, KeybindName = "Snow",
+        Callback = gated(function(v) weather.snow = v end) })
+    WSec:Slider({ Name = "Snow intensity", Flag = "WorldSnowRate", Min = 20, Max = 1500, Default = 170, Decimals = 0,
+        Callback = gated(function(v) weather.snowRate = v end) })
+
+    local SSec = WorldSub:Section({ Name = "Sky & clouds", Side = 2 })
+    SSec:Slider({ Name = "Star count", Flag = "WorldStars", Min = 0, Max = 3000, Default = 3000, Decimals = 0,
+        Callback = gated(function(v) getSky().StarCount = v end) })
+    SSec:Slider({ Name = "Sun size", Flag = "WorldSunSize", Min = 0, Max = 50, Default = 21, Decimals = 0,
+        Callback = gated(function(v) getSky().SunAngularSize = v end) })
+    SSec:Slider({ Name = "Moon size", Flag = "WorldMoonSize", Min = 0, Max = 50, Default = 11, Decimals = 0,
+        Callback = gated(function(v) getSky().MoonAngularSize = v end) })
+    SSec:Toggle({ Name = "Sun / moon / stars", Flag = "WorldCelestial", Default = true,
+        Callback = gated(function(v) getSky().CelestialBodiesShown = v end) })
+    SSec:Toggle({ Name = "Clouds", Flag = "WorldClouds", Default = false,
+        Callback = gated(function(v) local c = getClouds(); if c then c.Enabled = v end end) })
+    SSec:Slider({ Name = "Cloud cover", Flag = "WorldCloudCover", Min = 0, Max = 1, Default = 0.5, Decimals = 2,
+        Callback = gated(function(v) local c = getClouds(); if c then c.Cover = v end end) })
+    SSec:Slider({ Name = "Cloud density", Flag = "WorldCloudDensity", Min = 0, Max = 1, Default = 0.5, Decimals = 2,
+        Callback = gated(function(v) local c = getClouds(); if c then c.Density = v end end) })
+    SSec:Label({ Name = "Cloud color" }):Colorpicker({ Flag = "WorldCloudColor", Default = Color3.fromRGB(255, 255, 255),
+        Callback = gated(function(c) local cl = getClouds(); if cl then cl.Color = c end end) })
+
+    ready = true   -- setup done; controls now take effect on user interaction
 end
 
 -- ============================================================
