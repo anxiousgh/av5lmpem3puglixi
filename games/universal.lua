@@ -636,7 +636,7 @@ local AimSub = CombatPage:SubPage({ Name = "Aimbot" })
 do
     local Sec = AimSub:Section({ Name = "Camera lock", Side = 1 })
     local Enabled = Sec:Toggle({
-        Name = "Enabled", Flag = "CamLockEnabled", Default = false, KeybindName = "Camlock",
+        Name = "Enabled", Flag = "CamLockEnabled", Default = false,
         Callback = function(v) CamLock.enabled = v end,
     })
     Sec:Label({ Name = "Toggle key" }):Keybind({
@@ -673,7 +673,7 @@ local TrigSub = CombatPage:SubPage({ Name = "Triggerbot" })
 do
     local Sec = TrigSub:Section({ Name = "Triggerbot", Side = 1 })
     local Enabled = Sec:Toggle({
-        Name = "Enabled", Flag = "TrigEnabled", Default = false, KeybindName = "Triggerbot",
+        Name = "Enabled", Flag = "TrigEnabled", Default = false,
         Callback = function(v) Trig.enabled = v end,
     })
     Sec:Label({ Name = "Toggle key" }):Keybind({
@@ -839,25 +839,31 @@ local PlayerPage = Window:Page({ Name = "Player" })
 local Move = PlayerPage:SubPage({ Name = "Movement" })
 
 local SpeedSec = Move:Section({ Name = "Speed", Side = 1 })
-SpeedSec:Toggle({ Name = "WalkSpeed", Flag = "WalkSpeedEnabled", Default = false, KeybindName = "Walkspeed",
+local WalkToggle = SpeedSec:Toggle({ Name = "WalkSpeed", Flag = "WalkSpeedEnabled", Default = false,
     Callback = function(v) Movement.setWalkSpeed(v) end })
 SpeedSec:Slider({ Name = "WalkSpeed amount", Flag = "WalkSpeedValue", Min = 16, Max = 500, Default = 50, Decimals = 0,
     Callback = function(v) Movement.setWalkSpeedValue(v) end })
-SpeedSec:Toggle({ Name = "CFrame speed", Flag = "CFrameEnabled", Default = false, KeybindName = "CFrame speed",
+SpeedSec:Label({ Name = "Toggle key" }):Keybind({ Name = "WalkSpeed", Flag = "WalkSpeedKey", Mode = "Toggle",
+    Callback = function(state) WalkToggle:Set(state and true or false) end })
+local CFrameToggle = SpeedSec:Toggle({ Name = "CFrame speed", Flag = "CFrameEnabled", Default = false,
     Callback = function(v) Movement.setCFrame(v) end })
 SpeedSec:Slider({ Name = "CFrame multiplier", Flag = "CFrameValue", Min = 1, Max = 10, Default = 2, Decimals = 1, Suffix = "x",
     Callback = function(v) Movement.setCFrameValue(v) end })
+SpeedSec:Label({ Name = "Toggle key" }):Keybind({ Name = "CFrame speed", Flag = "CFrameKey", Mode = "Toggle",
+    Callback = function(state) CFrameToggle:Set(state and true or false) end })
 
 local JumpSec = Move:Section({ Name = "Jump", Side = 1 })
-JumpSec:Toggle({ Name = "JumpPower", Flag = "JumpEnabled", Default = false, KeybindName = "JumpPower",
+local JumpToggle = JumpSec:Toggle({ Name = "JumpPower", Flag = "JumpEnabled", Default = false,
     Callback = function(v) Movement.setJump(v) end })
 JumpSec:Slider({ Name = "JumpPower amount", Flag = "JumpValue", Min = 50, Max = 500, Default = 50, Decimals = 0,
     Callback = function(v) Movement.setJumpValue(v) end })
-JumpSec:Toggle({ Name = "Infinite jump", Flag = "InfJumpEnabled", Default = false, KeybindName = "Infinite jump",
+JumpSec:Label({ Name = "Toggle key" }):Keybind({ Name = "Jump power", Flag = "JumpKey", Mode = "Toggle",
+    Callback = function(state) JumpToggle:Set(state and true or false) end })
+JumpSec:Toggle({ Name = "Infinite jump", Flag = "InfJumpEnabled", Default = false,
     Callback = function(v) Movement.setInfJump(v) end })
 
 local FlySec = Move:Section({ Name = "Fly", Side = 2 })
-local FlyToggle = FlySec:Toggle({ Name = "Fly", Flag = "FlyEnabled", Default = false, KeybindName = "Fly",
+local FlyToggle = FlySec:Toggle({ Name = "Fly", Flag = "FlyEnabled", Default = false,
     Callback = function(v) Movement.setFly(v) end })
 FlySec:Slider({ Name = "Fly speed", Flag = "FlyValue", Min = 10, Max = 300, Default = 60, Decimals = 0,
     Callback = function(v) Movement.setFlyValue(v) end })
@@ -867,7 +873,7 @@ FlySec:Label({ Name = "Fly toggle key" }):Keybind({
     Callback = function(state) FlyToggle:Set(state and true or false) end })
 
 local UtilSec = Move:Section({ Name = "Utility", Side = 2 })
-UtilSec:Toggle({ Name = "Noclip", Flag = "NoclipEnabled", Default = false, KeybindName = "Noclip",
+UtilSec:Toggle({ Name = "Noclip", Flag = "NoclipEnabled", Default = false,
     Callback = function(v) Movement.setNoclip(v) end })
 
 -- ---- Player > Desync subpage ----
@@ -891,8 +897,10 @@ do
     })
 
     -- Enabled = heartbeat-spoof methods (void/spin/velocity/custom). No raknet.
-    enabledToggle = Sec:Toggle({ Name = "Enabled", Flag = "DesyncEnabled", Default = false, KeybindName = "Desync",
+    enabledToggle = Sec:Toggle({ Name = "Enabled", Flag = "DesyncEnabled", Default = false,
         Callback = function(v) Desync.setEnabled(v) end })
+    Sec:Label({ Name = "Toggle key" }):Keybind({ Name = "Desync", Flag = "DesyncKey", Mode = "Toggle",
+        Callback = function(state) enabledToggle:Set(state and true or false) end })
 
     -- RakNet freeze = the ONLY raknet path, behind its own explicit toggle.
     freezeToggle = Sec:Toggle({ Name = "RakNet freeze", Flag = "DesyncFreeze", Default = false,
@@ -953,8 +961,10 @@ do
     if not hasDrawing then
         Sec:Label({ Name = "ESP needs a Drawing-capable executor." })
     end
-    Sec:Toggle({ Name = "Enabled", Flag = "EspEnabled", Default = false, KeybindName = "ESP",
+    local EspToggle = Sec:Toggle({ Name = "Enabled", Flag = "EspEnabled", Default = false,
         Callback = function(v) Esp.enabled = v end })
+    Sec:Label({ Name = "Toggle key" }):Keybind({ Name = "ESP", Flag = "EspKey", Mode = "Toggle",
+        Callback = function(state) EspToggle:Set(state and true or false) end })
     Sec:Toggle({ Name = "Box", Flag = "EspBox", Default = true,
         Callback = function(v) Esp.box = v end })
     Sec:Dropdown({ Name = "Box style", Flag = "EspBoxType", Default = "Full", Multi = false,
@@ -1184,13 +1194,13 @@ do
                 setProp("GlobalShadows", original.GlobalShadows ~= false)
             end
         end) })
-    WSec:Toggle({ Name = "Lock world settings", Flag = "WorldLock", Default = false, KeybindName = "World lock",
+    WSec:Toggle({ Name = "Lock world settings", Flag = "WorldLock", Default = false,
         Callback = gated(function(v) locked = v end) })
-    WSec:Toggle({ Name = "Rain", Flag = "WorldRain", Default = false, KeybindName = "Rain",
+    WSec:Toggle({ Name = "Rain", Flag = "WorldRain", Default = false,
         Callback = gated(function(v) weather.rain = v end) })
     WSec:Slider({ Name = "Rain intensity", Flag = "WorldRainRate", Min = 50, Max = 3000, Default = 600, Decimals = 0,
         Callback = gated(function(v) weather.rainRate = v end) })
-    WSec:Toggle({ Name = "Snow", Flag = "WorldSnow", Default = false, KeybindName = "Snow",
+    WSec:Toggle({ Name = "Snow", Flag = "WorldSnow", Default = false,
         Callback = gated(function(v) weather.snow = v end) })
     WSec:Slider({ Name = "Snow intensity", Flag = "WorldSnowRate", Min = 20, Max = 1500, Default = 170, Decimals = 0,
         Callback = gated(function(v) weather.snowRate = v end) })

@@ -8678,17 +8678,6 @@ do
                 Toggle.Items = Items
             end
 
-            -- [wh] only toggles that opt in via KeybindName appear in the keybinds
-            -- list, under that name -- so it lists FEATURES (ESP, Camlock, Fly, ...)
-            -- while enabled, not every sub-option of each feature.
-            local KeyEntry
-            local KeybindName = Params.KeybindName or Params.keybindName
-            if KeybindName and Library.KeyList then
-                KeyEntry = Library.KeyList:Add("", KeybindName, "")
-                KeyEntry.Instance.Text = KeybindName
-                KeyEntry:SetStatus(false)
-            end
-
             function Toggle:Set(Bool)
                 Toggle.Value = Bool
 
@@ -8707,7 +8696,6 @@ do
                 end
 
                 Flags[Toggle.Flag] = Bool
-                if KeyEntry then KeyEntry:SetStatus(Bool) end
                 Library:SafeCall(Toggle.Callback, Bool)
             end
 
