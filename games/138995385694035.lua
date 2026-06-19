@@ -69,7 +69,7 @@ end
 
 local HC = {
     -- target (multi-target lock list)
-    autoSwitch = false, priority = "Mouse",
+    autoSwitch = false, priority = "Closest to mouse", ignoreKnocked = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
     forceHit = false, hitPart = "Head", forceHitCooldown = 0.18,
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
@@ -105,27 +105,36 @@ local function validTarget(plr)
     if not plr or plr == LocalPlayer or not plr.Parent then return false end
     if not isAlive(plr) then return false end
     if isDead(plr) then return false end
+    if HC.ignoreKnocked and isKnocked(plr) then return false end
     return plr.Character ~= nil and plr.Character:FindFirstChild("HumanoidRootPart") ~= nil
 end
 
+-- screen-space distance from the mouse to a player (math.huge if off-screen)
+local function mouseDist(plr)
+    local char = plr.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return math.huge end
+    local sp, on = Workspace.CurrentCamera:WorldToViewportPoint(hrp.Position)
+    if not on then return math.huge end
+    return (UIS:GetMouseLocation() - Vector2.new(sp.X, sp.Y)).Magnitude
+end
+
+-- score a LOCKED target by the chosen priority (lower = preferred)
 local function scorePlayer(plr)
-    local cam = Workspace.CurrentCamera
     local char = plr.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return math.huge end
     local mode = HC.priority
-    if mode == "Mouse" then
-        local sp, on = cam:WorldToViewportPoint(hrp.Position)
-        if not on then return math.huge end
-        return (UIS:GetMouseLocation() - Vector2.new(sp.X, sp.Y)).Magnitude
-    elseif mode == "LowestHP" then
+    if mode == "Lowest HP" then
         local hum = char:FindFirstChildOfClass("Humanoid")
         return hum and hum.Health or math.huge
+    elseif mode == "Closest to me" then
+        local lc = LocalPlayer.Character
+        local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+        return lhrp and (lhrp.Position - hrp.Position).Magnitude or math.huge
     end
-    -- Closest (to us)
-    local lc = LocalPlayer.Character
-    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
-    return lhrp and (lhrp.Position - hrp.Position).Magnitude or math.huge
+    -- "Closest to mouse" (default)
+    return mouseDist(plr)
 end
 
 -- best valid player (by current priority) out of a pool
@@ -139,6 +148,7 @@ local function bestFrom(pool)
     end
     return best
 end
+-- auto-switch fallback: best of everyone by priority
 local function acquireTarget() return bestFrom(Players:GetPlayers()) end
 
 -- multi-target lock list
@@ -146,9 +156,16 @@ local function isLocked(plr)
     for _, p in ipairs(RageTargets) do if p == plr then return true end end
     return false
 end
+-- Lock ALWAYS adds the player nearest the mouse, regardless of priority.
 local function lockTarget()
-    local plr = acquireTarget()  -- the priority pick (e.g. nearest the crosshair)
-    if plr and not isLocked(plr) then RageTargets[#RageTargets + 1] = plr end
+    local best, bestD = nil, math.huge
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if validTarget(plr) and not isLocked(plr) then
+            local d = mouseDist(plr)
+            if d < bestD then bestD = d; best = plr end
+        end
+    end
+    if best then RageTargets[#RageTargets + 1] = best end
 end
 local function clearTargets() table.clear(RageTargets) end
 -- drop dead / departed entries, return the live list
@@ -642,9 +659,11 @@ do
     Sec:Button({ Name = "Unlock targets", Callback = function() clearTargets() end })
     Sec:Toggle({ Name = "Auto switch", Flag = "HC_AutoSwitch", Default = false,
         Callback = function(v) HC.autoSwitch = v end })
-    Sec:Dropdown({ Name = "Priority", Flag = "HC_Priority", Default = "Mouse", Multi = false,
-        Items = { "Closest", "Mouse", "LowestHP" },
-        Callback = function(v) HC.priority = (type(v) == "table" and v[1]) or v or "Mouse" end })
+    Sec:Toggle({ Name = "Skip knocked players", Flag = "HC_IgnoreKnocked", Default = false,
+        Callback = function(v) HC.ignoreKnocked = v end })
+    Sec:Dropdown({ Name = "Priority (which locked target)", Flag = "HC_Priority", Default = "Closest to mouse", Multi = false,
+        Items = { "Closest to mouse", "Closest to me", "Lowest HP" },
+        Callback = function(v) HC.priority = (type(v) == "table" and v[1]) or v or "Closest to mouse" end })
 
     local Sec2 = CombatSub:Section({ Name = "Force Hit", Side = 1 })
     Sec2:Toggle({ Name = "Force Hit (click target)", Flag = "HC_ForceHit", Default = false,
