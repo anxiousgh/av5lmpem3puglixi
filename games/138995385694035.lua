@@ -181,38 +181,51 @@ end
 --  Works for manual shots too -- it just zeroes theOffset / centres every
 --  pellet on its target part so there's no scatter.
 -- ============================================================
+--  Real Shoot payload: { serverHitData, serverOffsets, bulletOrigin,
+--  probeHitPos, serverTime }. Single guns have no spread (one pellet); only
+--  shotguns scatter, so we converge every pellet onto whichever pellet hit a
+--  player part (HC accepts N identical pellets). The hook is kept dirt-cheap --
+--  the previous version did a FindFirstChild on EVERY game namecall (HC fires
+--  a remote every frame) which froze/crashed the client.
 do
     local g = gv()
     if g and not g._WH_HC_FHOOK and hookmetamethod and getnamecallmethod then
         g._WH_HC_FHOOK = true
         g._WH_HC_forceHit = false
-        g._WH_HC_loggedShoot = false
+        local MainEvent = ReplicatedStorage:FindFirstChild("MainEvent")
+        local charsFolder
         local oldNamecall
         oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            local ok, method = pcall(getnamecallmethod)
-            if ok and g._WH_HC_forceHit and method == "FireServer"
-                and self == ReplicatedStorage:FindFirstChild("MainEvent") then
-                local args = { ... }
-                if args[1] == "Shoot" and type(args[2]) == "table" then
-                    local payload = args[2]
-                    local hits, targets = payload[1], payload[2]
-                    if not g._WH_HC_loggedShoot then
-                        g._WH_HC_loggedShoot = true
-                        print("[wh][HC] captured Shoot payload; hits="
-                            .. tostring(type(hits)) .. " targets=" .. tostring(type(targets)))
-                    end
-                    if type(targets) == "table" then
-                        for i, t in ipairs(targets) do
-                            if type(t) == "table" and t.thePart then
-                                pcall(function()
-                                    t.theOffset = Vector3.zero
-                                    if type(hits) == "table" and type(hits[i]) == "table" then
-                                        hits[i].Position = t.thePart.Position
-                                        hits[i].Normal   = t.thePart.Position
-                                    end
-                                end)
+            -- fast path: only do anything when force-hit is on AND this is the
+            -- exact cached MainEvent. No work for the millions of other namecalls.
+            if g._WH_HC_forceHit then
+                if not (MainEvent and MainEvent.Parent) then
+                    MainEvent = ReplicatedStorage:FindFirstChild("MainEvent")
+                end
+                if self == MainEvent and getnamecallmethod() == "FireServer" then
+                    local a1, payload = ...
+                    if a1 == "Shoot" and type(payload) == "table"
+                        and type(payload[1]) == "table" and type(payload[2]) == "table"
+                        and #payload[1] > 1 then
+                        pcall(function()
+                            if not (charsFolder and charsFolder.Parent) then
+                                local p = Workspace:FindFirstChild("Players")
+                                charsFolder = p and p:FindFirstChild("Characters")
                             end
-                        end
+                            local hitData, offsets = payload[1], payload[2]
+                            local bi
+                            for i = 1, #hitData do
+                                local inst = hitData[i] and hitData[i].Instance
+                                if inst and charsFolder and inst:IsDescendantOf(charsFolder) then bi = i; break end
+                            end
+                            if bi then
+                                local h, o = hitData[bi], offsets[bi]
+                                for i = 1, #hitData do
+                                    hitData[i] = { Instance = h.Instance, Position = h.Position, Normal = h.Normal }
+                                    offsets[i] = { thePart = o.thePart, theOffset = o.theOffset }
+                                end
+                            end
+                        end)
                     end
                 end
             end
