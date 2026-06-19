@@ -176,66 +176,69 @@ local function fireShootAt(part)
 end
 
 -- ============================================================
---  FORCE HIT  -- always-on outgoing-Shoot hook that NULLS the spread.
---  Installed once (survives reloads); gated on getgenv()._WH_HC_forceHit.
---  Works for manual shots too -- it just zeroes theOffset / centres every
---  pellet on its target part so there's no scatter.
--- ============================================================
+--  FORCE HIT  -- nulls the spread on outgoing Shoot remotes.
 --  Real Shoot payload: { serverHitData, serverOffsets, bulletOrigin,
---  probeHitPos, serverTime }. Single guns have no spread (one pellet); only
+--  probeHitPos, serverTime }. Single guns have NO spread (one pellet); only
 --  shotguns scatter, so we converge every pellet onto whichever pellet hit a
---  player part (HC accepts N identical pellets). The hook is kept dirt-cheap --
---  the previous version did a FindFirstChild on EVERY game namecall (HC fires
---  a remote every frame) which froze/crashed the client.
-do
+--  player part (HC accepts N identical pellets).
+--
+--  IMPORTANT: the __namecall hook is installed LAZILY -- only the first time you
+--  enable Force Hit -- so simply loading the hub never touches __namecall (HC
+--  fires remotes every frame; an always-installed hook crashed the client when
+--  shooting). It's also wrapped in newcclosure so the engine can call it from C.
+-- ============================================================
+local function installForceHook()
     local g = gv()
-    if g and not g._WH_HC_FHOOK and hookmetamethod and getnamecallmethod then
-        g._WH_HC_FHOOK = true
-        g._WH_HC_forceHit = false
-        local MainEvent = ReplicatedStorage:FindFirstChild("MainEvent")
-        local charsFolder
-        local oldNamecall
-        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            -- fast path: only do anything when force-hit is on AND this is the
-            -- exact cached MainEvent. No work for the millions of other namecalls.
-            if g._WH_HC_forceHit then
-                if not (MainEvent and MainEvent.Parent) then
-                    MainEvent = ReplicatedStorage:FindFirstChild("MainEvent")
-                end
-                if self == MainEvent and getnamecallmethod() == "FireServer" then
-                    local a1, payload = ...
-                    if a1 == "Shoot" and type(payload) == "table"
-                        and type(payload[1]) == "table" and type(payload[2]) == "table"
-                        and #payload[1] > 1 then
-                        pcall(function()
-                            if not (charsFolder and charsFolder.Parent) then
-                                local p = Workspace:FindFirstChild("Players")
-                                charsFolder = p and p:FindFirstChild("Characters")
-                            end
-                            local hitData, offsets = payload[1], payload[2]
-                            local bi
-                            for i = 1, #hitData do
-                                local inst = hitData[i] and hitData[i].Instance
-                                if inst and charsFolder and inst:IsDescendantOf(charsFolder) then bi = i; break end
-                            end
-                            if bi then
-                                local h, o = hitData[bi], offsets[bi]
-                                for i = 1, #hitData do
-                                    hitData[i] = { Instance = h.Instance, Position = h.Position, Normal = h.Normal }
-                                    offsets[i] = { thePart = o.thePart, theOffset = o.theOffset }
-                                end
-                            end
-                        end)
+    if not g then return false end
+    if g._WH_HC_FHOOK then return true end
+    if not (hookmetamethod and getnamecallmethod) then return false end
+    g._WH_HC_FHOOK = true
+    local MainEvent = ReplicatedStorage:FindFirstChild("MainEvent")
+    local charsFolder
+    local oldNamecall
+    local function hookFn(self, ...)
+        if g._WH_HC_forceHit and self == MainEvent and getnamecallmethod() == "FireServer" then
+            local a1, payload = ...
+            if a1 == "Shoot" and type(payload) == "table"
+                and type(payload[1]) == "table" and type(payload[2]) == "table"
+                and #payload[1] > 1 then
+                pcall(function()
+                    if not (charsFolder and charsFolder.Parent) then
+                        local p = Workspace:FindFirstChild("Players")
+                        charsFolder = p and p:FindFirstChild("Characters")
                     end
-                end
+                    local hitData, offsets = payload[1], payload[2]
+                    local bi
+                    for i = 1, #hitData do
+                        local inst = hitData[i] and hitData[i].Instance
+                        if inst and charsFolder and inst:IsDescendantOf(charsFolder) then bi = i; break end
+                    end
+                    if bi then
+                        local h, o = hitData[bi], offsets[bi]
+                        for i = 1, #hitData do
+                            hitData[i] = { Instance = h.Instance, Position = h.Position, Normal = h.Normal }
+                            offsets[i] = { thePart = o.thePart, theOffset = o.theOffset }
+                        end
+                    end
+                end)
             end
-            return oldNamecall(self, ...)
-        end)
+        end
+        return oldNamecall(self, ...)
     end
+    oldNamecall = hookmetamethod(game, "__namecall", (newcclosure and newcclosure(hookFn)) or hookFn)
+    return true
 end
 local function setForceHit(on)
     HC.forceHit = on
-    local g = gv(); if g then g._WH_HC_forceHit = on end
+    local g = gv()
+    if on and g and not g._WH_HC_FHOOK then
+        if not installForceHook() then
+            HC.forceHit = false
+            Library:Notification("Force Hit needs hookmetamethod support", 4, Color3.fromRGB(255, 80, 80))
+            return
+        end
+    end
+    if g then g._WH_HC_forceHit = on end
 end
 
 -- ============================================================
