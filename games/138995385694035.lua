@@ -206,11 +206,13 @@ local function isLocked(plr)
     for _, p in ipairs(RageTargets) do if p == plr then return true end end
     return false
 end
--- Lock ALWAYS adds the engageable player nearest the mouse, regardless of priority.
+-- Lock ALWAYS adds the player nearest the mouse. Uses base validity only (NOT the
+-- checks) -- you can lock a knocked / occluded player; the checks only decide who
+-- gets CHOSEN to shoot, never who's allowed in the list.
 local function lockTarget()
     local best, bestD = nil, math.huge
     for _, plr in ipairs(Players:GetPlayers()) do
-        if canEngage(plr) and not isLocked(plr) then
+        if validTarget(plr) and not isLocked(plr) then
             local d = mouseDist(plr)
             if d < bestD then bestD = d; best = plr end
         end
