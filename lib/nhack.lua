@@ -1251,7 +1251,10 @@ do
         local List = {}
         local ReturnList = {}
 
-        List = listfiles(Library.Directory .. Library.Folders.Configs)
+        -- per-game configs: list THIS place's own folder
+        local Folder = Library.Directory .. Library.Folders.Configs .. "/" .. tostring(game.PlaceId)
+        if not isfolder(Folder) then makefolder(Folder) end
+        List = listfiles(Folder)
 
         for Index = 1, #List do
             local File = List[Index]
@@ -10706,7 +10709,12 @@ do
                 do
                     local ConfigName
                     local ConfigSelected
-                    local ConfigsFolder = Library.Directory .. Library.Folders.Configs .. "/"
+                    local AutoloadLabel
+                    -- per-game: configs live under <Configs>/<PlaceId>/
+                    local ConfigDir = Library.Directory .. Library.Folders.Configs .. "/" .. tostring(game.PlaceId)
+                    local ConfigsFolder = ConfigDir .. "/"
+                    local AutoloadFile = ConfigsFolder .. "autoload.txt"
+                    if not isfolder(ConfigDir) then makefolder(ConfigDir) end
 
                     local ConfigsDropdown = ConfigsSection:Dropdown({
                         Name = "Configs",
@@ -10821,7 +10829,46 @@ do
                         end
                     })
 
+                    ConfigsSection:Button({
+                        Name = "Set autoload",
+                        Callback = function()
+                            if ConfigSelected and isfile(ConfigsFolder .. ConfigSelected .. ".json") then
+                                writefile(AutoloadFile, ConfigSelected)
+                                if AutoloadLabel then AutoloadLabel:SetText("Autoload: " .. ConfigSelected) end
+                                Library:Notification('Autoload set to "' .. ConfigSelected .. '"', 3, Color3.fromRGB(0, 255, 0))
+                            else
+                                Library:Notification("No config selected", 3, Color3.fromRGB(255, 0, 0))
+                            end
+                        end
+                    })
+
+                    ConfigsSection:Button({
+                        Name = "Clear autoload",
+                        Callback = function()
+                            if isfile(AutoloadFile) then pcall(function() delfile(AutoloadFile) end) end
+                            if AutoloadLabel then AutoloadLabel:SetText("Autoload: none") end
+                            Library:Notification("Autoload cleared", 3, Color3.fromRGB(0, 255, 0))
+                        end
+                    })
+
+                    AutoloadLabel = ConfigsSection:Label({
+                        Name = "Autoload: " .. ((isfile(AutoloadFile) and readfile(AutoloadFile)) or "none")
+                    })
+
                     Library:GetConfigsList(ConfigsDropdown)
+
+                    -- exposed so the loader can autoload AFTER the whole UI (every page
+                    -- and flag) exists -- a config can't apply to controls that aren't built
+                    Library.RunAutoload = function()
+                        if not isfile(AutoloadFile) then return end
+                        local Name = readfile(AutoloadFile)
+                        if Name ~= "" and isfile(ConfigsFolder .. Name .. ".json") then
+                            local ok = pcall(function()
+                                Library:LoadConfig(readfile(ConfigsFolder .. Name .. ".json"))
+                            end)
+                            if ok then Library:Notification('Autoloaded "' .. Name .. '"', 3, Library.Theme["Accent"]) end
+                        end
+                    end
                 end
             end
 

@@ -222,6 +222,9 @@ end
 -- Settings page (config + themes) -- added last so it's the final tab.
 Window:CreateSettingsPage()
 
+-- autoload this game's chosen config now that every page/flag exists
+pcall(function() if Library.RunAutoload then Library.RunAutoload() end end)
+
 Library:Notification("wrath.cc Loaded", 3, Library.Theme["Accent"])
 
 print("[wh] loaded")
