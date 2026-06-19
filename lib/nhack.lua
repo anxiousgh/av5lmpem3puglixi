@@ -77,7 +77,7 @@ local Library = {
     Flags = {},
     MenuKeybind = tostring(Enum.KeyCode.RightAlt), -- [wh] AltGr / right alt
 
-    Directory = "niggahack",
+    Directory = "wrathcc",
     Folders = {
         Assets = "/Assets",
         Configs = "/Configs"
@@ -8678,6 +8678,16 @@ do
                 Toggle.Items = Items
             end
 
+            -- [wh] feature toggles appear in the keybinds list while enabled, even
+            -- with no key bound. Skip nested sub-toggles (Params.Parent) and settings
+            -- widgets so the list only reflects real, user-toggled features.
+            local KeyEntry
+            if Library.KeyList and not Params.Parent and not (Toggle.Section and Toggle.Section.IsSettings) then
+                KeyEntry = Library.KeyList:Add("", Toggle.Name, "")
+                KeyEntry.Instance.Text = Toggle.Name
+                KeyEntry:SetStatus(false)
+            end
+
             function Toggle:Set(Bool)
                 Toggle.Value = Bool
 
@@ -8696,6 +8706,7 @@ do
                 end
 
                 Flags[Toggle.Flag] = Bool
+                if KeyEntry then KeyEntry:SetStatus(Bool) end
                 Library:SafeCall(Toggle.Callback, Bool)
             end
 

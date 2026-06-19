@@ -408,7 +408,7 @@ do
             dist   = mkDraw("Text",   { Size = 12, Center = true, Outline = true, Visible = false }),
             health = mkDraw("Square", { Thickness = 1, Filled = true, Visible = false }),
             tracer = lineFrame(),
-            corners = nil, skel = nil, chams = nil,   -- created lazily when used
+            corners = nil, skel = nil, chams = nil, glow = nil,   -- created lazily when used
         }
     end
     local function remove(plr)
@@ -420,6 +420,7 @@ do
         if o.corners then for _, d in ipairs(o.corners) do pcall(function() d:Destroy() end) end end
         if o.skel then for _, d in ipairs(o.skel) do pcall(function() d:Destroy() end) end end
         if o.chams then pcall(function() o.chams:Destroy() end) end
+        if o.glow then pcall(function() o.glow:Destroy() end) end
         objs[plr] = nil
     end
 
@@ -444,6 +445,43 @@ do
         h.Adornee = char
         h.Parent = char
         o.chams = h; return h
+    end
+    -- glow aura: a Highlight can't render a soft glow, so build one from a
+    -- BillboardGui of stacked, rounded, fading frames -- a real radial-ish glow
+    -- around the body (no external image asset, always renders).
+    local GLOW_LAYERS = 6
+    local function ensureGlow(o, char)
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return nil end
+        if o.glow and o.glow.Adornee == hrp and o.glow.Parent then return o.glow end
+        if o.glow then pcall(function() o.glow:Destroy() end) end
+        local bb = Instance.new("BillboardGui")
+        bb.Name = "\0"
+        bb.Adornee = hrp
+        bb.Size = UDim2.fromScale(5.5, 7)   -- studs (scales with distance)
+        bb.AlwaysOnTop = true
+        bb.LightInfluence = 0
+        bb.ResetOnSpawn = false
+        bb.MaxDistance = 1e6
+        for i = 1, GLOW_LAYERS do
+            local k = (GLOW_LAYERS - i) / (GLOW_LAYERS - 1)   -- 1 = outer, 0 = inner
+            local f = Instance.new("Frame")
+            f.AnchorPoint = Vector2.new(0.5, 0.5)
+            f.Position = UDim2.fromScale(0.5, 0.5)
+            f.Size = UDim2.fromScale(0.3 + 0.7 * k, 0.3 + 0.7 * k)   -- inner small
+            f.BackgroundTransparency = 0.6 + 0.38 * k               -- inner densest
+            f.BorderSizePixel = 0
+            f.ZIndex = i
+            local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(1, 0); c.Parent = f
+            f.Parent = bb
+        end
+        bb.Parent = hrp
+        o.glow = bb; return bb
+    end
+    local function setGlowColor(bb, color)
+        for _, f in ipairs(bb:GetChildren()) do
+            if f:IsA("Frame") then f.BackgroundColor3 = color end
+        end
     end
 
     for _, p in ipairs(Players:GetPlayers()) do add(p) end
@@ -485,8 +523,6 @@ do
             table.sort(list, function(a, b) return a[2] < b[2] end)
             for i = 1, math.min(#list, CHAMS_LIMIT) do chamsTop[list[i][1]] = true end
         end
-        -- shared breathing pulse for the chams glow (0..1)
-        local glow = 0.5 + 0.5 * math.sin(os.clock() * 4)
 
         for plr, o in pairs(objs) do
             if not o.box then continue end
@@ -501,17 +537,19 @@ do
             if active then char, hum = aliveChar(plr) end
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
-            -- chams: in-game Highlight (works even off-screen), closest 32 only
+            -- chams: closest 32 get an AlwaysOnTop Highlight + a soft glow aura
             if active and char and Esp.chams and chamsTop and chamsTop[plr] then
                 local h = ensureChams(o, char)
                 h.Enabled = true
                 h.FillColor = Esp.chamsFill
                 h.OutlineColor = Esp.chamsOutline
                 h.FillTransparency = Esp.chamsTransparency
-                -- small glowing effect: gently breathe the outline so it pulses
-                h.OutlineTransparency = 0.1 + 0.5 * glow
-            elseif o.chams then
-                o.chams.Enabled = false
+                h.OutlineTransparency = 0
+                local g = ensureGlow(o, char)
+                if g then g.Enabled = true; setGlowColor(g, Esp.chamsFill) end
+            else
+                if o.chams then o.chams.Enabled = false end
+                if o.glow then o.glow.Enabled = false end
             end
 
             if active and hrp then
