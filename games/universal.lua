@@ -420,9 +420,9 @@ do
         if o.corners then for _, d in ipairs(o.corners) do pcall(function() d:Destroy() end) end end
         if o.skel then for _, d in ipairs(o.skel) do pcall(function() d:Destroy() end) end end
         if o.chams then pcall(function() o.chams:Destroy() end) end
-        if o.glowMats then   -- restore any glow material overrides
-            for p, mat in pairs(o.glowMats) do
-                pcall(function() if p.Parent then p.Material = mat end end)
+        if o.glowMats then   -- restore any glow material/colour overrides
+            for p, orig in pairs(o.glowMats) do
+                pcall(function() if p.Parent then p.Material = orig[1]; p.Color = orig[2] end end)
             end
             o.glowMats = nil
         end
@@ -456,21 +456,24 @@ do
     -- ForceField (a soft energy glow on the real geometry) and remember the
     -- original material so it can be restored when chams turns off / the player
     -- leaves the closest-N set / on unload. Local-only -- not replicated.
-    local GLOW_MATERIAL = Enum.Material.ForceField
-    local function applyGlow(o, char)
+    local GLOW_MATERIAL = Enum.Material.Neon
+    local function applyGlow(o, char, color)
         local mats = o.glowMats
         if not mats then mats = {}; o.glowMats = mats end
         for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") and mats[p] == nil then
-                mats[p] = p.Material
-                p.Material = GLOW_MATERIAL
+            if p:IsA("BasePart") then
+                if mats[p] == nil then
+                    mats[p] = { p.Material, p.Color }   -- remember the original look
+                    p.Material = GLOW_MATERIAL          -- Neon = bright, opaque glow
+                end
+                p.Color = color                          -- glow in the chams colour
             end
         end
     end
     local function clearGlow(o)
         if not o.glowMats then return end
-        for p, mat in pairs(o.glowMats) do
-            pcall(function() if p.Parent then p.Material = mat end end)
+        for p, orig in pairs(o.glowMats) do
+            pcall(function() if p.Parent then p.Material = orig[1]; p.Color = orig[2] end end)
         end
         o.glowMats = nil
     end
@@ -536,7 +539,7 @@ do
                 h.OutlineColor = Esp.chamsOutline
                 h.FillTransparency = Esp.chamsTransparency
                 h.OutlineTransparency = 0
-                applyGlow(o, char)
+                applyGlow(o, char, Esp.chamsFill)
             else
                 if o.chams then o.chams.Enabled = false end
                 clearGlow(o)
