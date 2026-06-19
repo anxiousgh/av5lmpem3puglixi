@@ -8,12 +8,14 @@
 --    Misc     : Anti-AFK badge, Force-AFK badge
 --    Util     : Target Line, Target Outline
 --
---  HC Shoot payload (verified via witherhook):
---    MainEvent:FireServer("Shoot", { hits, targets, origin, aim, stamp })
+--  HC Shoot payload (witherhook, no-kick form -- origin==aim is a degenerate
+--  ray so HC SKIPS its spread PRNG check; a real aim makes it kick for
+--  "spoofing spread pattern"):
+--    MainEvent:FireServer("Shoot", { hits, targets, origin, origin, stamp })
 --    hits[i]    = { Normal = pos, Instance = part, Position = pos }
 --    targets[i] = { thePart = part, theOffset = Vector3.zero }
---  Force Hit hooks every outgoing Shoot and zeroes theOffset (null spread).
---  Auto Shoot builds that no-spread payload itself and fires at the target.
+--  Force Hit fires that synth at the current TARGET on each shoot-click, plus a
+--  fake bullet tracer + hit sound. Auto Shoot fires the same synth automatically.
 -- ============================================================
 local ctx = ({ ... })[1]
 
@@ -68,8 +70,11 @@ end
 local HC = {
     -- target
     autoSwitch = true, priority = "Closest",
-    -- force hit (always-on no-spread hook) + shooting
-    forceHit = false, hitPart = "Head",
+    -- force hit (fire the witherhook no-kick synth at the target on click) + FX
+    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18,
+    tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
+    tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
+    hitSoundEnabled = true, hitSoundId = 135698842254153, hitSoundVolume = 1.0,
     autoShoot = false, autoShootDist = 250, autoShootCooldown = 0.15, autoShootVis = true,
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
@@ -155,6 +160,12 @@ local function isShotgun()
     local n = t.Name:lower()
     return n:find("shotgun", 1, true) ~= nil or n:find("barrel", 1, true) ~= nil
 end
+-- Canonical witherhook HC Shoot payload. pelletCount IDENTICAL entries all on
+-- the SAME part, origin == aim (both = HRP, or the spoofed spot during a
+-- voidshoot desync). The degenerate origin==aim ray makes HC SKIP its per-shot
+-- spread PRNG check -- sending a non-degenerate aim (real bulletOrigin->target)
+-- makes the server validate spread and KICK for "spoofing spread pattern".
+-- Normal is set to the hit position (not a unit vector) to match exactly.
 local function fireShootAt(part)
     if not part then return false end
     local me = getMainEvent(); if not me then return false end
@@ -162,61 +173,170 @@ local function fireShootAt(part)
     local root = c and c:FindFirstChild("HumanoidRootPart"); if not root then return false end
     local pellets = isShotgun() and 5 or 1
     local hitPos = part.Position
-    -- origin: the gun handle muzzle if we're holding one, else HRP. While a
-    -- voidshoot desync is active that's the spoofed (point-blank) spot.
-    local g = gv()
-    local sent = g and g._WH_HC_SENT
-    local tool = c:FindFirstChildOfClass("Tool")
-    local handle = tool and tool:FindFirstChild("Handle")
-    local origin = (sent and sent.Position) or (handle and handle.Position) or root.Position
-    -- a plausible surface normal (facing the shooter) instead of a raw position
-    local nrm = origin - hitPos
-    nrm = (nrm.Magnitude > 0.001) and nrm.Unit or Vector3.yAxis
     local hits, targets = table.create(pellets), table.create(pellets)
     for i = 1, pellets do
-        hits[i]    = { Normal = nrm, Instance = part, Position = hitPos }
+        hits[i]    = { Normal = hitPos, Instance = part, Position = hitPos }
         targets[i] = { thePart = part, theOffset = Vector3.zero }
     end
-    -- payload = { serverHitData, serverOffsets, bulletOrigin, probeHitPos(aim), serverTime }.
-    -- aim MUST point at the target (was =origin, which only validated point-blank).
-    local payload = { hits, targets, origin, hitPos, Workspace:GetServerTimeNow() }
+    -- origin = where the server thinks we are (spoofed point-blank during voidshoot)
+    local g = gv()
+    local sent = g and g._WH_HC_SENT
+    local origin = (sent and sent.Position) or root.Position
+    local payload = { hits, targets, origin, origin, Workspace:GetServerTimeNow() }
     return pcall(function() me:FireServer("Shoot", payload) end)
 end
 
 -- ============================================================
---  FORCE HIT  -- NO remote hook. Hooking __namecall crashes this executor during
---  HC's per-shot work (it fires remotes every frame), so instead: on each
---  shoot-click while holding a gun, raycast to your crosshair and, if it's on a
---  player, fire ONE synthetic no-spread Shoot at that part so your shot lands
---  dead-on (every shotgun pellet on the same part). Throttled. The natural shot
---  still fires its visuals; this just guarantees the hit with no scatter.
+--  FORCE-HIT FX  -- fake bullet tracers + hit sound (ported from witherhook).
+--  The synth Shoot never touches the gun script, so it renders no bullet
+--  visuals -- we fake them locally. All local-only, with anti-freeze caps.
+-- ============================================================
+local _activeTracers, MAX_TRACERS = 0, 10
+local _lastTracerAt, MIN_TRACER_GAP = 0, 0.05
+local function muzzlePos()
+    local c = LocalPlayer.Character
+    local tool = c and c:FindFirstChildOfClass("Tool")
+    local handle = tool and (tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart"))
+    if handle then return handle.Position end
+    local h = c and c:FindFirstChild("Head")
+    return h and h.Position
+end
+local function spawnTracer(origin, hitPos)
+    if not (HC.tracerEnabled and origin and hitPos) then return end
+    local dist = (hitPos - origin).Magnitude
+    if dist < 0.5 then return end
+    local nowT = tick()
+    if nowT - _lastTracerAt < MIN_TRACER_GAP then return end
+    if _activeTracers >= MAX_TRACERS then return end
+    _lastTracerAt, _activeTracers = nowT, _activeTracers + 1
+    task.delay(math.max(1.5, HC.tracerLifetime + 1), function()
+        _activeTracers = math.max(0, _activeTracers - 1)
+    end)
+    local dir = (hitPos - origin).Unit
+    local col = HC.tracerColor
+    local function invisAnchor(pos)
+        local p = Instance.new("Part")
+        p.Anchored, p.CanCollide, p.CanTouch, p.CanQuery, p.CastShadow = true, false, false, false, false
+        p.Size, p.Transparency, p.CFrame = Vector3.new(0.05, 0.05, 0.05), 1, CFrame.new(pos)
+        p.Parent = Workspace
+        return p
+    end
+    local startPart = invisAnchor(origin); startPart.Name = "_fh_tracer"
+    local endPart = invisAnchor(origin); endPart.Name = "_fh_tracer"
+    local att0 = Instance.new("Attachment", startPart)
+    local att1 = Instance.new("Attachment", endPart)
+    local beams = {}
+    local function mkBeam()
+        local b = Instance.new("Beam")
+        b.Attachment0, b.Attachment1 = att0, att1
+        b.LightEmission, b.LightInfluence, b.FaceCamera, b.Segments = 1, 0, true, 1
+        b.Parent = startPart; beams[#beams + 1] = b; return b
+    end
+    local th = HC.tracerThickness
+    if HC.tracerStyle == "Laser" then
+        local b = mkBeam(); b.Width0, b.Width1 = th * 1.2, th * 1.2
+        b.Color, b.Transparency = ColorSequence.new(col), NumberSequence.new(0)
+    elseif HC.tracerStyle == "Thin" then
+        local b = mkBeam(); b.Width0, b.Width1 = th * 0.6, th * 0.6
+        b.Color, b.Transparency = ColorSequence.new(col), NumberSequence.new(0.1)
+    else  -- Standard: outer halo + white-hot inner core
+        local outer = mkBeam(); outer.Width0, outer.Width1 = th * 5, th * 4
+        outer.Color = ColorSequence.new(col)
+        outer.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.55), NumberSequenceKeypoint.new(0.5, 0.35),
+            NumberSequenceKeypoint.new(1, 0.55) })
+        local inner = mkBeam(); inner.Width0, inner.Width1 = th * 1.8, th * 1.2
+        inner.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, col), ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)),
+            ColorSequenceKeypoint.new(1, col) })
+        inner.Transparency = NumberSequence.new(0.05)
+        pcall(function()
+            inner.Texture, inner.TextureMode = "rbxassetid://446111271", Enum.TextureMode.Wrap
+            inner.TextureLength, inner.TextureSpeed = 6, 8
+        end)
+    end
+    task.spawn(function()
+        for i = 1, 8 do  -- travel: extend end attachment origin -> hit
+            task.wait(0.06 / 8)
+            if not startPart.Parent then return end
+            endPart.CFrame = CFrame.new(origin + dir * (dist * (i / 8)))
+        end
+        if not startPart.Parent then return end
+        endPart.CFrame = CFrame.new(hitPos)
+        -- impact: neon ball + light, expand & fade
+        local flash = invisAnchor(hitPos)
+        flash.Transparency, flash.Material, flash.Color = 0, Enum.Material.Neon, col
+        flash.Shape, flash.Size = Enum.PartType.Ball, Vector3.new(0.6, 0.6, 0.6)
+        local light = Instance.new("PointLight"); light.Color, light.Brightness, light.Range = col, 5, 10
+        light.Parent = flash
+        task.spawn(function()
+            for i = 1, 10 do
+                task.wait(0.22 / 10)
+                if not flash.Parent then return end
+                local p = i / 10; local s = 0.6 + p * 2.6
+                flash.Size, flash.Transparency, light.Brightness = Vector3.new(s, s, s), p, 5 * (1 - p)
+            end
+            if flash.Parent then flash:Destroy() end
+        end)
+        for i = 1, 8 do  -- fade beams
+            task.wait(HC.tracerLifetime / 8)
+            if not startPart.Parent then return end
+            for _, b in ipairs(beams) do if b.Parent then b.Transparency = NumberSequence.new(i / 8) end end
+        end
+        if startPart.Parent then startPart:Destroy() end
+        if endPart.Parent then endPart:Destroy() end
+    end)
+end
+local function playHitSound()
+    if not HC.hitSoundEnabled or not HC.hitSoundId or HC.hitSoundId == 0 then return end
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local s = Instance.new("Sound")
+    s.SoundId = "rbxassetid://" .. tostring(HC.hitSoundId)
+    s.Volume = math.clamp(HC.hitSoundVolume, 0, 5)
+    s.Parent = pg or Workspace
+    s:Play()
+    task.delay(5, function() if s and s.Parent then s:Destroy() end end)
+end
+-- shared synth fire + FX. For shotguns, retarget to the torso (largest flat
+-- area, and head shots trip HC's per-shot damage cap) like witherhook.
+local function forceShotPart(char)
+    if isShotgun() then
+        return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+            or char:FindFirstChild("LowerTorso") or char:FindFirstChild("HumanoidRootPart")
+            or targetParts(char)
+    end
+    return targetParts(char)
+end
+local function fireSynthFX(part)
+    if not part then return false end
+    local ok = fireShootAt(part)
+    if ok then
+        spawnTracer(muzzlePos(), part.Position)
+        playHitSound()
+    end
+    return ok
+end
+
+-- ============================================================
+--  FORCE HIT  -- on each shoot-click while holding a gun, fire the witherhook
+--  no-kick synth Shoot at the CURRENT TARGET (target system) + tracer + hit
+--  sound. origin==aim makes HC skip its spread check so it never kicks. The
+--  natural shot still plays its own visuals; this guarantees the hit on target.
 -- ============================================================
 local function setForceHit(on) HC.forceHit = on end
 local _fhLast = 0
-local function fhCharsFolder()
-    local p = Workspace:FindFirstChild("Players")
-    return p and p:FindFirstChild("Characters")
-end
 track(UIS.InputBegan:Connect(function(input, gpe)
     if gpe or not HC.forceHit then return end
     if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
     local lc = LocalPlayer.Character
     if not lc or not lc:FindFirstChildOfClass("Tool") then return end   -- holding a gun
-    if tick() - _fhLast < 0.07 then return end
-    local cam = Workspace.CurrentCamera
-    local mp = UIS:GetMouseLocation()
-    local ray = cam:ViewportPointToRay(mp.X, mp.Y)
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    local ignore = { lc }
-    local ig = Workspace:FindFirstChild("Ignored"); if ig then ignore[#ignore + 1] = ig end
-    params.FilterDescendantsInstances = ignore
-    local res = Workspace:Raycast(ray.Origin, ray.Direction * 1500, params)
-    local inst = res and res.Instance
-    local chars = fhCharsFolder()
-    if not inst or not chars or not inst:IsDescendantOf(chars) then return end
+    if tick() - _fhLast < HC.forceHitCooldown then return end
+    local plr = getTarget(); if not plr then return end
+    local char = plr.Character; if not char then return end
+    local part = forceShotPart(char); if not part then return end
     _fhLast = tick()
-    fireShootAt(inst)
+    publishTarget(plr)
+    fireSynthFX(part)
 end))
 
 -- ============================================================
@@ -282,14 +402,15 @@ track(RunService.Heartbeat:Connect(function()
     if (lhrp.Position - hrp.Position).Magnitude > HC.autoShootDist then return end
     if HC.autoShootVis and char:FindFirstChildOfClass("ForceField") then return end
     if HC.autoEquip and HC.autoEquipTool ~= "" then tryEquipNamed(HC.autoEquipTool) end
-    local part = targetParts(char); if not part then return end
+    local part = forceShotPart(char); if not part then return end
     _asLast = tick()
     if HC.voidshoot then
+        -- point-blank desync: plain synth (tracer from a point-blank origin is noise)
         voidGlue(hrp)
         fireShootAt(part)
         task.delay(0.05, function() if HC.voidshoot then voidUnglue() end end)
     else
-        fireShootAt(part)
+        fireSynthFX(part)
     end
 end))
 
@@ -500,11 +621,25 @@ do
         Callback = function(v) HC.priority = (type(v) == "table" and v[1]) or v or "Closest" end })
 
     local Sec2 = CombatSub:Section({ Name = "Force Hit", Side = 1 })
-    Sec2:Toggle({ Name = "Force Hit (null spread)", Flag = "HC_ForceHit", Default = false,
+    Sec2:Toggle({ Name = "Force Hit (click target)", Flag = "HC_ForceHit", Default = false,
         Callback = function(v) setForceHit(v) end })
     Sec2:Dropdown({ Name = "Hit part", Flag = "HC_HitPart", Default = "Head", Multi = false,
         Items = { "Head", "UpperTorso", "HumanoidRootPart" },
         Callback = function(v) HC.hitPart = (type(v) == "table" and v[1]) or v or "Head" end })
+    Sec2:Slider({ Name = "Cooldown", Flag = "HC_ForceHitCd", Min = 0, Max = 1000, Default = 180, Decimals = 0, Suffix = " ms",
+        Callback = function(v) HC.forceHitCooldown = v / 1000 end })
+    -- fake bullet tracer + hit sound (the synth never renders gun visuals)
+    Sec2:Toggle({ Name = "Bullet tracers", Flag = "HC_Tracer", Default = true,
+        Callback = function(v) HC.tracerEnabled = v end })
+    Sec2:Dropdown({ Name = "Tracer style", Flag = "HC_TracerStyle", Default = "Standard", Multi = false,
+        Items = { "Standard", "Laser", "Thin" },
+        Callback = function(v) HC.tracerStyle = (type(v) == "table" and v[1]) or v or "Standard" end })
+    Sec2:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "HC_TracerColor", Default = Color3.fromRGB(0, 255, 80),
+        Callback = function(c) HC.tracerColor = c end })
+    Sec2:Toggle({ Name = "Hit sound", Flag = "HC_HitSound", Default = true,
+        Callback = function(v) HC.hitSoundEnabled = v end })
+    Sec2:Slider({ Name = "Hit sound volume", Flag = "HC_HitSoundVol", Min = 0, Max = 500, Default = 100, Decimals = 0, Suffix = "%",
+        Callback = function(v) HC.hitSoundVolume = v / 100 end })
 
     local Sec3 = CombatSub:Section({ Name = "Auto Reload", Side = 2 })
     Sec3:Toggle({ Name = "Auto reload (low ammo)", Flag = "HC_Reload", Default = false,
