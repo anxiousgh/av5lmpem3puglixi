@@ -460,7 +460,7 @@ do
         if o.glow and o.glow.Parent == part then return o.glow end
         if o.glow then pcall(function() o.glow:Destroy() end) end
         local light = Instance.new("PointLight")
-        light.Range = 18
+        light.Range = 7
         light.Brightness = 5
         light.Shadows = false
         light.Parent = part
