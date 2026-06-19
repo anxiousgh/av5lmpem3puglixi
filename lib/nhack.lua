@@ -8678,14 +8678,14 @@ do
                 Toggle.Items = Items
             end
 
-            -- [wh] feature toggles appear in the keybinds list while enabled, even
-            -- with no key bound. Skip nested sub-toggles (Params.Parent) and settings
-            -- widgets so the list only reflects real, user-toggled features.
+            -- [wh] only toggles that opt in via KeybindName appear in the keybinds
+            -- list, under that name -- so it lists FEATURES (ESP, Camlock, Fly, ...)
+            -- while enabled, not every sub-option of each feature.
             local KeyEntry
-            if Library.KeyList and not Params.Parent and not Library.InSettingsPage
-                and not (Toggle.Section and Toggle.Section.IsSettings) then
-                KeyEntry = Library.KeyList:Add("", Toggle.Name, "")
-                KeyEntry.Instance.Text = Toggle.Name
+            local KeybindName = Params.KeybindName or Params.keybindName
+            if KeybindName and Library.KeyList then
+                KeyEntry = Library.KeyList:Add("", KeybindName, "")
+                KeyEntry.Instance.Text = KeybindName
                 KeyEntry:SetStatus(false)
             end
 
@@ -10704,7 +10704,6 @@ do
         end
 
         Library.CreateSettingsPage = function(Self)
-            Library.InSettingsPage = true   -- [wh] settings/UI toggles stay out of the keybind list
             local Page = Self:Page({ Name = "Settings", Icon = "rbxassetid://0" })
 
             local ConfigsSubPage = Page:SubPage({ Name = "Configs" })
@@ -10920,8 +10919,6 @@ do
                     end
                 end
             end
-
-            Library.InSettingsPage = false   -- [wh] resume keybind-list registration
         end
     end
 end

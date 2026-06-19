@@ -54,7 +54,7 @@ local Sub  = Page:SubPage({ Name = "Farm" })
 local Sec  = Sub:Section({ Name = "Cash", Side = 1 })
 
 Sec:Toggle({
-    Name = "Auto collect cash", Flag = "BR_AutoCollect", Default = false,
+    Name = "Auto collect cash", Flag = "BR_AutoCollect", Default = false, KeybindName = "Auto collect",
     Callback = function(v)
         enabled = v
         if v then startAuto() else stopAuto() end

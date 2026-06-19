@@ -636,7 +636,7 @@ local AimSub = CombatPage:SubPage({ Name = "Aimbot" })
 do
     local Sec = AimSub:Section({ Name = "Camera lock", Side = 1 })
     local Enabled = Sec:Toggle({
-        Name = "Enabled", Flag = "CamLockEnabled", Default = false,
+        Name = "Enabled", Flag = "CamLockEnabled", Default = false, KeybindName = "Camlock",
         Callback = function(v) CamLock.enabled = v end,
     })
     Sec:Label({ Name = "Toggle key" }):Keybind({
@@ -673,7 +673,7 @@ local TrigSub = CombatPage:SubPage({ Name = "Triggerbot" })
 do
     local Sec = TrigSub:Section({ Name = "Triggerbot", Side = 1 })
     local Enabled = Sec:Toggle({
-        Name = "Enabled", Flag = "TrigEnabled", Default = false,
+        Name = "Enabled", Flag = "TrigEnabled", Default = false, KeybindName = "Triggerbot",
         Callback = function(v) Trig.enabled = v end,
     })
     Sec:Label({ Name = "Toggle key" }):Keybind({
@@ -839,25 +839,25 @@ local PlayerPage = Window:Page({ Name = "Player" })
 local Move = PlayerPage:SubPage({ Name = "Movement" })
 
 local SpeedSec = Move:Section({ Name = "Speed", Side = 1 })
-SpeedSec:Toggle({ Name = "WalkSpeed", Flag = "WalkSpeedEnabled", Default = false,
+SpeedSec:Toggle({ Name = "WalkSpeed", Flag = "WalkSpeedEnabled", Default = false, KeybindName = "Walkspeed",
     Callback = function(v) Movement.setWalkSpeed(v) end })
 SpeedSec:Slider({ Name = "WalkSpeed amount", Flag = "WalkSpeedValue", Min = 16, Max = 500, Default = 50, Decimals = 0,
     Callback = function(v) Movement.setWalkSpeedValue(v) end })
-SpeedSec:Toggle({ Name = "CFrame speed", Flag = "CFrameEnabled", Default = false,
+SpeedSec:Toggle({ Name = "CFrame speed", Flag = "CFrameEnabled", Default = false, KeybindName = "CFrame speed",
     Callback = function(v) Movement.setCFrame(v) end })
 SpeedSec:Slider({ Name = "CFrame multiplier", Flag = "CFrameValue", Min = 1, Max = 10, Default = 2, Decimals = 1, Suffix = "x",
     Callback = function(v) Movement.setCFrameValue(v) end })
 
 local JumpSec = Move:Section({ Name = "Jump", Side = 1 })
-JumpSec:Toggle({ Name = "JumpPower", Flag = "JumpEnabled", Default = false,
+JumpSec:Toggle({ Name = "JumpPower", Flag = "JumpEnabled", Default = false, KeybindName = "JumpPower",
     Callback = function(v) Movement.setJump(v) end })
 JumpSec:Slider({ Name = "JumpPower amount", Flag = "JumpValue", Min = 50, Max = 500, Default = 50, Decimals = 0,
     Callback = function(v) Movement.setJumpValue(v) end })
-JumpSec:Toggle({ Name = "Infinite jump", Flag = "InfJumpEnabled", Default = false,
+JumpSec:Toggle({ Name = "Infinite jump", Flag = "InfJumpEnabled", Default = false, KeybindName = "Infinite jump",
     Callback = function(v) Movement.setInfJump(v) end })
 
 local FlySec = Move:Section({ Name = "Fly", Side = 2 })
-local FlyToggle = FlySec:Toggle({ Name = "Fly", Flag = "FlyEnabled", Default = false,
+local FlyToggle = FlySec:Toggle({ Name = "Fly", Flag = "FlyEnabled", Default = false, KeybindName = "Fly",
     Callback = function(v) Movement.setFly(v) end })
 FlySec:Slider({ Name = "Fly speed", Flag = "FlyValue", Min = 10, Max = 300, Default = 60, Decimals = 0,
     Callback = function(v) Movement.setFlyValue(v) end })
@@ -867,7 +867,7 @@ FlySec:Label({ Name = "Fly toggle key" }):Keybind({
     Callback = function(state) FlyToggle:Set(state and true or false) end })
 
 local UtilSec = Move:Section({ Name = "Utility", Side = 2 })
-UtilSec:Toggle({ Name = "Noclip", Flag = "NoclipEnabled", Default = false,
+UtilSec:Toggle({ Name = "Noclip", Flag = "NoclipEnabled", Default = false, KeybindName = "Noclip",
     Callback = function(v) Movement.setNoclip(v) end })
 
 -- ---- Player > Desync subpage ----
@@ -891,7 +891,7 @@ do
     })
 
     -- Enabled = heartbeat-spoof methods (void/spin/velocity/custom). No raknet.
-    enabledToggle = Sec:Toggle({ Name = "Enabled", Flag = "DesyncEnabled", Default = false,
+    enabledToggle = Sec:Toggle({ Name = "Enabled", Flag = "DesyncEnabled", Default = false, KeybindName = "Desync",
         Callback = function(v) Desync.setEnabled(v) end })
 
     -- RakNet freeze = the ONLY raknet path, behind its own explicit toggle.
@@ -953,7 +953,7 @@ do
     if not hasDrawing then
         Sec:Label({ Name = "ESP needs a Drawing-capable executor." })
     end
-    Sec:Toggle({ Name = "Enabled", Flag = "EspEnabled", Default = false,
+    Sec:Toggle({ Name = "Enabled", Flag = "EspEnabled", Default = false, KeybindName = "ESP",
         Callback = function(v) Esp.enabled = v end })
     Sec:Toggle({ Name = "Box", Flag = "EspBox", Default = true,
         Callback = function(v) Esp.box = v end })
