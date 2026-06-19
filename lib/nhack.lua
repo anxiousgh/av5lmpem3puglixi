@@ -8682,7 +8682,8 @@ do
             -- with no key bound. Skip nested sub-toggles (Params.Parent) and settings
             -- widgets so the list only reflects real, user-toggled features.
             local KeyEntry
-            if Library.KeyList and not Params.Parent and not (Toggle.Section and Toggle.Section.IsSettings) then
+            if Library.KeyList and not Params.Parent and not Library.InSettingsPage
+                and not (Toggle.Section and Toggle.Section.IsSettings) then
                 KeyEntry = Library.KeyList:Add("", Toggle.Name, "")
                 KeyEntry.Instance.Text = Toggle.Name
                 KeyEntry:SetStatus(false)
@@ -10703,6 +10704,7 @@ do
         end
 
         Library.CreateSettingsPage = function(Self)
+            Library.InSettingsPage = true   -- [wh] settings/UI toggles stay out of the keybind list
             local Page = Self:Page({ Name = "Settings", Icon = "rbxassetid://0" })
 
             local ConfigsSubPage = Page:SubPage({ Name = "Configs" })
@@ -10918,6 +10920,8 @@ do
                     end
                 end
             end
+
+            Library.InSettingsPage = false   -- [wh] resume keybind-list registration
         end
     end
 end
