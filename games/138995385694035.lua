@@ -348,15 +348,98 @@ local function forceShotPart(char)
     end
     return targetParts(char)
 end
-local function fireSynthFX(part)
-    if not part then return false end
-    local ok = fireShootAt(part)
-    if ok then
-        spawnTracer(muzzlePos(), part.Position)
-        playHitSound()
-    end
-    return ok
+-- ============================================================
+--  EVENT-DRIVEN FX  -- the synth never touches the gun script, so we time the
+--  fake tracer + hit sound off the player's REAL shot, not the synth call:
+--    * tracer -> when the equipped gun's client ammo drops (you actually shot)
+--    * hit FX -> only when the engaged target loses HP within a short window
+--                of that ammo drop (you shot AND it landed)
+-- ============================================================
+local FX_WINDOW = 0.6
+local _shotT = 0  -- tick() of the last real shot (ammo decrement)
+
+-- equipped gun's client ammo value (Tool.Script.Ammo.CLIENT)
+local function findClientAmmo()
+    local c = LocalPlayer.Character
+    local tool = c and c:FindFirstChildOfClass("Tool")
+    local scr = tool and tool:FindFirstChild("Script")
+    local ammo = scr and scr:FindFirstChild("Ammo")
+    local client = ammo and ammo:FindFirstChild("CLIENT")
+    if client and (client:IsA("IntValue") or client:IsA("NumberValue")) then return client end
+    if ammo and (ammo:IsA("IntValue") or ammo:IsA("NumberValue")) then return ammo end
+    return nil
 end
+
+-- a real shot fired: draw the tracer to the Force-Hit target (or the crosshair)
+local function onShotFired()
+    _shotT = tick()
+    if not HC.tracerEnabled then return end
+    local origin = muzzlePos(); if not origin then return end
+    local hitPos
+    if HC.forceHit then
+        local plr = getTarget()
+        local part = plr and plr.Character and forceShotPart(plr.Character)
+        if part then hitPos = part.Position end
+    end
+    if not hitPos then
+        local cam = Workspace.CurrentCamera
+        local mp = UIS:GetMouseLocation()
+        local ray = cam:ViewportPointToRay(mp.X, mp.Y)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        local ignore = {}
+        local lc = LocalPlayer.Character; if lc then ignore[#ignore + 1] = lc end
+        local ig = Workspace:FindFirstChild("Ignored"); if ig then ignore[#ignore + 1] = ig end
+        params.FilterDescendantsInstances = ignore
+        local res = Workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
+        hitPos = (res and res.Position) or (ray.Origin + ray.Direction * 300)
+    end
+    spawnTracer(origin, hitPos)
+end
+
+-- ammo watcher: re-attaches when the equipped gun changes; each decrease = a shot
+local _watchedAmmo, _watchedAmmoConn, _watchedAmmoLast
+local function ensureAmmoWatch()
+    local av = findClientAmmo()
+    if av == _watchedAmmo then return end
+    if _watchedAmmoConn then _watchedAmmoConn:Disconnect(); _watchedAmmoConn = nil end
+    _watchedAmmo = av
+    if not av then return end
+    _watchedAmmoLast = av.Value
+    _watchedAmmoConn = av:GetPropertyChangedSignal("Value"):Connect(function()
+        local newV, old = av.Value, _watchedAmmoLast
+        _watchedAmmoLast = newV
+        if old and newV < old then onShotFired() end
+    end)
+end
+
+-- target-humanoid watcher: HP drop within FX_WINDOW of a shot = a confirmed hit
+local _watchedHum, _watchedHumConn, _watchedHumLast
+local function ensureHumWatch()
+    local plr = getTarget()
+    local hum = plr and plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+    if hum == _watchedHum then return end
+    if _watchedHumConn then _watchedHumConn:Disconnect(); _watchedHumConn = nil end
+    _watchedHum = hum
+    if not hum then return end
+    _watchedHumLast = hum.Health
+    _watchedHumConn = hum.HealthChanged:Connect(function(newHP)
+        local old = _watchedHumLast
+        _watchedHumLast = newHP
+        if old and newHP < old - 0.01 and (tick() - _shotT < FX_WINDOW) then
+            playHitSound()
+        end
+    end)
+end
+
+-- keep both watchers attached to the current gun / target (cheap when unchanged)
+local _fxEnsureLast = 0
+track(RunService.Heartbeat:Connect(function()
+    if tick() - _fxEnsureLast < 0.15 then return end
+    _fxEnsureLast = tick()
+    ensureAmmoWatch()
+    ensureHumWatch()
+end))
 
 -- ============================================================
 --  FORCE HIT  -- on each shoot-click while holding a gun, fire the witherhook
@@ -377,7 +460,7 @@ track(UIS.InputBegan:Connect(function(input, gpe)
     local part = forceShotPart(char); if not part then return end
     _fhLast = tick()
     publishTarget(plr)
-    fireSynthFX(part)
+    fireShootAt(part)
 end))
 
 -- ============================================================
@@ -451,7 +534,7 @@ track(RunService.Heartbeat:Connect(function()
         fireShootAt(part)
         task.delay(0.05, function() if HC.voidshoot then voidUnglue() end end)
     else
-        fireSynthFX(part)
+        fireShootAt(part)
     end
 end))
 
