@@ -408,7 +408,7 @@ do
             dist   = mkDraw("Text",   { Size = 12, Center = true, Outline = true, Visible = false }),
             health = mkDraw("Square", { Thickness = 1, Filled = true, Visible = false }),
             tracer = lineFrame(),
-            corners = nil, skel = nil, chams = nil, glowMats = nil,   -- created lazily when used
+            corners = nil, skel = nil, chams = nil, glow = nil,   -- created lazily when used
         }
     end
     local function remove(plr)
@@ -420,12 +420,7 @@ do
         if o.corners then for _, d in ipairs(o.corners) do pcall(function() d:Destroy() end) end end
         if o.skel then for _, d in ipairs(o.skel) do pcall(function() d:Destroy() end) end end
         if o.chams then pcall(function() o.chams:Destroy() end) end
-        if o.glowMats then   -- restore any glow material/colour overrides
-            for p, orig in pairs(o.glowMats) do
-                pcall(function() if p.Parent then p.Material = orig[1]; p.Color = orig[2] end end)
-            end
-            o.glowMats = nil
-        end
+        if o.glow then pcall(function() o.glow:Destroy() end) end
         objs[plr] = nil
     end
 
@@ -456,26 +451,20 @@ do
     -- ForceField (a soft energy glow on the real geometry) and remember the
     -- original material so it can be restored when chams turns off / the player
     -- leaves the closest-N set / on unload. Local-only -- not replicated.
-    local GLOW_MATERIAL = Enum.Material.Neon
-    local function applyGlow(o, char, color)
-        local mats = o.glowMats
-        if not mats then mats = {}; o.glowMats = mats end
-        for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") then
-                if mats[p] == nil then
-                    mats[p] = { p.Material, p.Color }   -- remember the original look
-                    p.Material = GLOW_MATERIAL          -- Neon = bright, opaque glow
-                end
-                p.Color = color                          -- glow in the chams colour
-            end
-        end
-    end
-    local function clearGlow(o)
-        if not o.glowMats then return end
-        for p, orig in pairs(o.glowMats) do
-            pcall(function() if p.Parent then p.Material = orig[1]; p.Color = orig[2] end end)
-        end
-        o.glowMats = nil
+    -- glow: a PointLight at the character's centre throws a soft 360-degree glow
+    -- around the whole player (and lights nearby surfaces) -- it does NOT touch the
+    -- character's body at all. Just an added instance, so cleanup is deleting it.
+    local function ensureGlow(o, char)
+        local part = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart")
+        if not part then return nil end
+        if o.glow and o.glow.Parent == part then return o.glow end
+        if o.glow then pcall(function() o.glow:Destroy() end) end
+        local light = Instance.new("PointLight")
+        light.Range = 18
+        light.Brightness = 5
+        light.Shadows = false
+        light.Parent = part
+        o.glow = light; return light
     end
 
     for _, p in ipairs(Players:GetPlayers()) do add(p) end
@@ -539,10 +528,11 @@ do
                 h.OutlineColor = Esp.chamsOutline
                 h.FillTransparency = Esp.chamsTransparency
                 h.OutlineTransparency = 0
-                applyGlow(o, char, Esp.chamsFill)
+                local lt = ensureGlow(o, char)
+                if lt then lt.Enabled = true; lt.Color = Esp.chamsFill end
             else
                 if o.chams then o.chams.Enabled = false end
-                clearGlow(o)
+                if o.glow then o.glow.Enabled = false end
             end
 
             if active and hrp then
