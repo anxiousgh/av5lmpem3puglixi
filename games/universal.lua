@@ -997,6 +997,153 @@ do
 end
 
 -- ============================================================
+--  WORLD  (Visuals > World): edit Lighting, optionally lock it so the game
+--  can't change it back, and real 3D weather (rain / snow) that follows you.
+-- ============================================================
+local World = {}
+do
+    local Lighting = game:GetService("Lighting")
+    -- every Lighting prop we manage. We snapshot them so "Lock" can enforce the
+    -- whole set, and so we can restore them on unload.
+    local MANAGED = { "Brightness", "ClockTime", "ExposureCompensation",
+        "FogStart", "FogEnd", "FogColor", "Ambient", "OutdoorAmbient",
+        "ColorShift_Top", "ColorShift_Bottom", "GlobalShadows" }
+    local desired, original = {}, {}
+    for _, prop in ipairs(MANAGED) do
+        local ok, v = pcall(function() return Lighting[prop] end)
+        if ok then desired[prop] = v; original[prop] = v end
+    end
+
+    local locked = false
+    local function setProp(prop, value)
+        desired[prop] = value
+        pcall(function() Lighting[prop] = value end)
+    end
+
+    -- when locked, force our values back every frame so day/night scripts etc.
+    -- can never change them
+    track(RunService.RenderStepped:Connect(function()
+        if not locked then return end
+        for prop, value in pairs(desired) do
+            pcall(function() Lighting[prop] = value end)
+        end
+    end))
+
+    -- ---- 3D weather: a big invisible part above the camera emitting particles
+    local weather = { rain = false, snow = false, part = nil, rainE = nil, snowE = nil }
+    local function ensureWeather()
+        if weather.part and weather.part.Parent then return end
+        local p = Instance.new("Part")
+        p.Name = "\0"; p.Anchored = true; p.CanCollide = false
+        p.CanQuery = false; p.CanTouch = false; p.Transparency = 1
+        p.Size = Vector3.new(140, 1, 140); p.Parent = Workspace
+
+        local rainE = Instance.new("ParticleEmitter")
+        rainE.Color = ColorSequence.new(Color3.fromRGB(190, 210, 235))
+        rainE.Transparency = NumberSequence.new(0.35)
+        rainE.Size = NumberSequence.new(0.22)
+        rainE.Lifetime = NumberRange.new(0.6, 0.9)
+        rainE.Rate = 700
+        rainE.Speed = NumberRange.new(95, 115)
+        rainE.SpreadAngle = Vector2.new(5, 5)
+        rainE.Acceleration = Vector3.new(0, -50, 0)
+        rainE.Squash = NumberSequence.new(5)        -- stretch droplets into streaks
+        rainE.EmissionDirection = Enum.NormalId.Bottom
+        rainE.LightEmission = 0
+        rainE.Enabled = false
+        rainE.Parent = p
+
+        local snowE = Instance.new("ParticleEmitter")
+        snowE.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
+        snowE.Transparency = NumberSequence.new(0.1)
+        snowE.Size = NumberSequence.new(0.35)
+        snowE.Lifetime = NumberRange.new(3.5, 5.5)
+        snowE.Rate = 170
+        snowE.Speed = NumberRange.new(8, 14)
+        snowE.SpreadAngle = Vector2.new(40, 40)
+        snowE.Acceleration = Vector3.new(0, -2, 0)
+        snowE.Rotation = NumberRange.new(0, 360)
+        snowE.RotSpeed = NumberRange.new(-45, 45)
+        snowE.Drag = 3
+        snowE.LightEmission = 0.2
+        snowE.EmissionDirection = Enum.NormalId.Bottom
+        snowE.Enabled = false
+        snowE.Parent = p
+
+        weather.part, weather.rainE, weather.snowE = p, rainE, snowE
+    end
+    track(RunService.RenderStepped:Connect(function()
+        if weather.rain or weather.snow then
+            ensureWeather()
+            local cam = Workspace.CurrentCamera
+            if cam then
+                local pos = cam.CFrame.Position
+                weather.part.CFrame = CFrame.new(pos.X, pos.Y + 50, pos.Z)
+            end
+            weather.rainE.Enabled = weather.rain
+            weather.snowE.Enabled = weather.snow
+        elseif weather.part then
+            weather.rainE.Enabled = false
+            weather.snowE.Enabled = false
+        end
+    end))
+
+    function World.cleanup()
+        locked = false
+        if weather.part then pcall(function() weather.part:Destroy() end); weather.part = nil end
+        for prop, value in pairs(original) do pcall(function() Lighting[prop] = value end) end
+    end
+
+    -- ---- UI ----
+    local WorldSub = VisualsPage:SubPage({ Name = "World" })
+    local LSec = WorldSub:Section({ Name = "Lighting", Side = 1 })
+    LSec:Slider({ Name = "Time of day", Flag = "WorldTime", Min = 0, Max = 24,
+        Default = math.clamp(math.floor(desired.ClockTime or 14), 0, 24), Decimals = 0,
+        Callback = function(v) setProp("ClockTime", v) end })
+    LSec:Slider({ Name = "Brightness", Flag = "WorldBrightness", Min = 0, Max = 10,
+        Default = math.clamp(desired.Brightness or 2, 0, 10), Decimals = 1,
+        Callback = function(v) setProp("Brightness", v) end })
+    LSec:Slider({ Name = "Exposure", Flag = "WorldExposure", Min = -3, Max = 3,
+        Default = math.clamp(desired.ExposureCompensation or 0, -3, 3), Decimals = 1,
+        Callback = function(v) setProp("ExposureCompensation", v) end })
+    LSec:Slider({ Name = "Fog start", Flag = "WorldFogStart", Min = 0, Max = 5000,
+        Default = math.clamp(desired.FogStart or 0, 0, 5000), Decimals = 0,
+        Callback = function(v) setProp("FogStart", v) end })
+    LSec:Slider({ Name = "Fog end", Flag = "WorldFogEnd", Min = 0, Max = 10000,
+        Default = math.clamp(desired.FogEnd or 10000, 0, 10000), Decimals = 0,
+        Callback = function(v) setProp("FogEnd", v) end })
+    LSec:Label({ Name = "Fog color" }):Colorpicker({ Flag = "WorldFogColor",
+        Default = desired.FogColor or Color3.fromRGB(191, 191, 191),
+        Callback = function(c) setProp("FogColor", c) end })
+    LSec:Label({ Name = "Ambient" }):Colorpicker({ Flag = "WorldAmbient",
+        Default = desired.Ambient or Color3.fromRGB(0, 0, 0),
+        Callback = function(c) setProp("Ambient", c) end })
+    LSec:Label({ Name = "Outdoor ambient" }):Colorpicker({ Flag = "WorldOutdoor",
+        Default = desired.OutdoorAmbient or Color3.fromRGB(128, 128, 128),
+        Callback = function(c) setProp("OutdoorAmbient", c) end })
+
+    local OSec = WorldSub:Section({ Name = "Options", Side = 2 })
+    OSec:Toggle({ Name = "Full bright", Flag = "WorldFullbright", Default = false,
+        Callback = function(v)
+            if v then
+                setProp("Ambient", Color3.fromRGB(255, 255, 255))
+                setProp("OutdoorAmbient", Color3.fromRGB(255, 255, 255))
+                setProp("GlobalShadows", false)
+            else
+                setProp("Ambient", original.Ambient or Color3.fromRGB(0, 0, 0))
+                setProp("OutdoorAmbient", original.OutdoorAmbient or Color3.fromRGB(128, 128, 128))
+                setProp("GlobalShadows", original.GlobalShadows ~= false)
+            end
+        end })
+    OSec:Toggle({ Name = "Lock world settings", Flag = "WorldLock", Default = false, KeybindName = "World lock",
+        Callback = function(v) locked = v end })
+    OSec:Toggle({ Name = "Rain", Flag = "WorldRain", Default = false, KeybindName = "Rain",
+        Callback = function(v) weather.rain = v end })
+    OSec:Toggle({ Name = "Snow", Flag = "WorldSnow", Default = false, KeybindName = "Snow",
+        Callback = function(v) weather.snow = v end })
+end
+
+-- ============================================================
 --  PLAYER TARGET ACTIONS  (operate on the player selected in the
 --  floating Players widget): Goto / Fling / View / Follow.
 -- ============================================================
@@ -1141,6 +1288,7 @@ local function disableAll()
     pcall(function() if PlayerActions.stopFollow then PlayerActions.stopFollow() end end)
     pcall(function() if PlayerActions.stopView then PlayerActions.stopView() end end)
     pcall(function() if Esp.clear then Esp.clear() end end)
+    pcall(function() if World.cleanup then World.cleanup() end end)
     -- disconnect every tracked connection
     for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
     Connections = {}
