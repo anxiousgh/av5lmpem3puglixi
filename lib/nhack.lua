@@ -2939,7 +2939,11 @@ do
             end
 
             Library:RegisterLayout("Watermark", {
-                Instance = Items["Watermark"].Instance
+                Instance = Items["Watermark"].Instance,
+                -- [wh] not draggable; it's scale-centred (Position 0.5). The layout
+                -- config only stores offsets, so saving/restoring it would drop the
+                -- centring and snap it to the top-left. Keep it out of the config.
+                SavePosition = false
             })
 
             Library:Connect(RunService.RenderStepped, function()
