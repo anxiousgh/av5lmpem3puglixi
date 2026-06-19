@@ -841,13 +841,13 @@ local Move = PlayerPage:SubPage({ Name = "Movement" })
 local SpeedSec = Move:Section({ Name = "Speed", Side = 1 })
 local WalkToggle = SpeedSec:Toggle({ Name = "WalkSpeed", Flag = "WalkSpeedEnabled", Default = false,
     Callback = function(v) Movement.setWalkSpeed(v) end })
-SpeedSec:Slider({ Name = "WalkSpeed amount", Flag = "WalkSpeedValue", Min = 16, Max = 500, Default = 50, Decimals = 0,
+SpeedSec:Slider({ Name = "WalkSpeed amount", Flag = "WalkSpeedValue", Min = 16, Max = 2000, Default = 50, Decimals = 0,
     Callback = function(v) Movement.setWalkSpeedValue(v) end })
 SpeedSec:Label({ Name = "Toggle key" }):Keybind({ Name = "WalkSpeed", Flag = "WalkSpeedKey", Mode = "Toggle",
     Callback = function(state) WalkToggle:Set(state and true or false) end })
 local CFrameToggle = SpeedSec:Toggle({ Name = "CFrame speed", Flag = "CFrameEnabled", Default = false,
     Callback = function(v) Movement.setCFrame(v) end })
-SpeedSec:Slider({ Name = "CFrame multiplier", Flag = "CFrameValue", Min = 1, Max = 10, Default = 2, Decimals = 1, Suffix = "x",
+SpeedSec:Slider({ Name = "CFrame multiplier", Flag = "CFrameValue", Min = 1, Max = 50, Default = 2, Decimals = 1, Suffix = "x",
     Callback = function(v) Movement.setCFrameValue(v) end })
 SpeedSec:Label({ Name = "Toggle key" }):Keybind({ Name = "CFrame speed", Flag = "CFrameKey", Mode = "Toggle",
     Callback = function(state) CFrameToggle:Set(state and true or false) end })
@@ -855,7 +855,7 @@ SpeedSec:Label({ Name = "Toggle key" }):Keybind({ Name = "CFrame speed", Flag = 
 local JumpSec = Move:Section({ Name = "Jump", Side = 1 })
 local JumpToggle = JumpSec:Toggle({ Name = "JumpPower", Flag = "JumpEnabled", Default = false,
     Callback = function(v) Movement.setJump(v) end })
-JumpSec:Slider({ Name = "JumpPower amount", Flag = "JumpValue", Min = 50, Max = 500, Default = 50, Decimals = 0,
+JumpSec:Slider({ Name = "JumpPower amount", Flag = "JumpValue", Min = 50, Max = 2000, Default = 50, Decimals = 0,
     Callback = function(v) Movement.setJumpValue(v) end })
 JumpSec:Label({ Name = "Toggle key" }):Keybind({ Name = "Jump power", Flag = "JumpKey", Mode = "Toggle",
     Callback = function(state) JumpToggle:Set(state and true or false) end })
@@ -865,7 +865,7 @@ JumpSec:Toggle({ Name = "Infinite jump", Flag = "InfJumpEnabled", Default = fals
 local FlySec = Move:Section({ Name = "Fly", Side = 2 })
 local FlyToggle = FlySec:Toggle({ Name = "Fly", Flag = "FlyEnabled", Default = false,
     Callback = function(v) Movement.setFly(v) end })
-FlySec:Slider({ Name = "Fly speed", Flag = "FlyValue", Min = 10, Max = 300, Default = 60, Decimals = 0,
+FlySec:Slider({ Name = "Fly speed", Flag = "FlyValue", Min = 10, Max = 1000, Default = 60, Decimals = 0,
     Callback = function(v) Movement.setFlyValue(v) end })
 FlySec:Label({ Name = "Fly toggle key" }):Keybind({
     Name = "Fly",
