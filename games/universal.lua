@@ -434,7 +434,10 @@ do
         o.skel = s; return s
     end
     local function ensureChams(o, char)   -- in-game Highlight
-        if o.chams and o.chams.Parent then return o.chams end
+        -- key off the CURRENT character: on respawn the old char (and its
+        -- Highlight) may linger, so checking Parent alone would keep adorning the
+        -- dead body. Rebuild whenever the adornee no longer matches this char.
+        if o.chams and o.chams.Adornee == char and o.chams.Parent then return o.chams end
         if o.chams then pcall(function() o.chams:Destroy() end) end
         local h = Instance.new("Highlight")
         h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -452,11 +455,39 @@ do
         pcall(function() espGui:Destroy() end)
     end
 
+    local CHAMS_LIMIT = 32   -- the engine only renders ~32 Highlights at once
+
     track(RunService.RenderStepped:Connect(function()
         local cam = Workspace.CurrentCamera
         local vp = cam.ViewportSize
         local mouse = UserInputService:GetMouseLocation()
         local myHRP = getHRP()
+
+        -- chams render budget: Roblox only draws ~32 Highlights, so each frame
+        -- pick the CHAMS_LIMIT players closest to us and only those get one (the
+        -- rest are disabled). Without this, far/extra players silently fail to
+        -- highlight -- which also looked like "respawned/joined players don't get
+        -- chams" once the cap was already used up by everyone else.
+        local chamsTop = nil
+        if Esp.enabled and Esp.chams then
+            chamsTop = {}
+            local list = {}
+            local myPos = myHRP and myHRP.Position
+            for plr2 in pairs(objs) do
+                if teamOk(plr2, Esp.teamCheck) then
+                    local ch = aliveChar(plr2)
+                    local h2 = ch and ch:FindFirstChild("HumanoidRootPart")
+                    if h2 then
+                        list[#list + 1] = { plr2, myPos and (h2.Position - myPos).Magnitude or 0 }
+                    end
+                end
+            end
+            table.sort(list, function(a, b) return a[2] < b[2] end)
+            for i = 1, math.min(#list, CHAMS_LIMIT) do chamsTop[list[i][1]] = true end
+        end
+        -- shared breathing pulse for the chams glow (0..1)
+        local glow = 0.5 + 0.5 * math.sin(os.clock() * 4)
+
         for plr, o in pairs(objs) do
             if not o.box then continue end
             -- hide everything first
@@ -470,14 +501,15 @@ do
             if active then char, hum = aliveChar(plr) end
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
-            -- chams: in-game Highlight (works even off-screen)
-            if active and char and Esp.chams then
+            -- chams: in-game Highlight (works even off-screen), closest 32 only
+            if active and char and Esp.chams and chamsTop and chamsTop[plr] then
                 local h = ensureChams(o, char)
                 h.Enabled = true
                 h.FillColor = Esp.chamsFill
                 h.OutlineColor = Esp.chamsOutline
                 h.FillTransparency = Esp.chamsTransparency
-                h.OutlineTransparency = 0
+                -- small glowing effect: gently breathe the outline so it pulses
+                h.OutlineTransparency = 0.1 + 0.5 * glow
             elseif o.chams then
                 o.chams.Enabled = false
             end
