@@ -1206,6 +1206,10 @@ do
         local FlagData = type(Decoded) == "table" and Decoded.Flags or Decoded
         local LayoutData = type(Decoded) == "table" and Decoded.Layout
 
+        -- [wh] while restoring, suppress keybind callbacks: restoring a keybind's
+        -- binding must not re-fire the feature action (the paired toggle's own flag
+        -- carries the state). Without this, a saved Toggled=false clobbers the toggle.
+        Library._restoringConfig = true
         local Success, Result = Library:SafeCall(function()
             for Index, Value in FlagData do
                 local SetFunction = Library.SetFlags[Index]
@@ -1236,6 +1240,7 @@ do
                 SetFunction(Value)
             end
         end)
+        Library._restoringConfig = false
 
         if Success and type(LayoutData) == "table" then
             task.defer(function()
@@ -2439,7 +2444,7 @@ do
                         Toggled = Keybind.Toggled
                     }
 
-                    if Data.Callback then
+                    if Data.Callback and not Library._restoringConfig then
                         Library:SafeCall(Data.Callback, Keybind.Toggled)
                     end
 
@@ -2546,7 +2551,7 @@ do
                     Toggled = Keybind.Toggled
                 }
 
-                if Data.Callback then
+                if Data.Callback and not Library._restoringConfig then
                     Library:SafeCall(Data.Callback, Keybind.Toggled)
                 end
 
