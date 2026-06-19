@@ -2594,10 +2594,8 @@ do
                         Toggled = Keybind.Toggled
                     }
 
-                    if Data.Callback then
-                        Library:SafeCall(Data.Callback, Keybind.Toggled)
-                    end
-
+                    -- [wh] binding a key must not toggle the feature; the callback
+                    -- fires on Press only (see the table branch note above)
                     Update()
                 elseif type(Key) == "table" then
                     local RealKey = Key.Key == "Backspace" and "None" or Key.Key
@@ -2631,10 +2629,10 @@ do
                         Toggled = Keybind.Toggled
                     }
 
-                    if Data.Callback then
-                        Library:SafeCall(Data.Callback, Keybind.Toggled)
-                    end
-
+                    -- [wh] restoring a binding (e.g. from a config) must NOT fire the
+                    -- callback: the paired toggle's own flag already carries the
+                    -- feature state, so firing here would clobber it with the keybind's
+                    -- (possibly stale) saved Toggled. The callback runs on Press only.
                     Update()
                 elseif table.find({ "Toggle", "Hold", "Always" }, Key) then
                     Keybind.Mode = Key
