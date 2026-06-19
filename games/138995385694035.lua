@@ -76,7 +76,7 @@ local HC = {
     checkVisible = false, visibleOrigin = "Head",
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
-    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18,
+    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false,
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
     hitSoundEnabled = true, hitSoundId = 135698842254153, hitSoundVolume = 1.0,
@@ -277,16 +277,23 @@ local function fireShootAt(part)
     local c = LocalPlayer.Character
     local root = c and c:FindFirstChild("HumanoidRootPart"); if not root then return false end
     local pellets = isShotgun() and 5 or 1
-    local hitPos = part.Position
-    local hits, targets = table.create(pellets), table.create(pellets)
-    for i = 1, pellets do
-        hits[i]    = { Normal = hitPos, Instance = part, Position = hitPos }
-        targets[i] = { thePart = part, theOffset = Vector3.zero }
-    end
-    -- origin = where the server thinks we are (spoofed point-blank during voidshoot)
+    -- origin = where the server thinks we are (spoofed point-blank during voidshoot).
+    -- It MUST equal our replicated position or the server throws "origin mismatch".
     local g = gv()
     local sent = g and g._WH_HC_SENT
     local origin = (sent and sent.Position) or root.Position
+    -- WALLBANG: the server raycasts origin -> reported hit Position and rejects a
+    -- blocked LoS ("wallbang"). We can't move origin (mismatch), so instead we
+    -- report the hit Position AT our origin (zero-length ray = always clear) while
+    -- keeping Instance/thePart = the TARGET's part, so damage still lands on them.
+    -- Skipped while voidshooting (origin is already point-blank on the target).
+    local reportPos = part.Position
+    if HC.wallbang and not sent then reportPos = origin end
+    local hits, targets = table.create(pellets), table.create(pellets)
+    for i = 1, pellets do
+        hits[i]    = { Normal = reportPos, Instance = part, Position = reportPos }
+        targets[i] = { thePart = part, theOffset = part.CFrame:PointToObjectSpace(reportPos) }
+    end
     local payload = { hits, targets, origin, origin, Workspace:GetServerTimeNow() }
     return pcall(function() me:FireServer("Shoot", payload) end)
 end
@@ -829,6 +836,8 @@ do
         Callback = function(v) HC.hitPart = (type(v) == "table" and v[1]) or v or "Head" end })
     Sec2:Slider({ Name = "Cooldown", Flag = "HC_ForceHitCd", Min = 0, Max = 1000, Default = 180, Decimals = 0, Suffix = " ms",
         Callback = function(v) HC.forceHitCooldown = v / 1000 end })
+    Sec2:Toggle({ Name = "Wallbang (ignore LoS)", Flag = "HC_Wallbang", Default = false,
+        Callback = function(v) HC.wallbang = v end })
     -- fake bullet tracer + hit sound (the synth never renders gun visuals)
     Sec2:Toggle({ Name = "Bullet tracers", Flag = "HC_Tracer", Default = true,
         Callback = function(v) HC.tracerEnabled = v end })
