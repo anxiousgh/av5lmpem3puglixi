@@ -1218,13 +1218,18 @@ do
                     continue
                 end
 
-                if type(Value) == "table" and Value.Key then
-                    SetFunction(Value)
-                elseif type(Value) == "table" and Value.Color then
-                    SetFunction(Value.Color, Value.Alpha)
-                else
-                    SetFunction(Value)
-                end
+                -- [wh] isolate each flag: a single failing control (e.g. one that
+                -- touches a not-yet-loaded character during startup autoload) must
+                -- not abort applying the rest of the config
+                pcall(function()
+                    if type(Value) == "table" and Value.Key then
+                        SetFunction(Value)
+                    elseif type(Value) == "table" and Value.Color then
+                        SetFunction(Value.Color, Value.Alpha)
+                    else
+                        SetFunction(Value)
+                    end
+                end)
             end
 
             for Index, Value in FlagData do
@@ -1237,7 +1242,7 @@ do
                     continue
                 end
 
-                SetFunction(Value)
+                pcall(SetFunction, Value)
             end
         end)
         Library._restoringConfig = false
