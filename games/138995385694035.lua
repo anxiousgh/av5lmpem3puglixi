@@ -68,8 +68,8 @@ local function isAlive(plr)
 end
 
 local HC = {
-    -- target
-    autoSwitch = true, priority = "Closest",
+    -- target (multi-target lock list)
+    autoSwitch = false, priority = "Mouse",
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
     forceHit = false, hitPart = "Head", forceHitCooldown = 0.18,
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
@@ -92,9 +92,11 @@ local HC = {
 }
 
 -- ============================================================
---  Target system  (single ragebot target, auto-acquire / lock)
+--  Target system  (MULTI-target lock list -- Lock adds the priority pick to the
+--  list, Unlock clears it. getTarget() picks the best valid entry from the list
+--  by priority; with an empty list it only auto-acquires if Auto switch is on.)
 -- ============================================================
-local RageTarget = nil
+local RageTargets = {}
 
 local function targetParts(char)
     return char:FindFirstChild(HC.hitPart) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
@@ -126,9 +128,10 @@ local function scorePlayer(plr)
     return lhrp and (lhrp.Position - hrp.Position).Magnitude or math.huge
 end
 
-local function acquireTarget()
+-- best valid player (by current priority) out of a pool
+local function bestFrom(pool)
     local best, bestScore = nil, math.huge
-    for _, plr in ipairs(Players:GetPlayers()) do
+    for _, plr in ipairs(pool) do
         if validTarget(plr) then
             local s = scorePlayer(plr)
             if s < bestScore then bestScore = s; best = plr end
@@ -136,12 +139,33 @@ local function acquireTarget()
     end
     return best
 end
+local function acquireTarget() return bestFrom(Players:GetPlayers()) end
 
--- current target: keep RageTarget while valid; auto-switch when it drops
+-- multi-target lock list
+local function isLocked(plr)
+    for _, p in ipairs(RageTargets) do if p == plr then return true end end
+    return false
+end
+local function lockTarget()
+    local plr = acquireTarget()  -- the priority pick (e.g. nearest the crosshair)
+    if plr and not isLocked(plr) then RageTargets[#RageTargets + 1] = plr end
+end
+local function clearTargets() table.clear(RageTargets) end
+-- drop dead / departed entries, return the live list
+local function liveTargets()
+    local i = 1
+    while i <= #RageTargets do
+        if validTarget(RageTargets[i]) then i = i + 1 else table.remove(RageTargets, i) end
+    end
+    return RageTargets
+end
+
+-- current target: best of the locked list; if the list is empty and Auto switch
+-- is on, best of everyone; otherwise nothing.
 local function getTarget()
-    if validTarget(RageTarget) then return RageTarget end
-    if HC.autoSwitch then RageTarget = acquireTarget(); return RageTarget end
-    RageTarget = nil
+    local locked = liveTargets()
+    if #locked > 0 then return bestFrom(locked) end
+    if HC.autoSwitch then return acquireTarget() end
     return nil
 end
 
@@ -422,7 +446,7 @@ local function someoneBelow(onlyTarget)
     local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
     if not lhrp then return false end
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and (not onlyTarget or p == RageTarget) then
+        if p ~= LocalPlayer and (not onlyTarget or isLocked(p)) then
             local char = p.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             if hrp and isKnocked(p) and not isDead(p) then
@@ -611,14 +635,14 @@ end))
 local CombatSub = MainPage:SubPage({ Name = "Combat" })
 do
     local Sec = CombatSub:Section({ Name = "Target", Side = 1 })
-    Sec:Label({ Name = "Lock target" }):Keybind({ Name = "Lock target", Flag = "HC_LockKey", Mode = "Hold", Default = Enum.KeyCode.T,
-        Callback = function(state) if state then RageTarget = acquireTarget() end end })
-    Sec:Button({ Name = "Unlock target", Callback = function() RageTarget = nil end })
-    Sec:Toggle({ Name = "Auto switch", Flag = "HC_AutoSwitch", Default = true,
+    Sec:Label({ Name = "Lock targets" }):Keybind({ Name = "Lock targets", Flag = "HC_LockKey", Mode = "Hold", Default = Enum.KeyCode.C,
+        Callback = function(state) if state then lockTarget() end end })
+    Sec:Button({ Name = "Unlock targets", Callback = function() clearTargets() end })
+    Sec:Toggle({ Name = "Auto switch", Flag = "HC_AutoSwitch", Default = false,
         Callback = function(v) HC.autoSwitch = v end })
-    Sec:Dropdown({ Name = "Priority", Flag = "HC_Priority", Default = "Closest", Multi = false,
+    Sec:Dropdown({ Name = "Priority", Flag = "HC_Priority", Default = "Mouse", Multi = false,
         Items = { "Closest", "Mouse", "LowestHP" },
-        Callback = function(v) HC.priority = (type(v) == "table" and v[1]) or v or "Closest" end })
+        Callback = function(v) HC.priority = (type(v) == "table" and v[1]) or v or "Mouse" end })
 
     local Sec2 = CombatSub:Section({ Name = "Force Hit", Side = 1 })
     Sec2:Toggle({ Name = "Force Hit (click target)", Flag = "HC_ForceHit", Default = false,
