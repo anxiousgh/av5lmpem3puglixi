@@ -222,8 +222,16 @@ end
 -- Settings page (config + themes) -- added last so it's the final tab.
 Window:CreateSettingsPage()
 
--- autoload this game's chosen config now that every page/flag exists
-pcall(function() if Library.RunAutoload then Library.RunAutoload() end end)
+-- autoload this game's chosen config -- deferred until the character + UI have
+-- settled, because applying a config mid-load leaves some controls unapplied
+task.spawn(function()
+    local plr = game:GetService("Players").LocalPlayer
+    if not plr.Character then
+        pcall(function() plr.CharacterAdded:Wait() end)
+    end
+    task.wait(1)
+    pcall(function() if Library.RunAutoload then Library.RunAutoload() end end)
+end)
 
 Library:Notification("wrath.cc Loaded", 3, Library.Theme["Accent"])
 
