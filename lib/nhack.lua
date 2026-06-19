@@ -2660,7 +2660,17 @@ do
 
                 local InputBegan
                 InputBegan = UserInputService.InputBegan:Connect(function(Input)
-                    if Input.UserInputType == Enum.UserInputType.Keyboard then
+                    -- [wh] Escape / Backspace clear the keybind instead of binding it
+                    if Input.UserInputType == Enum.UserInputType.Keyboard
+                        and (Input.KeyCode == Enum.KeyCode.Escape
+                            or Input.KeyCode == Enum.KeyCode.Backspace) then
+                        Keybind.Key = "None"
+                        Keybind.Value = "None"
+                        Items["KeyButton"].Instance.Text = "[None]"
+                        Flags[Keybind.Flag] = {
+                            Mode = Keybind.Mode, Key = Keybind.Key, Toggled = Keybind.Toggled,
+                        }
+                    elseif Input.UserInputType == Enum.UserInputType.Keyboard then
                         Keybind:Set(Input.KeyCode)
                     else
                         Keybind:Set(Input.UserInputType)
