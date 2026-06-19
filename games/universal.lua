@@ -460,8 +460,8 @@ do
         if o.glow and o.glow.Parent == part then return o.glow end
         if o.glow then pcall(function() o.glow:Destroy() end) end
         local light = Instance.new("PointLight")
-        light.Range = 3          -- tiny, so the glow barely haloes the target and
-        light.Brightness = 1     -- hardly bleeds onto nearby players (incl. local)
+        light.Range = 4          -- small, so the glow hugs the target and barely
+        light.Brightness = 10    -- bleeds onto nearby players (incl. the local one)
         light.Shadows = false
         light.Parent = part
         o.glow = light; return light
@@ -532,7 +532,9 @@ do
                 if lt then lt.Enabled = true; lt.Color = Esp.chamsFill end
             else
                 if o.chams then o.chams.Enabled = false end
-                if o.glow then o.glow.Enabled = false end
+                -- destroy (not just disable) the glow light so it fully disappears
+                -- the moment chams is off / the player drops out of the closest set
+                if o.glow then pcall(function() o.glow:Destroy() end); o.glow = nil end
             end
 
             if active and hrp then
