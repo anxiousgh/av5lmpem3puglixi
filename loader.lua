@@ -139,9 +139,39 @@ Library:RegisterSettingsWidget({
     Name = "Target Indicator",
     Default = false,
     Callback = function(Value)
-        TargetIndicator:SetVisibility(Value)
+        getgenv().WH.targetIndicatorOn = Value and true or false
     end
 })
+
+-- Drive the Target Indicator from the shared current target (published by the
+-- aimbot / ragebot as getgenv().WH.currentTarget + .currentTargetT). It only
+-- shows while a fresh, valid target exists -- otherwise it's hidden. SetTarget is
+-- only called on change (it yields for the avatar thumbnail), so this runs in its
+-- own loop rather than RenderStepped. A generation token stops the old loop when
+-- the hub is re-executed.
+do
+    getgenv().WH.targetIndicatorOn = false
+    local genKey = (getgenv()._WH_tgGen or 0) + 1
+    getgenv()._WH_tgGen = genKey
+    task.spawn(function()
+        local last
+        while getgenv()._WH_tgGen == genKey do
+            local w = getgenv().WH
+            local target
+            if w and w.targetIndicatorOn and w.currentTarget and w.currentTargetT
+                and (os.clock() - w.currentTargetT < 0.3) then
+                target = w.currentTarget
+                if not (target.Parent and target.Character) then target = nil end
+            end
+            if target ~= last then
+                pcall(function() TargetIndicator:SetTarget(target) end)
+                last = target
+            end
+            pcall(function() TargetIndicator:SetVisibility(target ~= nil) end)
+            task.wait()
+        end
+    end)
+end
 
 Library:RegisterSettingsWidget({
     Name = "Console",

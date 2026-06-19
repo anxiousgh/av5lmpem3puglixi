@@ -266,17 +266,20 @@ do
         if not CamLock.enabled then stickyTarget = nil; return end
         if Library.WindowOpenState then return end   -- don't fight you while in the menu
 
-        local part
+        local part, plr
         if CamLock.sticky then
             -- keep the current target while valid; only re-acquire when it drops
             part = stickyPart(stickyTarget)
-            if not part then
-                stickyTarget, part = findClosest()
-            end
+            if part then plr = stickyTarget
+            else stickyTarget, part = findClosest(); plr = stickyTarget end
         else
             stickyTarget = nil
-            local _, p = findClosest()
-            part = p
+            plr, part = findClosest()
+        end
+        -- publish the locked target for the Target Indicator widget (nil = none)
+        if getgenv then
+            local g = getgenv()
+            if g.WH then g.WH.currentTarget = part and plr or nil; g.WH.currentTargetT = os.clock() end
         end
         if not part then return end
 
