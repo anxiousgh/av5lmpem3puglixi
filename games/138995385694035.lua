@@ -162,16 +162,24 @@ local function fireShootAt(part)
     local root = c and c:FindFirstChild("HumanoidRootPart"); if not root then return false end
     local pellets = isShotgun() and 5 or 1
     local hitPos = part.Position
-    local hits, targets = table.create(pellets), table.create(pellets)
-    for i = 1, pellets do
-        hits[i]    = { Normal = hitPos, Instance = part, Position = hitPos }
-        targets[i] = { thePart = part, theOffset = Vector3.zero }
-    end
-    -- origin = where the server thinks we are (spoofed during voidshoot)
+    -- origin: the gun handle muzzle if we're holding one, else HRP. While a
+    -- voidshoot desync is active that's the spoofed (point-blank) spot.
     local g = gv()
     local sent = g and g._WH_HC_SENT
-    local origin = (sent and sent.Position) or root.Position
-    local payload = { hits, targets, origin, origin, Workspace:GetServerTimeNow() }
+    local tool = c:FindFirstChildOfClass("Tool")
+    local handle = tool and tool:FindFirstChild("Handle")
+    local origin = (sent and sent.Position) or (handle and handle.Position) or root.Position
+    -- a plausible surface normal (facing the shooter) instead of a raw position
+    local nrm = origin - hitPos
+    nrm = (nrm.Magnitude > 0.001) and nrm.Unit or Vector3.yAxis
+    local hits, targets = table.create(pellets), table.create(pellets)
+    for i = 1, pellets do
+        hits[i]    = { Normal = nrm, Instance = part, Position = hitPos }
+        targets[i] = { thePart = part, theOffset = Vector3.zero }
+    end
+    -- payload = { serverHitData, serverOffsets, bulletOrigin, probeHitPos(aim), serverTime }.
+    -- aim MUST point at the target (was =origin, which only validated point-blank).
+    local payload = { hits, targets, origin, hitPos, Workspace:GetServerTimeNow() }
     return pcall(function() me:FireServer("Shoot", payload) end)
 end
 
