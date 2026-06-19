@@ -218,11 +218,14 @@ local function lockTarget()
     if best then RageTargets[#RageTargets + 1] = best end
 end
 local function clearTargets() table.clear(RageTargets) end
--- drop dead / departed / state-failed locked entries (keeps merely-occluded ones)
+-- ONLY drop players who actually left the game. Knocked / dead / respawning /
+-- occluded targets stay locked -- canEngage() decides whether to shoot them, so a
+-- target you down (or the knocked check skips) is never yanked out of the list.
 local function liveTargets()
     local i = 1
     while i <= #RageTargets do
-        if validTarget(RageTargets[i]) then i = i + 1 else table.remove(RageTargets, i) end
+        local p = RageTargets[i]
+        if p and p.Parent then i = i + 1 else table.remove(RageTargets, i) end
     end
     return RageTargets
 end
@@ -408,11 +411,12 @@ local function forceShotPart(char)
     return targetParts(char)
 end
 -- ============================================================
---  EVENT-DRIVEN FX  -- the synth never touches the gun script, so we time the
---  fake tracer + hit sound off the player's REAL shot, not the synth call:
---    * tracer -> when the equipped gun's client ammo drops (you actually shot)
---    * hit FX -> only when the engaged target loses HP within a short window
---                of that ammo drop (you shot AND it landed)
+--  EVENT-DRIVEN FX  -- the synth never touches the gun script, so we fake the
+--  tracer + hit sound:
+--    * tracer -> on a real shot: Force Hit/manual fire it off the gun's client
+--                ammo dropping; Auto Shoot triggers it directly (no ammo change)
+--    * hit FX -> only when the engaged target loses HP within a short window of
+--                that shot (you shot AND it landed)
 -- ============================================================
 local FX_WINDOW = 0.6
 local _shotT = 0  -- tick() of the last real shot (ammo decrement)
@@ -429,11 +433,18 @@ local function findClientAmmo()
     return nil
 end
 
--- a real shot fired: draw the tracer to the Force-Hit target (or the crosshair)
-local function onShotFired()
+-- stamp a shot (so the hit-sound watcher fires) and draw a tracer to hitPos.
+-- Called by BOTH the ammo watcher (manual / Force Hit shots) and Auto Shoot
+-- (which fires the synth directly and never decrements ammo).
+local function fxShotFired(hitPos)
     _shotT = tick()
-    if not HC.tracerEnabled then return end
+    if not HC.tracerEnabled or not hitPos then return end
     local origin = muzzlePos(); if not origin then return end
+    spawnTracer(origin, hitPos)
+end
+
+-- a real trigger pull (ammo dropped): tracer to the Force-Hit target or crosshair
+local function onAmmoShot()
     local hitPos
     if HC.forceHit then
         local plr = getTarget()
@@ -453,7 +464,7 @@ local function onShotFired()
         local res = Workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
         hitPos = (res and res.Position) or (ray.Origin + ray.Direction * 300)
     end
-    spawnTracer(origin, hitPos)
+    fxShotFired(hitPos)
 end
 
 -- ammo watcher: re-attaches when the equipped gun changes; each decrease = a shot
@@ -468,7 +479,7 @@ local function ensureAmmoWatch()
     _watchedAmmoConn = av:GetPropertyChangedSignal("Value"):Connect(function()
         local newV, old = av.Value, _watchedAmmoLast
         _watchedAmmoLast = newV
-        if old and newV < old then onShotFired() end
+        if old and newV < old then onAmmoShot() end
     end)
 end
 
@@ -588,13 +599,16 @@ track(RunService.Heartbeat:Connect(function()
     local part = forceShotPart(char); if not part then return end
     _asLast = tick()
     if HC.voidshoot then
-        -- point-blank desync: plain synth (tracer from a point-blank origin is noise)
         voidGlue(hrp)
         fireShootAt(part)
         task.delay(0.05, function() if HC.voidshoot then voidUnglue() end end)
     else
         fireShootAt(part)
     end
+    -- drive the tracer + hit-sound off the auto-shot too (no ammo decrement here,
+    -- so we trigger the FX directly). During a voidshoot glue the muzzle sits on
+    -- the target, so the tracer self-skips and only the hit sound plays.
+    fxShotFired(part.Position)
 end))
 
 -- ============================================================
