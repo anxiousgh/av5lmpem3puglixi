@@ -2449,10 +2449,7 @@ do
                         Toggled = Keybind.Toggled
                     }
 
-                    if Data.Callback and not Library._restoringConfig then
-                        Library:SafeCall(Data.Callback, Keybind.Toggled)
-                    end
-
+                    -- [wh] mode change doesn't run the feature action; that's Press-only
                     Update()
                 end
             })
@@ -2556,10 +2553,9 @@ do
                     Toggled = Keybind.Toggled
                 }
 
-                if Data.Callback and not Library._restoringConfig then
-                    Library:SafeCall(Data.Callback, Keybind.Toggled)
-                end
-
+                -- [wh] keybind callback fires on Press only. Setting the mode (incl.
+                -- restoring it from a config) must not run the feature action -- the
+                -- paired toggle's own flag already carries the state.
                 Update()
             end
 
