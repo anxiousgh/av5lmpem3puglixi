@@ -805,7 +805,13 @@ do
     -- it never touches raknet.
     function Desync.setEnabled(on)
         Desync.enabled = on and true or false
-        if not Desync.enabled then restoreReal() end
+        if not Desync.enabled then
+            restoreReal()
+            -- forget the snapshot, otherwise the next enable's restore fires with
+            -- this stale CFrame (before Heartbeat re-captures) and yanks you back to
+            -- the old spot. Cleared = the next enable starts from where you are now.
+            realCF, realLV, realAV = nil, nil, nil
+        end
     end
     function Desync.setMethod(m) Desync.method = m end
 
