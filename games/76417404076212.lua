@@ -32,6 +32,7 @@ local function track(c) conns[#conns + 1] = c; return c end
 local S = (gv() and gv()._SHARD_S) or {
     silent = false, fov = 220, hitPart = "Head",
     instant = true,   -- flatten + speed up the knife so it arrives almost instantly
+    magic = false,    -- ignore FOV/facing/LoS: every throw homes to the nearest enemy anywhere
     showFov = true, fovColor = Color3.fromRGB(255, 255, 255),
     head = nil,
 }
@@ -49,7 +50,8 @@ local function aimPartOf(char)
     return char:FindFirstChild(S.hitPart) or char:FindFirstChild("Head")
         or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
 end
--- silent-aim target: enemy part nearest the crosshair, within the FOV (px) circle
+-- silent-aim target: enemy part nearest the crosshair within the FOV circle.
+-- Magic mode ignores FOV/facing/screen entirely -> nearest enemy ANYWHERE.
 local function pickAim()
     local cam = workspace.CurrentCamera
     local origin = cam.CFrame.Position
@@ -59,12 +61,17 @@ local function pickAim()
         if p ~= LocalPlayer and p.Character then
             local hum  = p.Character:FindFirstChildOfClass("Humanoid")
             local part = aimPartOf(p.Character)
-            if hum and hum.Health > 0 and part
-                and cam.CFrame.LookVector:Dot((part.Position - origin).Unit) > 0.1 then
-                local sp, on = cam:WorldToViewportPoint(part.Position)
-                if on then
-                    local d = (mouse - Vector2.new(sp.X, sp.Y)).Magnitude
-                    if d <= S.fov and (not bestD or d < bestD) then bestD = d; best = part end
+            if hum and hum.Health > 0 and part then
+                if S.magic then
+                    -- nearest by world distance, no FOV/facing/LoS
+                    local d = (part.Position - origin).Magnitude
+                    if not bestD or d < bestD then bestD = d; best = part end
+                elseif cam.CFrame.LookVector:Dot((part.Position - origin).Unit) > 0.1 then
+                    local sp, on = cam:WorldToViewportPoint(part.Position)
+                    if on then
+                        local d = (mouse - Vector2.new(sp.X, sp.Y)).Magnitude
+                        if d <= S.fov and (not bestD or d < bestD) then bestD = d; best = part end
+                    end
                 end
             end
         end
@@ -168,6 +175,8 @@ do
     local Sec2 = Sub:Section({ Name = "Knife path", Side = 2 })
     Sec2:Toggle({ Name = "Instant (flat + fast knife)", Flag = "SHARD_Instant", Default = true,
         Callback = function(v) S.instant = v end })
+    Sec2:Toggle({ Name = "Magic bullets (any target, ignore FOV/walls)", Flag = "SHARD_Magic", Default = false,
+        Callback = function(v) S.magic = v end })
 end
 
 -- universal pages after Main so Main stays first
