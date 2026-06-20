@@ -79,7 +79,7 @@ local HC = {
     forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 12,
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
-    hitSoundEnabled = true, hitSoundId = 135698842254153, hitSoundVolume = 1.0,
+    hitSoundEnabled = true, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
     ammoHud = false,
     autoShoot = false, autoShootDist = 250, autoShootCooldown = 0.15, autoShootVis = true,
     autoEquip = false, autoEquipTool = "",
