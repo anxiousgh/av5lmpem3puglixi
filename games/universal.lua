@@ -117,6 +117,51 @@ do  -- JumpPower / JumpHeight
     end
 end
 
+do  -- Respawn (keep position) + the canonical "land upright on my feet" teleport
+    -- uprightTeleport: drop the player at `pos` STANDING -- keep only yaw (no pitch/roll
+    -- so we never tip over) and sit on top of the floor under pos (no clipping in). Use
+    -- this for every teleport so we always land on our feet, even from laying down.
+    function Movement.uprightTeleport(hrp, pos, look, hum)
+        if not (hrp and pos) then return end
+        local flat = look and Vector3.new(look.X, 0, look.Z) or Vector3.new(0, 0, -1)
+        if flat.Magnitude < 1e-3 then flat = Vector3.new(0, 0, -1) end
+        flat = flat.Unit
+        -- raycast down to find the floor so we stand ON it instead of half-buried (which tips us)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { hrp.Parent }
+        local hit = Workspace:Raycast(pos + Vector3.new(0, 5, 0), Vector3.new(0, -80, 0), params)
+        local y = pos.Y
+        if hit then y = hit.Position.Y + (hum and hum.HipHeight or 2) + hrp.Size.Y / 2 end
+        local target = Vector3.new(pos.X, y, pos.Z)
+        pcall(function()
+            hrp.CFrame = CFrame.new(target, target + flat)  -- flat look vector => upright
+            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end)
+    end
+
+    -- Force-kill, then the instant we respawn put us back where our HRP was, upright.
+    function Movement.respawn()
+        local hrp = getHRP()
+        local savedPos = hrp and hrp.Position
+        local savedLook = hrp and hrp.CFrame.LookVector
+        if savedPos then
+            local conn
+            conn = LocalPlayer.CharacterAdded:Connect(function(newChar)
+                conn:Disconnect()
+                local nh = newChar:WaitForChild("HumanoidRootPart", 8)
+                local nhum = newChar:FindFirstChildOfClass("Humanoid") or newChar:WaitForChild("Humanoid", 2)
+                if not nh then return end
+                task.wait(0.2)  -- let the spawn settle so it doesn't fight our CFrame
+                Movement.uprightTeleport(nh, savedPos, savedLook, nhum)
+            end)
+        end
+        local hum = getHum()
+        if hum then pcall(function() hum.Health = 0 end) end
+    end
+end
+
 do  -- CFrame speed
     local active, mult, conn = false, 2, nil
     function Movement.setCFrameValue(v) mult = v end
@@ -884,6 +929,8 @@ FlySec:Label({ Name = "Fly toggle key" }):Keybind({
 local UtilSec = Move:Section({ Name = "Utility", Side = 2 })
 UtilSec:Toggle({ Name = "Noclip", Flag = "NoclipEnabled", Default = false,
     Callback = function(v) Movement.setNoclip(v) end })
+UtilSec:Button({ Name = "Respawn (keep position)",
+    Callback = function() Movement.respawn() end })
 
 -- ---- Player > Desync subpage ----
 local DesyncSub = PlayerPage:SubPage({ Name = "Desync" })
