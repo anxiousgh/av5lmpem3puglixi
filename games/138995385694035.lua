@@ -76,7 +76,7 @@ local HC = {
     checkVisible = false, visibleOrigin = "Tool Handle",
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
-    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 12,
+    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 10,
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
     hitSoundEnabled = true, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
@@ -281,6 +281,42 @@ end
 -- spread PRNG check -- sending a non-degenerate aim (real bulletOrigin->target)
 -- makes the server validate spread and KICK for "spoofing spread pattern".
 -- Normal is set to the hit position (not a unit vector) to match exactly.
+-- Wallbang ("if possible"): the server only lets us spoof our shot origin by ~10-11
+-- studs from our real position before it throws "origin mismatch", and it raycasts
+-- origin -> hit (a blocked LoS = "wallbang" error). So we push the origin toward the
+-- target just far enough to clear the wall in between, capped at that budget. We step
+-- forward a stud at a time and return the FIRST origin with clear LoS (closest to real
+-- = safest). Returns nil when no origin within budget clears (wall too thick/far) so
+-- the caller skips the shot entirely -- no error eaten when a wallbang isn't possible.
+local WB_HARD_CAP = 11
+local function wallbangOrigin(realOrigin, part)
+    local targetPos = part.Position
+    local dir = targetPos - realOrigin
+    local dist = dir.Magnitude
+    if dist < 1e-3 then return realOrigin end
+    dir = dir.Unit
+    local ignore = {}
+    local lc = LocalPlayer.Character; if lc then ignore[#ignore + 1] = lc end
+    local ig = Workspace:FindFirstChild("Ignored"); if ig then ignore[#ignore + 1] = ig end
+    local tchar = part:FindFirstAncestorWhichIsA("Model"); if tchar then ignore[#ignore + 1] = tchar end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = ignore
+    local function clearFrom(from)  -- only WALLS block (our char + target are ignored)
+        return Workspace:Raycast(from, targetPos - from, params) == nil
+    end
+    if clearFrom(realOrigin) then return realOrigin end          -- already visible, no spoof
+    local budget = math.min(HC.wallbangOffset, WB_HARD_CAP, dist - 1)
+    local push = 1
+    while push <= budget do
+        if clearFrom(realOrigin + dir * push) then
+            return realOrigin + dir * math.min(push + 0.75, budget)  -- a touch past the wall
+        end
+        push = push + 1
+    end
+    return nil                                                   -- can't clear within budget
+end
+
 local function fireShootAt(part)
     if not part then return false end
     local me = getMainEvent(); if not me then return false end
@@ -292,18 +328,11 @@ local function fireShootAt(part)
     local g = gv()
     local sent = g and g._WH_HC_SENT
     local origin = (sent and sent.Position) or root.Position
-    -- WALLBANG: the server raycasts origin -> the hit on the part, and a blocked
-    -- LoS = "wallbang". The hit must stay on the part (faking the Position errors),
-    -- so instead we NUDGE origin a few studs toward the target -- enough to clear
-    -- thin cover / a corner without moving far enough to trip "origin mismatch".
-    -- Tune HC.wallbangOffset until it lands without an error. Skipped while
-    -- voidshooting (origin is already point-blank on the target).
+    -- Wallbang: spoof the origin just enough to clear the wall (within the server's
+    -- ~10-stud tolerance). Skipped while voidshooting (origin is already on the target).
     if HC.wallbang and not sent then
-        local toTarget = part.Position - origin
-        local d = toTarget.Magnitude
-        if d > 0 then
-            origin = origin + toTarget.Unit * math.min(HC.wallbangOffset, math.max(0, d - 2))
-        end
+        origin = wallbangOrigin(origin, part)
+        if not origin then return false end   -- no clear origin within budget -> skip, no error
     end
     local hitPos = part.Position
     local hits, targets = table.create(pellets), table.create(pellets)
@@ -898,9 +927,9 @@ do
         Callback = function(v) HC.hitPart = (type(v) == "table" and v[1]) or v or "Head" end })
     Sec2:Slider({ Name = "Cooldown", Flag = "HC_ForceHitCd", Min = 0, Max = 1000, Default = 180, Decimals = 0, Suffix = " ms",
         Callback = function(v) HC.forceHitCooldown = v / 1000 end })
-    Sec2:Toggle({ Name = "Wallbang (nudge origin)", Flag = "HC_Wallbang", Default = false,
+    Sec2:Toggle({ Name = "Wallbang if possible", Flag = "HC_Wallbang", Default = false,
         Callback = function(v) HC.wallbang = v end })
-    Sec2:Slider({ Name = "Wallbang origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 60, Default = 12, Decimals = 0, Suffix = " studs",
+    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 11, Default = 10, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.wallbangOffset = v end })
     -- fake bullet tracer + hit sound (the synth never renders gun visuals)
     Sec2:Toggle({ Name = "Bullet tracers", Flag = "HC_Tracer", Default = true,
