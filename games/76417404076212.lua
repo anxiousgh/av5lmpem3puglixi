@@ -167,7 +167,50 @@ if gv() and not gv()._SHARD_HOOK3 and hookmetamethod and gnm then
     end)
 end
 
--- No reload: handled by zeroing the throw cooldown (wired after live inspection).
+-- ---- No reload: zero the live weapon config's ThrowCooldown so the throw gate
+--      (os.clock()-lastThrow < ThrowCooldown) always passes -> throw as fast as you
+--      click. The config is an upvalue of the SignalManager weapon handlers; we reach
+--      it via getconnections + debug.getupvalues and re-apply (re-equip rebuilds it). ----
+local SignalEvents = game:GetService("ReplicatedStorage"):FindFirstChild("SignalManager")
+SignalEvents = SignalEvents and SignalEvents:FindFirstChild("SignalEvents")
+local function forEachWeaponConfig(fn)
+    if not (SignalEvents and getconnections and debug and debug.getupvalues) then return end
+    for _, sig in ipairs(SignalEvents:GetChildren()) do
+        if sig:IsA("BindableEvent") then
+            local ok, conns = pcall(getconnections, sig.Event)
+            if ok and conns then
+                for _, c in ipairs(conns) do
+                    local f = c.Function
+                    if f then
+                        local ok2, ups = pcall(debug.getupvalues, f)
+                        if ok2 and ups then
+                            for _, uv in pairs(ups) do
+                                if type(uv) == "table" and rawget(uv, "ThrowCooldown") ~= nil then fn(uv) end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+do
+    local lastApply = 0
+    track(RunService.Heartbeat:Connect(function()
+        if os.clock() - lastApply < 0.4 then return end
+        lastApply = os.clock()
+        if S.noReload then
+            forEachWeaponConfig(function(cfg)
+                if not S._origCD and cfg.ThrowCooldown ~= 0 then S._origCD = cfg.ThrowCooldown end
+                cfg.ThrowCooldown = 0
+            end)
+            S._zeroed = true
+        elseif S._zeroed then
+            forEachWeaponConfig(function(cfg) cfg.ThrowCooldown = S._origCD or 0.8 end)
+            S._zeroed = false
+        end
+    end))
+end
 
 -- ============================================================
 --  UI
@@ -194,6 +237,8 @@ do
         Callback = function(v) S.wallbang = v end })
     Sec2:Toggle({ Name = "Magic bullets (any target, off-screen)", Flag = "SHARD_Magic", Default = false,
         Callback = function(v) S.magic = v end })
+    Sec2:Toggle({ Name = "No reload (no throw cooldown)", Flag = "SHARD_NoReload", Default = false,
+        Callback = function(v) S.noReload = v end })
 end
 
 -- universal pages after Main so Main stays first
@@ -206,6 +251,7 @@ local function cleanup()
     unloaded = true
     S.silent, S.noReload, S.wallbang, S.magic = false, false, false, false
     S.head = nil
+    if S._zeroed then pcall(function() forEachWeaponConfig(function(cfg) cfg.ThrowCooldown = S._origCD or 0.8 end) end); S._zeroed = false end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     pcall(function() fovGui:Destroy() end)
 end
