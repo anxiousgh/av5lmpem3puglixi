@@ -32,6 +32,7 @@ local function track(c) conns[#conns + 1] = c; return c end
 local S = (gv() and gv()._SHARD_S) or {
     silent = false, fov = 220, hitPart = "Head",
     melee = false, meleeRange = 28,
+    showFov = true, fovColor = Color3.fromRGB(255, 255, 255),
     head = nil, meleePart = nil,
 }
 if gv() then gv()._SHARD_S = S end
@@ -87,9 +88,34 @@ local function pickMelee()
     end
     return best
 end
+-- ---- FOV circle (a rounded GUI ring, centered on the crosshair) ----
+local fovGui = Instance.new("ScreenGui")
+fovGui.Name = "_shard_fov"; fovGui.ResetOnSpawn = false; fovGui.IgnoreGuiInset = false
+if not pcall(function() fovGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end) or not fovGui.Parent then
+    fovGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+local fovRing = Instance.new("Frame")
+fovRing.AnchorPoint = Vector2.new(0.5, 0.5)
+fovRing.BackgroundTransparency = 1
+fovRing.BorderSizePixel = 0
+fovRing.Visible = false
+fovRing.Parent = fovGui
+local fovCorner = Instance.new("UICorner"); fovCorner.CornerRadius = UDim.new(1, 0); fovCorner.Parent = fovRing
+local fovStroke = Instance.new("UIStroke"); fovStroke.Thickness = 1.5; fovStroke.Transparency = 0.35; fovStroke.Parent = fovRing
+
 track(RunService.RenderStepped:Connect(function()
     S.head      = (S.silent and pickAim()) or nil
     S.meleePart = (S.melee and pickMelee()) or nil
+    -- FOV circle
+    if S.silent and S.showFov then
+        local m = UIS:GetMouseLocation()
+        fovRing.Position = UDim2.fromOffset(m.X, m.Y)
+        fovRing.Size = UDim2.fromOffset(S.fov * 2, S.fov * 2)
+        fovStroke.Color = S.fovColor
+        fovRing.Visible = true
+    else
+        fovRing.Visible = false
+    end
 end))
 
 -- ---- the __namecall hook (installed once, survives re-exec). Hook body does NO
@@ -141,6 +167,10 @@ do
     Sec:Dropdown({ Name = "Hit part", Flag = "SHARD_HitPart", Default = "Head", Multi = false,
         Items = { "Head", "UpperTorso", "Torso", "HumanoidRootPart" },
         Callback = function(v) S.hitPart = (type(v) == "table" and v[1]) or v or "Head" end })
+    Sec:Toggle({ Name = "Show FOV circle", Flag = "SHARD_ShowFov", Default = true,
+        Callback = function(v) S.showFov = v end })
+    Sec:Label({ Name = "FOV color" }):Colorpicker({ Flag = "SHARD_FovColor", Default = Color3.fromRGB(255, 255, 255),
+        Callback = function(c) S.fovColor = c end })
 
     local Sec2 = Sub:Section({ Name = "Melee", Side = 2 })
     Sec2:Toggle({ Name = "Melee auto-hit", Flag = "SHARD_Melee", Default = false,
@@ -160,6 +190,7 @@ local function cleanup()
     S.silent, S.melee = false, false
     S.head, S.meleePart = nil, nil
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    pcall(function() fovGui:Destroy() end)
 end
 do
     local g = gv()
