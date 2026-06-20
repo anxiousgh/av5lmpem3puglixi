@@ -931,6 +931,8 @@ UtilSec:Toggle({ Name = "Noclip", Flag = "NoclipEnabled", Default = false,
     Callback = function(v) Movement.setNoclip(v) end })
 UtilSec:Button({ Name = "Respawn (keep position)",
     Callback = function() Movement.respawn() end })
+UtilSec:Label({ Name = "Respawn key" }):Keybind({ Name = "Respawn", Flag = "RespawnKey", Mode = "Hold",
+    Callback = function(state) if state then Movement.respawn() end end })
 
 -- ---- Player > Desync subpage ----
 local DesyncSub = PlayerPage:SubPage({ Name = "Desync" })

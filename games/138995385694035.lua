@@ -241,15 +241,18 @@ end
 
 -- current engageable target: best by priority among the locked list (or everyone
 -- if Auto switch is on), filtered by ALL checks incl. visibility.
-local function getTarget()
+-- ignoreChecks=true skips the checks (validity only) -- used by the target visualizer
+-- so the line/outline keep showing the locked target even when it fails the checks.
+local function getTarget(ignoreChecks)
     local locked = liveTargets()
     local pool
     if #locked > 0 then pool = locked
     elseif HC.autoSwitch then pool = Players:GetPlayers()
     else return nil end
+    local filter = ignoreChecks and validTarget or canEngage
     local best, bestScore = nil, math.huge
     for _, plr in ipairs(pool) do
-        if canEngage(plr) then
+        if filter(plr) then
             local s = scorePlayer(plr)
             if s < bestScore then bestScore = s; best = plr end
         end
@@ -834,7 +837,7 @@ local function ensureHL()
     return rbHL
 end
 track(RunService.RenderStepped:Connect(function()
-    local plr = (HC.targetLine or HC.targetOutline) and getTarget() or nil
+    local plr = (HC.targetLine or HC.targetOutline) and getTarget(true) or nil  -- visuals ignore checks
     local char = plr and plr.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     -- line
