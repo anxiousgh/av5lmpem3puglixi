@@ -32,7 +32,9 @@ local function track(c) conns[#conns + 1] = c; return c end
 local S = (gv() and gv()._SHARD_S) or {
     silent = false, fov = 220, hitPart = "Head",
     instant = true,   -- flatten + speed up the knife so it arrives almost instantly
-    magic = false,    -- ignore FOV/facing/LoS: every throw homes to the nearest enemy anywhere
+    magic = false,    -- ignore FOV/facing: every throw homes to the nearest enemy anywhere
+    wallbang = false, -- spoof the throw origin onto the target so the server's LoS check passes
+    noReload = false, spamRate = 0.08, tmpl = nil,  -- replay throws to bypass the cooldown
     showFov = true, fovColor = Color3.fromRGB(255, 255, 255),
     head = nil,
 }
@@ -110,41 +112,52 @@ end))
 -- ---- the __namecall hook (installed once, survives re-exec). Hook body does NO
 --      namecalls -- it only reads the cached target + edits args + calls old. ----
 local gnm = getnamecallmethod
-if gv() and not gv()._SHARD_HOOK2 and hookmetamethod and gnm then
-    gv()._SHARD_HOOK2 = true
+if gv() and not gv()._SHARD_HOOK3 and hookmetamethod and gnm then
+    gv()._SHARD_HOOK3 = true
     local old
     old = hookmetamethod(game, "__namecall", function(self, ...)
         local st = gv() and gv()._SHARD_S
         if st and st.silent then
             local head = st.head
             if head and head.Parent then
+                -- WALLBANG: put the throw origin 2 studs in front of the head (past any
+                -- cover between us and them) so the server's origin->hit LoS ray is clear
+                local realCam = workspace.CurrentCamera.CFrame.Position
+                local aimDir = head.Position - realCam
+                aimDir = (aimDir.Magnitude > 0 and aimDir.Unit) or Vector3.new(0, 0, -1)
+                local wbOrigin = head.Position - aimDir * 2
+
                 if self == CheckFire or self == CheckShot then
                     if gnm() == "FireServer" then
                         local a = table.pack(...)
-                        if self == CheckFire then
-                            -- [2]camPos [3]camLook -> aim the server's recorded throw at the head
-                            if typeof(a[2]) == "Vector3" then a[3] = (head.Position - a[2]).Unit end
-                        else
-                            -- [5]camCF [6]hitPos [7]hitPart -> report the headshot
-                            local camPos = (typeof(a[5]) == "CFrame" and a[5].Position) or workspace.CurrentCamera.CFrame.Position
-                            a[5] = CFrame.new(camPos, head.Position)
+                        if self == CheckFire then            -- [2]camPos [3]camLook
+                            if typeof(a[2]) == "Vector3" then
+                                if st.wallbang then a[2] = wbOrigin end
+                                a[3] = (head.Position - a[2]).Unit
+                            end
+                        else                                  -- [5]camCF [6]hitPos [7]hitPart
+                            local origin = st.wallbang and wbOrigin
+                                or ((typeof(a[5]) == "CFrame" and a[5].Position) or realCam)
+                            a[5] = CFrame.new(origin, head.Position)
                             a[6] = head.Position
                             a[7] = head
                         end
                         return old(self, table.unpack(a, 1, a.n))
                     end
                 elseif self == GlobalWeaponFire then
-                    -- redirect the ACTUAL thrown knife at the head; optionally flatten +
-                    -- speed it so it arrives almost instantly (a real shot the server accepts)
+                    -- redirect the ACTUAL thrown knife at the head; flatten + speed it
+                    -- (Instant); cache the throw table so No-reload can replay it
                     if gnm() == "Fire" then
                         local params = (...)
                         if type(params) == "table" and typeof(params.Origin) == "Vector3" then
+                            if st.wallbang then params.Origin = wbOrigin end
                             params.Direction = (head.Position - params.Origin).Unit
                             if params.Misc then params.Misc.CamCFrame = CFrame.new(params.Origin, head.Position) end
                             if st.instant then
                                 params.Gravity = 0
                                 params.Force = math.max(tonumber(params.Force) or 0, 350)
                             end
+                            st.tmpl = params  -- template for No-reload replay
                         end
                     end
                 end
@@ -152,6 +165,29 @@ if gv() and not gv()._SHARD_HOOK2 and hookmetamethod and gnm then
         end
         return old(self, ...)
     end)
+end
+
+-- ---- No reload: replay the cached throw on a loop to bypass the ThrowCooldown.
+--      The hook above retargets each replayed throw onto the current target.
+--      (Throw once normally first so a template gets cached.) ----
+do
+    local lastSpam = 0
+    track(RunService.Heartbeat:Connect(function()
+        if not (S.noReload and S.tmpl and CheckFire and GlobalWeaponFire) then return end
+        if os.clock() - lastSpam < (S.spamRate or 0.08) then return end
+        lastSpam = os.clock()
+        local cam = workspace.CurrentCamera.CFrame
+        local clock = os.clock()
+        local p = table.clone(S.tmpl)
+        p.Origin = cam.Position
+        p.Direction = cam.LookVector
+        p.BulletId = tostring(clock) .. "_throw"
+        if p.Misc then p.Misc = table.clone(p.Misc); p.Misc.ShotID = tostring(clock) end
+        pcall(function()
+            CheckFire:FireServer(clock, cam.Position, cam.LookVector, true)
+            GlobalWeaponFire:Fire(p)
+        end)
+    end))
 end
 
 -- ============================================================
@@ -172,11 +208,17 @@ do
     Sec:Label({ Name = "FOV color" }):Colorpicker({ Flag = "SHARD_FovColor", Default = Color3.fromRGB(255, 255, 255),
         Callback = function(c) S.fovColor = c end })
 
-    local Sec2 = Sub:Section({ Name = "Knife path", Side = 2 })
+    local Sec2 = Sub:Section({ Name = "Knife mods", Side = 2 })
     Sec2:Toggle({ Name = "Instant (flat + fast knife)", Flag = "SHARD_Instant", Default = true,
         Callback = function(v) S.instant = v end })
-    Sec2:Toggle({ Name = "Magic bullets (any target, ignore FOV/walls)", Flag = "SHARD_Magic", Default = false,
+    Sec2:Toggle({ Name = "Wallbang (through walls)", Flag = "SHARD_Wallbang", Default = false,
+        Callback = function(v) S.wallbang = v end })
+    Sec2:Toggle({ Name = "Magic bullets (any target, off-screen)", Flag = "SHARD_Magic", Default = false,
         Callback = function(v) S.magic = v end })
+    Sec2:Toggle({ Name = "No reload (spam)", Flag = "SHARD_NoReload", Default = false,
+        Callback = function(v) S.noReload = v end })
+    Sec2:Slider({ Name = "Spam rate", Flag = "SHARD_SpamRate", Min = 20, Max = 500, Default = 80, Decimals = 0, Suffix = " ms",
+        Callback = function(v) S.spamRate = v / 1000 end })
 end
 
 -- universal pages after Main so Main stays first
@@ -187,7 +229,7 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     unloaded = true
-    S.silent = false
+    S.silent, S.noReload, S.wallbang, S.magic = false, false, false, false
     S.head = nil
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     pcall(function() fovGui:Destroy() end)
