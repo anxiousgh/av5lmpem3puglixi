@@ -73,7 +73,7 @@ local HC = {
     -- target (multi-target lock list)
     autoSwitch = false, priority = "Closest to mouse",
     -- checks (Checks tab) -- respected by all targeting + shooting
-    checkVisible = false, visibleOrigin = "Head",
+    checkVisible = false, visibleOrigin = "Tool Handle",
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
     forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 12,
@@ -129,8 +129,14 @@ local function visOrigin()
     local mode = HC.visibleOrigin
     if mode == "Camera" then return Workspace.CurrentCamera.CFrame.Position end
     local c = LocalPlayer.Character
+    if mode == "Tool Handle" then
+        -- check LoS from where the gun actually is; falls through to Head if unequipped
+        local tool = c and c:FindFirstChildOfClass("Tool")
+        local handle = tool and (tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart"))
+        if handle then return handle.Position end
+    end
     if mode == "Root" then local r = c and c:FindFirstChild("HumanoidRootPart"); return r and r.Position end
-    local h = c and c:FindFirstChild("Head"); return h and h.Position  -- "Head" (default)
+    local h = c and c:FindFirstChild("Head"); return h and h.Position  -- "Head" (default + Tool-Handle fallback)
 end
 local function isVisible(plr)
     local m = hcModel(plr)
@@ -975,9 +981,9 @@ do
     local Sec = ChecksSub:Section({ Name = "Visibility", Side = 1 })
     Sec:Toggle({ Name = "Visible check", Flag = "HC_CheckVisible", Default = false,
         Callback = function(v) HC.checkVisible = v end })
-    Sec:Dropdown({ Name = "Visible origin", Flag = "HC_VisibleOrigin", Default = "Head", Multi = false,
-        Items = { "Head", "Camera", "Root" },
-        Callback = function(v) HC.visibleOrigin = (type(v) == "table" and v[1]) or v or "Head" end })
+    Sec:Dropdown({ Name = "Visible origin", Flag = "HC_VisibleOrigin", Default = "Tool Handle", Multi = false,
+        Items = { "Tool Handle", "Head", "Camera", "Root" },
+        Callback = function(v) HC.visibleOrigin = (type(v) == "table" and v[1]) or v or "Tool Handle" end })
 
     local Sec2 = ChecksSub:Section({ Name = "State", Side = 2 })
     Sec2:Toggle({ Name = "Knocked check", Flag = "HC_CheckKnocked", Default = false,
