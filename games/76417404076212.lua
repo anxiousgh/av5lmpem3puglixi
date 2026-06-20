@@ -31,16 +31,17 @@ local function track(c) conns[#conns + 1] = c; return c end
 -- even after a hub re-execute
 local S = (gv() and gv()._SHARD_S) or {
     silent = false, fov = 220, hitPart = "Head",
-    melee = false, meleeRange = 28,
+    instant = true,   -- flatten + speed up the knife so it arrives almost instantly
     showFov = true, fovColor = Color3.fromRGB(255, 255, 255),
-    head = nil, meleePart = nil,
+    head = nil,
 }
 if gv() then gv()._SHARD_S = S end
 
 local CR        = LocalPlayer:WaitForChild("ClientRemotes", 10)
 local CheckShot = CR and CR:FindFirstChild("CheckShot")
 local CheckFire = CR and CR:FindFirstChild("CheckFire")
-local Melee     = CR and CR:FindFirstChild("MeleeEvent")
+-- BindableEvent that drives the thrown knife (visual + hit ray); we redirect it
+local GlobalWeaponFire = game:GetService("ReplicatedStorage"):FindFirstChild("GlobalWeaponFire")
 
 -- ---- target pickers (run in RenderStepped, OUTSIDE the hook, so namecalls here
 --      can't trip __namecall re-entrancy) ----
@@ -70,24 +71,6 @@ local function pickAim()
     end
     return best
 end
--- melee target: nearest enemy part within melee range
-local function pickMelee()
-    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return nil end
-    local best, bestD
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character then
-            local hum  = p.Character:FindFirstChildOfClass("Humanoid")
-            local part = p.Character:FindFirstChild("Head") or p.Character:FindFirstChild("UpperTorso")
-                or p.Character:FindFirstChild("Torso")
-            if hum and hum.Health > 0 and part then
-                local d = (part.Position - hrp.Position).Magnitude
-                if d <= S.meleeRange and (not bestD or d < bestD) then bestD = d; best = part end
-            end
-        end
-    end
-    return best
-end
 -- ---- FOV circle (a rounded GUI ring, centered on the crosshair) ----
 local fovGui = Instance.new("ScreenGui")
 fovGui.Name = "_shard_fov"; fovGui.ResetOnSpawn = false; fovGui.IgnoreGuiInset = false
@@ -104,8 +87,7 @@ local fovCorner = Instance.new("UICorner"); fovCorner.CornerRadius = UDim.new(1,
 local fovStroke = Instance.new("UIStroke"); fovStroke.Thickness = 1.5; fovStroke.Transparency = 0.35; fovStroke.Parent = fovRing
 
 track(RunService.RenderStepped:Connect(function()
-    S.head      = (S.silent and pickAim()) or nil
-    S.meleePart = (S.melee and pickMelee()) or nil
+    S.head = (S.silent and pickAim()) or nil
     -- FOV circle
     if S.silent and S.showFov then
         local m = UIS:GetMouseLocation()
@@ -121,20 +103,22 @@ end))
 -- ---- the __namecall hook (installed once, survives re-exec). Hook body does NO
 --      namecalls -- it only reads the cached target + edits args + calls old. ----
 local gnm = getnamecallmethod
-if gv() and not gv()._SHARD_HOOK and hookmetamethod and gnm then
-    gv()._SHARD_HOOK = true
+if gv() and not gv()._SHARD_HOOK2 and hookmetamethod and gnm then
+    gv()._SHARD_HOOK2 = true
     local old
     old = hookmetamethod(game, "__namecall", function(self, ...)
         local st = gv() and gv()._SHARD_S
-        if st then
-            if self == CheckFire or self == CheckShot then
-                if st.silent and gnm() == "FireServer" then
-                    local head = st.head
-                    if head and head.Parent then
+        if st and st.silent then
+            local head = st.head
+            if head and head.Parent then
+                if self == CheckFire or self == CheckShot then
+                    if gnm() == "FireServer" then
                         local a = table.pack(...)
                         if self == CheckFire then
+                            -- [2]camPos [3]camLook -> aim the server's recorded throw at the head
                             if typeof(a[2]) == "Vector3" then a[3] = (head.Position - a[2]).Unit end
                         else
+                            -- [5]camCF [6]hitPos [7]hitPart -> report the headshot
                             local camPos = (typeof(a[5]) == "CFrame" and a[5].Position) or workspace.CurrentCamera.CFrame.Position
                             a[5] = CFrame.new(camPos, head.Position)
                             a[6] = head.Position
@@ -142,11 +126,20 @@ if gv() and not gv()._SHARD_HOOK and hookmetamethod and gnm then
                         end
                         return old(self, table.unpack(a, 1, a.n))
                     end
-                end
-            elseif self == Melee then
-                if st.melee and gnm() == "FireServer" then
-                    local m = st.meleePart
-                    if m and m.Parent then return old(self, m) end
+                elseif self == GlobalWeaponFire then
+                    -- redirect the ACTUAL thrown knife at the head; optionally flatten +
+                    -- speed it so it arrives almost instantly (a real shot the server accepts)
+                    if gnm() == "Fire" then
+                        local params = (...)
+                        if type(params) == "table" and typeof(params.Origin) == "Vector3" then
+                            params.Direction = (head.Position - params.Origin).Unit
+                            if params.Misc then params.Misc.CamCFrame = CFrame.new(params.Origin, head.Position) end
+                            if st.instant then
+                                params.Gravity = 0
+                                params.Force = math.max(tonumber(params.Force) or 0, 350)
+                            end
+                        end
+                    end
                 end
             end
         end
@@ -172,11 +165,9 @@ do
     Sec:Label({ Name = "FOV color" }):Colorpicker({ Flag = "SHARD_FovColor", Default = Color3.fromRGB(255, 255, 255),
         Callback = function(c) S.fovColor = c end })
 
-    local Sec2 = Sub:Section({ Name = "Melee", Side = 2 })
-    Sec2:Toggle({ Name = "Melee auto-hit", Flag = "SHARD_Melee", Default = false,
-        Callback = function(v) S.melee = v end })
-    Sec2:Slider({ Name = "Melee range", Flag = "SHARD_MeleeRange", Min = 5, Max = 60, Default = 28, Decimals = 0, Suffix = " studs",
-        Callback = function(v) S.meleeRange = v end })
+    local Sec2 = Sub:Section({ Name = "Knife path", Side = 2 })
+    Sec2:Toggle({ Name = "Instant (flat + fast knife)", Flag = "SHARD_Instant", Default = true,
+        Callback = function(v) S.instant = v end })
 end
 
 -- universal pages after Main so Main stays first
@@ -187,8 +178,8 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     unloaded = true
-    S.silent, S.melee = false, false
-    S.head, S.meleePart = nil, nil
+    S.silent = false
+    S.head = nil
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     pcall(function() fovGui:Destroy() end)
 end
