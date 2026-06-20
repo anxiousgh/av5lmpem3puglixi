@@ -30,11 +30,12 @@ local function track(c) conns[#conns + 1] = c; return c end
 -- settings live in getgenv so the (one-time) hook always reads the latest copy
 -- even after a hub re-execute
 local S = (gv() and gv()._SHARD_S) or {
-    silent = false, fov = 220, hitPart = "Head",
+    silent = false, fov = 220, hitPart = "Head", priority = "Crosshair",
     instant = true,   -- flatten + speed up the knife so it arrives almost instantly
     magic = false,    -- ignore FOV/facing: every throw homes to the nearest enemy anywhere
     wallbang = false, -- spoof the throw origin onto the target so the server's LoS check passes
-    noReload = false, spamRate = 0.08, tmpl = nil,  -- replay throws to bypass the cooldown
+    noReload = false, -- zero the throw cooldown
+    killAura = false, auraRate = 0.15,  -- auto-throw at every enemy in the lobby
     showFov = true, fovColor = Color3.fromRGB(255, 255, 255),
     head = nil,
 }
@@ -52,28 +53,36 @@ local function aimPartOf(char)
     return char:FindFirstChild(S.hitPart) or char:FindFirstChild("Head")
         or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
 end
--- silent-aim target: enemy part nearest the crosshair within the FOV circle.
--- Magic mode ignores FOV/facing/screen entirely -> nearest enemy ANYWHERE.
+-- score a candidate by the chosen priority (lower = preferred)
+local function scoreTarget(part, hum, origin, mouse)
+    local pr = S.priority
+    if pr == "Lowest HP" then return hum.Health end
+    if pr == "Closest" then return (part.Position - origin).Magnitude end
+    -- "Crosshair" (default): screen distance to the crosshair
+    local sp, on = workspace.CurrentCamera:WorldToViewportPoint(part.Position)
+    if not on then return math.huge end
+    return (mouse - Vector2.new(sp.X, sp.Y)).Magnitude
+end
+-- silent-aim target: best enemy by priority within the FOV circle.
+-- Magic mode ignores the FOV/facing/screen gate -> any enemy anywhere.
 local function pickAim()
     local cam = workspace.CurrentCamera
     local origin = cam.CFrame.Position
     local mouse = UIS:GetMouseLocation()
-    local best, bestD
+    local best, bestScore
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and p.Character then
             local hum  = p.Character:FindFirstChildOfClass("Humanoid")
             local part = aimPartOf(p.Character)
             if hum and hum.Health > 0 and part then
-                if S.magic then
-                    -- nearest by world distance, no FOV/facing/LoS
-                    local d = (part.Position - origin).Magnitude
-                    if not bestD or d < bestD then bestD = d; best = part end
-                elseif cam.CFrame.LookVector:Dot((part.Position - origin).Unit) > 0.1 then
+                local pass = S.magic
+                if not pass and cam.CFrame.LookVector:Dot((part.Position - origin).Unit) > 0.1 then
                     local sp, on = cam:WorldToViewportPoint(part.Position)
-                    if on then
-                        local d = (mouse - Vector2.new(sp.X, sp.Y)).Magnitude
-                        if d <= S.fov and (not bestD or d < bestD) then bestD = d; best = part end
-                    end
+                    if on and (mouse - Vector2.new(sp.X, sp.Y)).Magnitude <= S.fov then pass = true end
+                end
+                if pass then
+                    local s = scoreTarget(part, hum, origin, mouse)
+                    if not bestScore or s < bestScore then bestScore = s; best = part end
                 end
             end
         end
@@ -96,7 +105,7 @@ local fovCorner = Instance.new("UICorner"); fovCorner.CornerRadius = UDim.new(1,
 local fovStroke = Instance.new("UIStroke"); fovStroke.Thickness = 1.5; fovStroke.Transparency = 0.35; fovStroke.Parent = fovRing
 
 track(RunService.RenderStepped:Connect(function()
-    S.head = (S.silent and pickAim()) or nil
+    if not S.killAura then S.head = (S.silent and pickAim()) or nil end  -- Kill Aura controls the target while on
     -- FOV circle
     if S.silent and S.showFov then
         local m = UIS:GetMouseLocation()
@@ -117,7 +126,7 @@ if gv() and not gv()._SHARD_HOOK3 and hookmetamethod and gnm then
     local old
     old = hookmetamethod(game, "__namecall", function(self, ...)
         local st = gv() and gv()._SHARD_S
-        if st and st.silent then
+        if st and (st.silent or st.killAura) then
             local head = st.head
             if head and head.Parent then
                 -- WALLBANG: put the throw origin 2 studs in front of the head (past any
@@ -199,7 +208,7 @@ do
     track(RunService.Heartbeat:Connect(function()
         if os.clock() - lastApply < 0.4 then return end
         lastApply = os.clock()
-        if S.noReload then
+        if S.noReload or S.killAura then  -- Kill Aura needs the cooldown gone to fire fast
             forEachWeaponConfig(function(cfg)
                 if not S._origCD and cfg.ThrowCooldown ~= 0 then S._origCD = cfg.ThrowCooldown end
                 cfg.ThrowCooldown = 0
@@ -209,6 +218,37 @@ do
             forEachWeaponConfig(function(cfg) cfg.ThrowCooldown = S._origCD or 0.8 end)
             S._zeroed = false
         end
+    end))
+end
+
+-- ---- Kill Aura: auto-throw at every enemy in the lobby, one per auraRate. Fires the
+--      game's own AimWeapon (charge+release) so it goes through the normal throw path;
+--      the hook retargets each throw onto the cycled enemy. Rides No Reload. ----
+local AimWeapon = SignalEvents and SignalEvents:FindFirstChild("AimWeapon")
+do
+    local lastAura, idx = 0, 0
+    track(RunService.Heartbeat:Connect(function()
+        if not (S.killAura and AimWeapon) then return end
+        if os.clock() - lastAura < (S.auraRate or 0.15) then return end
+        local enemies = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                local hum = p.Character:FindFirstChildOfClass("Humanoid")
+                local h = p.Character:FindFirstChild(S.hitPart) or p.Character:FindFirstChild("Head")
+                if hum and hum.Health > 0 and h then enemies[#enemies + 1] = h end
+            end
+        end
+        if #enemies == 0 then return end
+        lastAura = os.clock()
+        idx = idx % #enemies + 1
+        local target = enemies[idx]
+        task.spawn(function()
+            S.head = target
+            AimWeapon:Fire(Enum.UserInputState.Begin)
+            task.wait(0.04)
+            S.head = target
+            AimWeapon:Fire(Enum.UserInputState.End)
+        end)
     end))
 end
 
@@ -225,6 +265,9 @@ do
     Sec:Dropdown({ Name = "Hit part", Flag = "SHARD_HitPart", Default = "Head", Multi = false,
         Items = { "Head", "UpperTorso", "Torso", "HumanoidRootPart" },
         Callback = function(v) S.hitPart = (type(v) == "table" and v[1]) or v or "Head" end })
+    Sec:Dropdown({ Name = "Priority", Flag = "SHARD_Priority", Default = "Crosshair", Multi = false,
+        Items = { "Crosshair", "Closest", "Lowest HP" },
+        Callback = function(v) S.priority = (type(v) == "table" and v[1]) or v or "Crosshair" end })
     Sec:Toggle({ Name = "Show FOV circle", Flag = "SHARD_ShowFov", Default = true,
         Callback = function(v) S.showFov = v end })
     Sec:Label({ Name = "FOV color" }):Colorpicker({ Flag = "SHARD_FovColor", Default = Color3.fromRGB(255, 255, 255),
@@ -239,6 +282,10 @@ do
         Callback = function(v) S.magic = v end })
     Sec2:Toggle({ Name = "No Reload", Flag = "SHARD_NoReload", Default = false,
         Callback = function(v) S.noReload = v end })
+    Sec2:Toggle({ Name = "Kill Aura", Flag = "SHARD_KillAura", Default = false,
+        Callback = function(v) S.killAura = v end })
+    Sec2:Slider({ Name = "Aura rate", Flag = "SHARD_AuraRate", Min = 50, Max = 600, Default = 150, Decimals = 0, Suffix = " ms",
+        Callback = function(v) S.auraRate = v / 1000 end })
 end
 
 -- universal pages after Main so Main stays first
@@ -249,7 +296,7 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     unloaded = true
-    S.silent, S.noReload, S.wallbang, S.magic = false, false, false, false
+    S.silent, S.noReload, S.wallbang, S.magic, S.killAura = false, false, false, false, false
     S.head = nil
     if S._zeroed then pcall(function() forEachWeaponConfig(function(cfg) cfg.ThrowCooldown = S._origCD or 0.8 end) end); S._zeroed = false end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
