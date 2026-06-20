@@ -130,24 +130,24 @@ if gv() and not gv()._SHARD_HOOK3 and hookmetamethod and gnm then
         if st and (st.silent or st.killAura) then
             local head = st.head
             if head and head.Parent then
-                -- WALLBANG: put the throw origin 2 studs in front of the head (past any
-                -- cover between us and them) so the server's origin->hit LoS ray is clear
-                local realCam = workspace.CurrentCamera.CFrame.Position
-                local aimDir = head.Position - realCam
+                -- Throw origin = OUR HEAD (not the camera). In 3rd person the camera
+                -- sits behind us, so a camera-origin throw is blocked by our own body
+                -- and the server rejects it. Wallbang instead puts the origin 2 studs in
+                -- front of the target (clear LoS through cover).
+                local myChar = LocalPlayer.Character
+                local myPart = myChar and (myChar:FindFirstChild("Head") or myChar:FindFirstChild("HumanoidRootPart"))
+                local myPos = (myPart and myPart.Position) or workspace.CurrentCamera.CFrame.Position
+                local aimDir = head.Position - myPos
                 aimDir = (aimDir.Magnitude > 0 and aimDir.Unit) or Vector3.new(0, 0, -1)
-                local wbOrigin = head.Position - aimDir * 2
+                local origin = st.wallbang and (head.Position - aimDir * 2) or myPos
 
                 if self == CheckFire or self == CheckShot then
                     if gnm() == "FireServer" then
                         local a = table.pack(...)
                         if self == CheckFire then            -- [2]camPos [3]camLook
-                            if typeof(a[2]) == "Vector3" then
-                                if st.wallbang then a[2] = wbOrigin end
-                                a[3] = (head.Position - a[2]).Unit
-                            end
+                            a[2] = origin
+                            a[3] = (head.Position - origin).Unit
                         else                                  -- [5]camCF [6]hitPos [7]hitPart
-                            local origin = st.wallbang and wbOrigin
-                                or ((typeof(a[5]) == "CFrame" and a[5].Position) or realCam)
                             a[5] = CFrame.new(origin, head.Position)
                             a[6] = head.Position
                             a[7] = head
@@ -160,9 +160,9 @@ if gv() and not gv()._SHARD_HOOK3 and hookmetamethod and gnm then
                     if gnm() == "Fire" then
                         local params = (...)
                         if type(params) == "table" and typeof(params.Origin) == "Vector3" then
-                            if st.wallbang then params.Origin = wbOrigin end
-                            params.Direction = (head.Position - params.Origin).Unit
-                            if params.Misc then params.Misc.CamCFrame = CFrame.new(params.Origin, head.Position) end
+                            params.Origin = origin
+                            params.Direction = (head.Position - origin).Unit
+                            if params.Misc then params.Misc.CamCFrame = CFrame.new(origin, head.Position) end
                             if st.instant then
                                 params.Gravity = 0
                                 params.Force = math.max(tonumber(params.Force) or 0, 350)
