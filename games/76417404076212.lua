@@ -107,6 +107,11 @@ local fovStroke = Instance.new("UIStroke"); fovStroke.Thickness = 1.5; fovStroke
 
 track(RunService.RenderStepped:Connect(function()
     if not S.killAura then S.head = (S.silent and pickAim()) or nil end  -- Kill Aura controls the target while on
+    -- Cache our head pos here (safe to namecall) so the hook can read it without
+    -- making namecalls itself (which would recurse -> C stack overflow).
+    local ch = LocalPlayer.Character
+    local hp = ch and (ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart"))
+    S.myPos = hp and hp.Position or nil
     -- FOV circle
     if S.silent and S.showFov then
         local m = UIS:GetMouseLocation()
@@ -130,13 +135,11 @@ if gv() and not gv()._SHARD_HOOK3 and hookmetamethod and gnm then
         if st and (st.silent or st.killAura) then
             local head = st.head
             if head and head.Parent then
-                -- Throw origin = OUR HEAD (not the camera). In 3rd person the camera
-                -- sits behind us, so a camera-origin throw is blocked by our own body
-                -- and the server rejects it. Wallbang instead puts the origin 2 studs in
-                -- front of the target (clear LoS through cover).
-                local myChar = LocalPlayer.Character
-                local myPart = myChar and (myChar:FindFirstChild("Head") or myChar:FindFirstChild("HumanoidRootPart"))
-                local myPos = (myPart and myPart.Position) or workspace.CurrentCamera.CFrame.Position
+                -- Throw origin = OUR HEAD (cached in RenderStep -- NO namecalls here or
+                -- the hook recurses into itself). In 3rd person the camera is behind us,
+                -- so a camera-origin throw is blocked by our body and the server rejects
+                -- it. Wallbang instead puts the origin 2 studs in front of the target.
+                local myPos = st.myPos or workspace.CurrentCamera.CFrame.Position
                 local aimDir = head.Position - myPos
                 aimDir = (aimDir.Magnitude > 0 and aimDir.Unit) or Vector3.new(0, 0, -1)
                 local origin = st.wallbang and (head.Position - aimDir * 2) or myPos
