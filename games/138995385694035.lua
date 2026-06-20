@@ -76,7 +76,7 @@ local HC = {
     checkVisible = false, visibleOrigin = "Tool Handle",
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
-    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 10,
+    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 11,
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
     hitSoundEnabled = true, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
@@ -171,12 +171,19 @@ local function validTarget(plr)
     if isDead(plr) then return false end
     return plr.Character ~= nil and plr.Character:FindFirstChild("HumanoidRootPart") ~= nil
 end
+-- forward decls (defined below near the shoot logic) so the visible check can fall
+-- back to "is a wallbang possible?" when Wallbang is on.
+local wallbangOrigin, canWallbangPlr
+
 -- engageable right now = valid AND passes every enabled check (state + visibility).
 -- This is what all targeting/shooting selects on.
 local function canEngage(plr)
     if not validTarget(plr) then return false end
     if not passesChecks(plr) then return false end
-    if HC.checkVisible and not isVisible(plr) then return false end
+    if HC.checkVisible and not isVisible(plr) then
+        -- with Wallbang on, a target we can punch a wall through still counts as engageable
+        if not (HC.wallbang and canWallbangPlr and canWallbangPlr(plr)) then return false end
+    end
     return true
 end
 
@@ -282,19 +289,20 @@ end
 -- makes the server validate spread and KICK for "spoofing spread pattern".
 -- Normal is set to the hit position (not a unit vector) to match exactly.
 -- Wallbang ("if possible"): the server only lets us spoof our shot origin by ~10-11
--- studs from our real position before it throws "origin mismatch", and it raycasts
--- origin -> hit (a blocked LoS = "wallbang" error). So we push the origin toward the
--- target just far enough to clear the wall in between, capped at that budget. We step
--- forward a stud at a time and return the FIRST origin with clear LoS (closest to real
--- = safest). Returns nil when no origin within budget clears (wall too thick/far) so
--- the caller skips the shot entirely -- no error eaten when a wallbang isn't possible.
+-- studs before it throws "origin mismatch", and it raycasts origin -> hit (a blocked
+-- LoS = "wallbang" error). So we search for a spoofed origin within that budget that
+-- has CLEAR line of sight to the target -- not only straight through the wall but
+-- peeking to ALL sides (around corners). We search DEEPEST-first (closest to the
+-- target = furthest past the wall = most margin) so the server's own raycast agrees
+-- and it never errors on a razor edge. Returns nil when nothing within budget clears
+-- (wall too thick / standing too far back) so the caller skips the shot -- no error.
 local WB_HARD_CAP = 11
-local function wallbangOrigin(realOrigin, part)
+function wallbangOrigin(realOrigin, part)
     local targetPos = part.Position
-    local dir = targetPos - realOrigin
-    local dist = dir.Magnitude
+    local toT = targetPos - realOrigin
+    local dist = toT.Magnitude
     if dist < 1e-3 then return realOrigin end
-    dir = dir.Unit
+    local fwd = toT.Unit
     local ignore = {}
     local lc = LocalPlayer.Character; if lc then ignore[#ignore + 1] = lc end
     local ig = Workspace:FindFirstChild("Ignored"); if ig then ignore[#ignore + 1] = ig end
@@ -305,16 +313,49 @@ local function wallbangOrigin(realOrigin, part)
     local function clearFrom(from)  -- only WALLS block (our char + target are ignored)
         return Workspace:Raycast(from, targetPos - from, params) == nil
     end
-    if clearFrom(realOrigin) then return realOrigin end          -- already visible, no spoof
-    local budget = math.min(HC.wallbangOffset, WB_HARD_CAP, dist - 1)
-    local push = 1
-    while push <= budget do
-        if clearFrom(realOrigin + dir * push) then
-            return realOrigin + dir * math.min(push + 0.75, budget)  -- a touch past the wall
+    if clearFrom(realOrigin) then return realOrigin end       -- already clear, no spoof
+    -- basis for sideways "peek around the wall" offsets
+    local up0 = math.abs(fwd.Y) > 0.99 and Vector3.new(1, 0, 0) or Vector3.new(0, 1, 0)
+    local right = fwd:Cross(up0); right = (right.Magnitude > 0 and right.Unit) or Vector3.new(1, 0, 0)
+    local up = right:Cross(fwd).Unit
+    local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)
+    local maxFwd = math.min(budget, dist - 1)
+    local ANG = { 0, 45, 90, 135, 180, 225, 270, 315 }
+    local f = maxFwd
+    while f >= 0 do
+        if f > 0 and clearFrom(realOrigin + fwd * f) then return realOrigin + fwd * f end  -- straight through
+        local lat = 2                                          -- then peek to every side at this depth
+        while lat <= budget do
+            for _, a in ipairs(ANG) do
+                local rad = math.rad(a)
+                local off = fwd * f + (right * math.cos(rad) + up * math.sin(rad)) * lat
+                if off.Magnitude <= budget + 1e-3 then
+                    local cand = realOrigin + off
+                    if clearFrom(cand) then return cand end
+                end
+            end
+            lat = lat + 2
         end
-        push = push + 1
+        f = f - 2
     end
-    return nil                                                   -- can't clear within budget
+    return nil                                                 -- nothing within budget clears
+end
+
+-- can we wallbang this player at all? (origin-spoof check, cached briefly since the
+-- targeting gate calls it every frame). Lets the visible check pass wallbang-able targets.
+local _wbCache = {}
+function canWallbangPlr(plr)
+    local lc = LocalPlayer.Character
+    local root = lc and lc:FindFirstChild("HumanoidRootPart"); if not root then return false end
+    local m = hcModel(plr)
+    local aim = m and (m:FindFirstChild(HC.hitPart) or m:FindFirstChild("Head") or m:FindFirstChild("HumanoidRootPart"))
+    if not aim then return false end
+    local now = os.clock()
+    local c = _wbCache[plr]
+    if c and now - c.t < 0.2 then return c.v end
+    local v = wallbangOrigin(root.Position, aim) ~= nil
+    _wbCache[plr] = { t = now, v = v }
+    return v
 end
 
 local function fireShootAt(part)
@@ -929,7 +970,7 @@ do
         Callback = function(v) HC.forceHitCooldown = v / 1000 end })
     Sec2:Toggle({ Name = "Wallbang if possible", Flag = "HC_Wallbang", Default = false,
         Callback = function(v) HC.wallbang = v end })
-    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 11, Default = 10, Decimals = 0, Suffix = " studs",
+    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 11, Default = 11, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.wallbangOffset = v end })
     -- fake bullet tracer + hit sound (the synth never renders gun visuals)
     Sec2:Toggle({ Name = "Bullet tracers", Flag = "HC_Tracer", Default = true,
