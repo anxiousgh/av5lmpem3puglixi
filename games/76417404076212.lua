@@ -167,28 +167,7 @@ if gv() and not gv()._SHARD_HOOK3 and hookmetamethod and gnm then
     end)
 end
 
--- ---- No reload: replay the cached throw on a loop to bypass the ThrowCooldown.
---      The hook above retargets each replayed throw onto the current target.
---      (Throw once normally first so a template gets cached.) ----
-do
-    local lastSpam = 0
-    track(RunService.Heartbeat:Connect(function()
-        if not (S.noReload and S.tmpl and CheckFire and GlobalWeaponFire) then return end
-        if os.clock() - lastSpam < (S.spamRate or 0.08) then return end
-        lastSpam = os.clock()
-        local cam = workspace.CurrentCamera.CFrame
-        local clock = os.clock()
-        local p = table.clone(S.tmpl)
-        p.Origin = cam.Position
-        p.Direction = cam.LookVector
-        p.BulletId = tostring(clock) .. "_throw"
-        if p.Misc then p.Misc = table.clone(p.Misc); p.Misc.ShotID = tostring(clock) end
-        pcall(function()
-            CheckFire:FireServer(clock, cam.Position, cam.LookVector, true)
-            GlobalWeaponFire:Fire(p)
-        end)
-    end))
-end
+-- No reload: handled by zeroing the throw cooldown (wired after live inspection).
 
 -- ============================================================
 --  UI
@@ -215,10 +194,6 @@ do
         Callback = function(v) S.wallbang = v end })
     Sec2:Toggle({ Name = "Magic bullets (any target, off-screen)", Flag = "SHARD_Magic", Default = false,
         Callback = function(v) S.magic = v end })
-    Sec2:Toggle({ Name = "No reload (spam)", Flag = "SHARD_NoReload", Default = false,
-        Callback = function(v) S.noReload = v end })
-    Sec2:Slider({ Name = "Spam rate", Flag = "SHARD_SpamRate", Min = 20, Max = 500, Default = 80, Decimals = 0, Suffix = " ms",
-        Callback = function(v) S.spamRate = v / 1000 end })
 end
 
 -- universal pages after Main so Main stays first
