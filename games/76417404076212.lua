@@ -36,6 +36,7 @@ local S = (gv() and gv()._SHARD_S) or {
     wallbang = false, -- spoof the throw origin onto the target so the server's LoS check passes
     noReload = false, -- zero the throw cooldown
     killAura = false, auraRate = 0.15,  -- auto-throw at every enemy in the lobby
+    thirdPerson = false, tpDist = 18,   -- allow third-person camera (game locks FP)
     showFov = true, fovColor = Color3.fromRGB(255, 255, 255),
     head = nil,
 }
@@ -252,6 +253,25 @@ do
     end))
 end
 
+-- ---- 3rd person: the game locks first person via CameraMode/MaxZoom, so we
+--      override them every frame (it re-locks). Restores the originals when off. ----
+do
+    track(RunService.RenderStepped:Connect(function()
+        if S.thirdPerson then
+            if S._origMode == nil then
+                S._origMode = LocalPlayer.CameraMode
+                S._origMaxZoom = LocalPlayer.CameraMaxZoomDistance
+            end
+            if LocalPlayer.CameraMode ~= Enum.CameraMode.Classic then LocalPlayer.CameraMode = Enum.CameraMode.Classic end
+            if LocalPlayer.CameraMaxZoomDistance ~= S.tpDist then LocalPlayer.CameraMaxZoomDistance = S.tpDist end
+        elseif S._origMode ~= nil then
+            LocalPlayer.CameraMode = S._origMode
+            LocalPlayer.CameraMaxZoomDistance = S._origMaxZoom
+            S._origMode, S._origMaxZoom = nil, nil
+        end
+    end))
+end
+
 -- ============================================================
 --  UI
 -- ============================================================
@@ -286,6 +306,12 @@ do
         Callback = function(v) S.killAura = v end })
     Sec2:Slider({ Name = "Aura rate", Flag = "SHARD_AuraRate", Min = 50, Max = 600, Default = 150, Decimals = 0, Suffix = " ms",
         Callback = function(v) S.auraRate = v / 1000 end })
+
+    local Sec3 = Sub:Section({ Name = "Camera", Side = 1 })
+    Sec3:Toggle({ Name = "3rd Person", Flag = "SHARD_ThirdPerson", Default = false,
+        Callback = function(v) S.thirdPerson = v end })
+    Sec3:Slider({ Name = "Max distance", Flag = "SHARD_TPDist", Min = 5, Max = 40, Default = 18, Decimals = 0, Suffix = " studs",
+        Callback = function(v) S.tpDist = v end })
 end
 
 -- universal pages after Main so Main stays first
@@ -298,6 +324,11 @@ local function cleanup()
     unloaded = true
     S.silent, S.noReload, S.wallbang, S.magic, S.killAura = false, false, false, false, false
     S.head = nil
+    if S._origMode ~= nil then  -- restore the game's first-person lock
+        pcall(function() LocalPlayer.CameraMode = S._origMode; LocalPlayer.CameraMaxZoomDistance = S._origMaxZoom end)
+        S._origMode, S._origMaxZoom = nil, nil
+    end
+    S.thirdPerson = false
     if S._zeroed then pcall(function() forEachWeaponConfig(function(cfg) cfg.ThrowCooldown = S._origCD or 0.8 end) end); S._zeroed = false end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     pcall(function() fovGui:Destroy() end)
