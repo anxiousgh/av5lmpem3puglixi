@@ -231,13 +231,13 @@ do
         Callback = function(c) S.fovColor = c end })
 
     local Sec2 = Sub:Section({ Name = "Knife mods", Side = 2 })
-    Sec2:Toggle({ Name = "Instant (flat + fast knife)", Flag = "SHARD_Instant", Default = true,
+    Sec2:Toggle({ Name = "Instant", Flag = "SHARD_Instant", Default = true,
         Callback = function(v) S.instant = v end })
-    Sec2:Toggle({ Name = "Wallbang (through walls)", Flag = "SHARD_Wallbang", Default = false,
+    Sec2:Toggle({ Name = "Wallbang", Flag = "SHARD_Wallbang", Default = false,
         Callback = function(v) S.wallbang = v end })
-    Sec2:Toggle({ Name = "Magic bullets (any target, off-screen)", Flag = "SHARD_Magic", Default = false,
+    Sec2:Toggle({ Name = "Magic Bullets", Flag = "SHARD_Magic", Default = false,
         Callback = function(v) S.magic = v end })
-    Sec2:Toggle({ Name = "No reload (no throw cooldown)", Flag = "SHARD_NoReload", Default = false,
+    Sec2:Toggle({ Name = "No Reload", Flag = "SHARD_NoReload", Default = false,
         Callback = function(v) S.noReload = v end })
 end
 
