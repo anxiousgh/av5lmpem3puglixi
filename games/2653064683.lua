@@ -41,19 +41,35 @@ local function flexScore(w)
     for ch in w:gmatch("%a") do s = s + (RARE[ch] or 0) end
     return s
 end
--- best word containing `syl`, not already tried. flex = longest/rarest, else shortest.
--- empty syllable = any word (just needs to be a valid word of decent length).
+-- pick a word containing `syl`, not already tried. empty syllable = any word.
+-- flex = longest/rarest (the flashy play). normal = a RANDOM word, preferring a natural
+-- length (4-9) via reservoir sampling, so it isn't always the shortest possible.
 local function findWord(syl, tried, flex)
     syl = syl:lower()
     local minLen = math.max(#syl, 3)
-    local best, bestScore
+    if flex then
+        local best, bestScore
+        for _, w in ipairs(words) do
+            if #w >= minLen and not tried[w] and (syl == "" or w:find(syl, 1, true)) then
+                local sc = flexScore(w)
+                if not bestScore or sc > bestScore then bestScore, best = sc, w end
+            end
+        end
+        return best
+    end
+    local bandLo = math.max(minLen, 4)
+    local pick, count, fallback, fcount = nil, 0, nil, 0
     for _, w in ipairs(words) do
         if #w >= minLen and not tried[w] and (syl == "" or w:find(syl, 1, true)) then
-            local sc = flex and flexScore(w) or -#w   -- flex: max score; normal: shortest
-            if not bestScore or sc > bestScore then bestScore, best = sc, w end
+            fcount = fcount + 1
+            if math.random(fcount) == 1 then fallback = w end       -- any-length reservoir
+            if #w >= bandLo and #w <= 9 then
+                count = count + 1
+                if math.random(count) == 1 then pick = w end        -- natural-length reservoir
+            end
         end
     end
-    return best
+    return pick or fallback
 end
 
 -- ---- remote + GameID ----
@@ -119,24 +135,49 @@ for _, kc in ipairs(Enum.KeyCode:GetEnumItems()) do
     local n = kc.Name
     if #n == 1 and n:match("%a") then KEY[n:lower()] = kc end
 end
+-- QWERTY neighbours -> believable typos
+local ADJ = {
+    q = "wa", w = "qeas", e = "wsdr", r = "edft", t = "rfgy", y = "tghu", u = "yhji",
+    i = "ujko", o = "iklp", p = "ol", a = "qwsz", s = "awedxz", d = "serfcx", f = "drtgvc",
+    g = "ftyhbv", h = "gyujnb", j = "huikmn", k = "jiolm", l = "kop", z = "asx", x = "zsdc",
+    c = "xdfv", v = "cfgb", b = "vghn", n = "bhjm", m = "njk",
+}
+local function press(name)
+    local kc = (name == "bs" and Enum.KeyCode.Backspace)
+        or (name == "enter" and Enum.KeyCode.Return) or KEY[name]
+    if not kc then return end
+    pcall(function() VIM:SendKeyEvent(true, kc, false, game) end)
+    task.wait(0.02)
+    pcall(function() VIM:SendKeyEvent(false, kc, false, game) end)
+end
 local function submitBlatant(word)
     fire("TypingEvent", word:upper(), true)
 end
 local function submitLegit(word)
-    task.wait(0.2 + math.random() * 0.35)             -- "reading" pause
-    for c in word:lower():gmatch(".") do
-        local kc = KEY[c]
-        if kc then
-            pcall(function() VIM:SendKeyEvent(true, kc, false, game) end)
-            task.wait(0.02)
-            pcall(function() VIM:SendKeyEvent(false, kc, false, game) end)
+    word = word:lower()
+    task.wait(0.2 + math.random() * 0.4)              -- "reading" pause
+    -- clear anything left in the bar (e.g. a previously rejected word) so it can't garble
+    local tb = getTypebox()
+    if tb then for _ = 1, #(tb.Text or "") + 1 do press("bs"); task.wait(0.015) end end
+    local hesitateAt = (math.random() < 0.18) and math.random(2, math.max(2, #word)) or -1  -- sometimes
+    local misspellAt = (math.random() < 0.05) and math.random(1, #word) or -1               -- very rarely
+    for i = 1, #word do
+        if i == hesitateAt then task.wait(0.45 + math.random() * 0.7) end   -- pause to "think"
+        if i == misspellAt then
+            local nb = ADJ[word:sub(i, i)]
+            if nb and #nb > 0 then
+                local j = math.random(#nb)
+                press(nb:sub(j, j))                       -- fat-finger a neighbour key
+                task.wait(0.13 + math.random() * 0.22)    -- notice the mistake
+                press("bs")                               -- backspace it
+                task.wait(0.08 + math.random() * 0.12)
+            end
         end
-        task.wait(0.06 + math.random() * 0.1)         -- per-keystroke delay
+        press(word:sub(i, i))
+        task.wait(0.06 + math.random() * 0.11)            -- per-keystroke delay
     end
-    task.wait(0.08)
-    pcall(function() VIM:SendKeyEvent(true, Enum.KeyCode.Return, false, game) end)   -- enter = submit
-    task.wait(0.02)
-    pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game) end)
+    task.wait(0.1 + math.random() * 0.18)
+    press("enter")                                        -- submit
 end
 
 -- ---- main loop ----
