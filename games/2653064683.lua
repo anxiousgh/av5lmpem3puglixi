@@ -41,12 +41,13 @@ local function flexScore(w)
     return s
 end
 -- best word containing `syl`, not already tried. flex = longest/rarest, else shortest.
+-- empty syllable = any word (just needs to be a valid word of decent length).
 local function findWord(syl, tried, flex)
     syl = syl:lower()
-    if syl == "" then return nil end
+    local minLen = math.max(#syl, 3)
     local best, bestScore
     for _, w in ipairs(words) do
-        if #w >= #syl and not tried[w] and w:find(syl, 1, true) then
+        if #w >= minLen and not tried[w] and (syl == "" or w:find(syl, 1, true)) then
             local sc = flex and flexScore(w) or -#w   -- flex: max score; normal: shortest
             if not bestScore or sc > bestScore then bestScore, best = sc, w end
         end
@@ -65,37 +66,45 @@ local function fire(...)
     pcall(function() gameEvent:FireServer(gameId, table.unpack(args, 1, args.n)) end)
 end
 
--- ---- UI reads: my turn + the syllable ----
-local function deskContainer()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    local ok, d = pcall(function() return pg.GameUI.Container.GameSpace.DefaultUI.GameContainer.DesktopContainer end)
-    return ok and d or nil
+-- ---- game Data via getgc: Prompt = clean syllable ('' = any word), and
+--      Players[PossessorIndex] = the current player's UserId (so my turn = it's mine).
+--      Far more reliable than scraping the UI letters (which keep stale ghosts). ----
+local dataObj, lastScan = nil, 0
+local function validData(o)
+    if type(o) ~= "table" then return false end
+    local ok, players = pcall(function() return o.Players end)
+    return ok and type(players) == "table" and #players > 0
 end
-local function getTypebox()
-    local d = deskContainer()
-    local tb = d and d:FindFirstChild("Typebar")
-    return tb and tb:FindFirstChild("Typebox")
-end
-local function myTurn()
-    local tb = getTypebox()
-    return tb ~= nil and (tb.Active == true or tb.Visible == true)
-end
-local function readSyllable()
-    local d = deskContainer(); if not d then return "" end
-    local tf = d:FindFirstChild("InfoFrameContainer")
-    tf = tf and tf:FindFirstChild("InfoFrame"); tf = tf and tf:FindFirstChild("TextFrame")
-    if not tf then return "" end
-    local fr = {}
-    for _, c in ipairs(tf:GetChildren()) do
-        local letter = c:FindFirstChild("Letter")
-        local lbl = letter and letter:FindFirstChild("TextLabel")
-        if lbl and #lbl.Text == 1 and lbl.Text:match("%a") then
-            fr[#fr + 1] = { x = c.AbsolutePosition.X, ch = lbl.Text }
+local function refreshData()
+    if validData(dataObj) then return end
+    if tick() - lastScan < 1.5 or type(getgc) ~= "function" then return end
+    lastScan = tick()
+    pcall(function()
+        for _, o in ipairs(getgc(true)) do
+            if type(o) == "table" and rawget(o, "Prompt") ~= nil
+                and rawget(o, "PossessorIndex") ~= nil and type(rawget(o, "Players")) == "table" then
+                dataObj = o; return
+            end
         end
-    end
-    table.sort(fr, function(a, b) return a.x < b.x end)   -- left-to-right
-    local s = ""; for _, f in ipairs(fr) do s = s .. f.ch end
-    return s
+    end)
+end
+local function isMyTurn()
+    if not dataObj then return false end
+    local ok, who = pcall(function() return dataObj.Players[dataObj.PossessorIndex] end)
+    return ok and who == LocalPlayer.UserId
+end
+local function getSyllable()
+    if not dataObj then return "" end
+    local ok, p = pcall(function() return dataObj.Prompt end)
+    return (ok and type(p) == "string") and p or ""
+end
+-- the type bar label (TextLabel) -- only used to show the word locally in legit mode
+local function getTypebox()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local ok, tb = pcall(function()
+        return pg.GameUI.Container.GameSpace.DefaultUI.GameContainer.DesktopContainer.Typebar.Typebox
+    end)
+    return ok and tb or nil
 end
 
 -- ---- submit (blatant = instant; legit = type it out char-by-char) ----
@@ -117,22 +126,25 @@ local function submitLegit(word)
 end
 
 -- ---- main loop ----
-local tried = {}
+local tried, prevData = {}, nil
 local busy = false
 if startGame then track(startGame.OnClientEvent:Connect(function() tried = {} end)) end   -- new game = words reusable
 task.spawn(function()
     while true do
-        if S.on and wordsReady and not busy and myTurn() then
-            local syl = readSyllable()
-            local word = (syl ~= "") and findWord(syl, tried, S.flex) or nil
-            if word then
-                tried[word] = true
-                busy = true
-                task.spawn(function()
-                    if S.mode == "Blatant" then submitBlatant(word) else submitLegit(word) end
-                    task.wait(0.6)   -- give the server a beat (retries another word if rejected/still our turn)
-                    busy = false
-                end)
+        if S.on and wordsReady then
+            refreshData()
+            if dataObj ~= prevData then tried = {}; prevData = dataObj end   -- new game Data = reset used words
+            if dataObj and not busy and isMyTurn() then
+                local word = findWord(getSyllable(), tried, S.flex)
+                if word then
+                    tried[word] = true
+                    busy = true
+                    task.spawn(function()
+                        if S.mode == "Blatant" then submitBlatant(word) else submitLegit(word) end
+                        task.wait(0.6)   -- give the server a beat (retries another word if rejected/still our turn)
+                        busy = false
+                    end)
+                end
             end
         end
         task.wait(0.12)
