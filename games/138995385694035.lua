@@ -76,7 +76,7 @@ local HC = {
     checkVisible = false, visibleOrigin = "Tool Handle",
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
-    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 11,
+    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 9,
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
     hitSoundEnabled = true, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
@@ -296,7 +296,8 @@ end
 -- target = furthest past the wall = most margin) so the server's own raycast agrees
 -- and it never errors on a razor edge. Returns nil when nothing within budget clears
 -- (wall too thick / standing too far back) so the caller skips the shot -- no error.
-local WB_HARD_CAP = 11
+-- HARD CAP 9: the server kicks for "origin mismatch" past this -- never exceed it.
+local WB_HARD_CAP = 9
 function wallbangOrigin(realOrigin, part)
     local targetPos = part.Position
     local toT = targetPos - realOrigin
@@ -329,7 +330,7 @@ function wallbangOrigin(realOrigin, part)
             for _, a in ipairs(ANG) do
                 local rad = math.rad(a)
                 local off = fwd * f + (right * math.cos(rad) + up * math.sin(rad)) * lat
-                if off.Magnitude <= budget + 1e-3 then
+                if off.Magnitude <= budget then
                     local cand = realOrigin + off
                     if clearFrom(cand) then return cand end
                 end
@@ -907,7 +908,11 @@ local function ensureHL()
     return rbHL
 end
 track(RunService.RenderStepped:Connect(function()
-    local plr = (HC.targetLine or HC.targetOutline) and getTarget(true) or nil  -- visuals ignore checks
+    -- show who we'll ACTUALLY attack (all checks). If nobody is engageable, fall back
+    -- to the no-checks pick so the visual stays on the locked target (e.g. a knocked
+    -- person we can't hit) instead of vanishing.
+    local plr = nil
+    if HC.targetLine or HC.targetOutline then plr = getTarget(false) or getTarget(true) end
     local char = plr and plr.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     -- line
@@ -970,7 +975,7 @@ do
         Callback = function(v) HC.forceHitCooldown = v / 1000 end })
     Sec2:Toggle({ Name = "Wallbang if possible", Flag = "HC_Wallbang", Default = false,
         Callback = function(v) HC.wallbang = v end })
-    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 11, Default = 11, Decimals = 0, Suffix = " studs",
+    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 9, Default = 9, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.wallbangOffset = v end })
     -- fake bullet tracer + hit sound (the synth never renders gun visuals)
     Sec2:Toggle({ Name = "Bullet tracers", Flag = "HC_Tracer", Default = true,

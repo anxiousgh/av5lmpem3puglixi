@@ -2431,7 +2431,7 @@ do
                 Flag = Data.Flag .. "Mode",
                 Parent = Items["KeybindWindow"],
                 Items = { "Toggle", "Hold", "Always" },
-                Default = "Toggle",
+                Default = Data.Mode or "Toggle",  -- [wh] honor the Keybind's Mode param
                 Callback = function(Value)
                     Keybind.Mode = Value
                     if Value == "Always" then
