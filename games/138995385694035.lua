@@ -354,10 +354,17 @@ function wallbangOrigin(realOrigin, part)
     end
     if clearFrom(realOrigin) then return realOrigin end       -- already clear, no spoof
     local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)
-    -- 1) straight toward the target: the CLOSEST point past the wall with clear LoS
+    -- 1) straight toward the target: find the closest point past the wall, then nudge a
+    --    few studs FURTHER out so the origin sits clearly past the wall (not on its
+    --    surface, which reads as "inside" and can still get rejected), capped at budget.
+    local maxF = math.min(budget, dist - 1)
     local f = 0.5
-    while f <= math.min(budget, dist - 1) do
-        if clearFrom(realOrigin + fwd * f) then return realOrigin + fwd * f end
+    while f <= maxF do
+        if clearFrom(realOrigin + fwd * f) then
+            local pushed = math.min(f + 3, maxF)
+            if clearFrom(realOrigin + fwd * pushed) then return realOrigin + fwd * pushed end
+            return realOrigin + fwd * f
+        end
         f = f + 0.5
     end
     -- 2) fallback: peek around the cover -- collect sideways/diagonal offsets within
@@ -996,8 +1003,8 @@ local function ensureHL()
     if not rbHL.Parent then rbHL.Parent = Workspace end
     return rbHL
 end
--- marker ball at the spoofed wallbang origin
-local wbMarker
+-- marker ball at the spoofed wallbang origin (with a Highlight so it shows through walls)
+local wbMarker, wbHL
 local function ensureWbMarker()
     if wbMarker and wbMarker.Parent then return wbMarker end
     wbMarker = Instance.new("Part")
@@ -1009,6 +1016,16 @@ local function ensureWbMarker()
     wbMarker.Color = Color3.fromRGB(120, 200, 255)
     wbMarker.Transparency = 1
     wbMarker.Parent = Workspace:FindFirstChild("Ignored") or Workspace
+    wbHL = Instance.new("Highlight")
+    wbHL.Adornee = wbMarker
+    wbHL.FillColor = Color3.fromRGB(120, 200, 255)
+    wbHL.FillTransparency = 0.2
+    wbHL.OutlineColor = Color3.fromRGB(190, 235, 255)
+    wbHL.OutlineTransparency = 0
+    wbHL.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop   -- render through walls
+    wbHL.Enabled = false
+    pcall(function() wbHL.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not wbHL.Parent then wbHL.Parent = wbMarker end
     return wbMarker
 end
 track(RunService.RenderStepped:Connect(function()
@@ -1062,12 +1079,15 @@ track(RunService.RenderStepped:Connect(function()
         local origin = (root and part) and wallbangOrigin(root.Position, part) or nil
         if origin and (origin - root.Position).Magnitude > 0.5 then
             mk.Position = origin
-            mk.Transparency = 0.35
+            mk.Transparency = 0.3
+            if wbHL then wbHL.Enabled = true end
         else
             mk.Transparency = 1
+            if wbHL then wbHL.Enabled = false end
         end
     else
         mk.Transparency = 1
+        if wbHL then wbHL.Enabled = false end
     end
 end))
 
@@ -1258,6 +1278,7 @@ local function hcCleanup()
     if rbLine then pcall(function() rbLine:Remove() end) end
     if rbHL then pcall(function() rbHL:Destroy() end) end
     if wbMarker then pcall(function() wbMarker:Destroy() end) end
+    if wbHL then pcall(function() wbHL:Destroy() end) end
 end
 do
     local g = gv()
