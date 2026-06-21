@@ -7396,12 +7396,31 @@ do
                 end)
 
                 Playerlist.Players[PlayerData.Name] = PlayerData
+                Playerlist:Sort()  -- [wh] keep the list alphabetical by display name
                 return PlayerData
+            end
+
+            -- [wh] order rows alphabetically by display name (case-insensitive). The
+            -- Holder uses SortOrder.LayoutOrder, so we just assign LayoutOrder by rank.
+            function Playerlist:Sort()
+                local arr = {}
+                for _, pd in pairs(Playerlist.Players) do
+                    local f = pd.Items and pd.Items.NewPlayer and pd.Items.NewPlayer.Instance
+                    if f and f.Parent then arr[#arr + 1] = pd end
+                end
+                table.sort(arr, function(a, b)
+                    return string.lower(a.Display or a.Name) < string.lower(b.Display or b.Name)
+                end)
+                for i, pd in ipairs(arr) do
+                    pd.Items.NewPlayer.Instance.LayoutOrder = i
+                end
             end
 
             function Playerlist:Remove(Player)
                 if Playerlist.Players[Player.Name] then
                     Playerlist.Players[Player.Name].Items.NewPlayer.Instance:Destroy()
+                    Playerlist.Players[Player.Name] = nil  -- [wh] drop the stale entry
+                    Playerlist:Sort()
                 end
             end
 
