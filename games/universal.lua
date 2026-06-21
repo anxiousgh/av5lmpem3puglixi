@@ -946,25 +946,18 @@ do
 
     local function applySpoof(hrp)
         local m = Desync.method
-        if m == "Velocity" then
-            hrp.AssemblyLinearVelocity = Vector3.one * Desync.velMag
-            return
-        elseif m == "Void" then
+        if m == "Void" then
             hrp.CFrame = CFrame.new(randVoid())
         elseif m == "Spin" then
             spinAngle = (spinAngle + Desync.spinSpeed) % 360
             hrp.CFrame = hrp.CFrame * CFrame.Angles(
                 math.rad(spinAngle), math.rad(spinAngle * 2), math.rad(spinAngle * 0.5))
+        elseif m == "Velocity" then
+            hrp.AssemblyLinearVelocity = Vector3.one * Desync.velMag
         elseif m == "Custom" then
             local rot = hrp.CFrame - hrp.CFrame.Position
             hrp.CFrame = CFrame.new(Desync.customX, Desync.customY, Desync.customZ) * rot
         end
-        -- An idle character's root part falls asleep and stops sending physics-replication
-        -- packets, so the spoofed CFrame never reaches the server until you actually move.
-        -- A tiny constant velocity keeps the assembly awake so it replicates every frame.
-        -- (The CFrame is re-pinned each frame, so this causes no real drift; RenderStep
-        -- restores your true velocity locally.)
-        hrp.AssemblyLinearVelocity = Vector3.new(0, 0.1, 0)
     end
 
     -- ---- RakNet freeze ----
