@@ -6,7 +6,8 @@
 --
 --  Identity: a Tool named "Gun" -> Sheriff, "Knife" -> Murderer
 --  (checked in the Character AND the Backpack).
---    * Sheriff shoot : Gun.Shoot:FireServer(targetHitCF, CFrame.new(myHRP.Pos))
+--    * Sheriff shoot : Gun.Shoot:FireServer(originCF, targetCF)  -- origin FIRST
+--      (we spoof origin to point-blank by the murderer so the server's ray can't miss)
 --    * Murderer knife: Knife.Events.KnifeStabbed:FireServer() (swing) then
 --                      Knife.Events.HandleTouched:FireServer(victimPart) per kill
 --    * Gun pickup    : briefly teleport HRP onto a "GunDrop" BasePart
@@ -108,7 +109,8 @@ local function shootMurderer()
     local toUs = myHrp and (myHrp.Position - part.Position) or Vector3.new(0, 0, 3)
     local dir = (toUs.Magnitude > 1) and toUs.Unit or Vector3.new(0, 0, 1)
     local origin = CFrame.new(part.Position + dir * 3, part.Position)
-    pcall(function() remote:FireServer(theirCF, origin) end)
+    -- the game sends Shoot:FireServer(originCF, targetCF) -- origin FIRST, target SECOND.
+    pcall(function() remote:FireServer(origin, theirCF) end)
     return true
 end
 local function tryShoot()
