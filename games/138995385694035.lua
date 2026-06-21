@@ -899,39 +899,53 @@ task.spawn(function()
     end
 end)
 
--- ---- Godmode (HC-style): play the hitbox-displacing emote animations so incoming hits
---      land on the contorted/displaced rig instead of registering. Re-applied on respawn. ----
-local GOD_ANIMS = { "rbxassetid://70883871260184", "rbxassetid://10921259953", "rbxassetid://10921257536" }
-local _godChar, _godTracks = nil, {}
-local function stopGodAnims()
-    for _, t in ipairs(_godTracks) do pcall(function() t:Stop() end) end
-    _godTracks, _godChar = {}, nil
+-- ---- Godmode (HC emote): play the hitbox-displacing emote, FREEZE it at its godmode
+--      frame (TimePosition 0.1265, speed 0) every Heartbeat, and re-assert it whenever the
+--      game plays another animation so the pose can't be overridden. Re-applied on respawn. ----
+local GOD_EMOTE = "rbxassetid://70883871260184"
+local GOD_FREEZE = 0.1265
+local _godTrack, _godHB, _godAnimConn
+local function godCleanup()
+    if _godTrack then pcall(function() _godTrack:Stop(); _godTrack:Destroy() end); _godTrack = nil end
+    if _godHB then _godHB:Disconnect(); _godHB = nil end
+    if _godAnimConn then _godAnimConn:Disconnect(); _godAnimConn = nil end
 end
-local function ensureGodAnims()
+local godApply
+godApply = function()
+    if not HC.godmode then return end
     local ch = LocalPlayer.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-    local animator = hum and hum:FindFirstChildOfClass("Animator")
-    if not animator then return end
-    if _godChar == ch and #_godTracks > 0 then
-        for _, t in ipairs(_godTracks) do if not t.IsPlaying then pcall(function() t:Play() end) end end
-        return
-    end
-    stopGodAnims()
-    _godChar = ch
-    for _, id in ipairs(GOD_ANIMS) do
-        pcall(function()
-            local a = Instance.new("Animation"); a.AnimationId = id
-            local t = animator:LoadAnimation(a)
-            t.Looped = true
-            t.Priority = Enum.AnimationPriority.Action4
-            t:Play()
-            _godTracks[#_godTracks + 1] = t
-        end)
-    end
+    if not hum then return end
+    godCleanup()
+    local anim = Instance.new("Animation"); anim.AnimationId = GOD_EMOTE
+    local animator = hum:FindFirstChildOfClass("Animator")
+    local ok, t = pcall(function()
+        return (animator and animator:LoadAnimation(anim)) or hum:LoadAnimation(anim)
+    end)
+    if not ok or not t then return end
+    _godTrack = t
+    pcall(function() _godTrack:Play(0, 1, 1) end)
+    _godHB = RunService.Heartbeat:Connect(function()
+        if _godTrack and HC.godmode then
+            pcall(function()
+                _godTrack.TimePosition = GOD_FREEZE   -- hold the godmode pose
+                _godTrack:AdjustSpeed(0)
+            end)
+        end
+    end)
+    _godAnimConn = hum.AnimationPlayed:Connect(function(newtrack)
+        if HC.godmode and _godTrack and newtrack ~= _godTrack then
+            task.delay(0.02 + math.random() * 0.03, godApply)  -- re-assert over the game's anim
+        end
+    end)
 end
-track(RunService.Heartbeat:Connect(function()
-    if HC.godmode then ensureGodAnims()
-    elseif #_godTracks > 0 then stopGodAnims() end
+local function godSet(on)
+    HC.godmode = on
+    if on then godApply() else godCleanup() end
+end
+track(LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.25)
+    if HC.godmode then godApply() end
 end))
 
 -- ============================================================
@@ -1341,7 +1355,7 @@ do
 
     local Sec2 = MiscSub:Section({ Name = "Protection", Side = 2 })
     Sec2:Toggle({ Name = "Godmode", Flag = "HC_Godmode", Default = false,
-        Callback = function(v) HC.godmode = v end })
+        Callback = function(v) godSet(v) end })
 end
 
 -- 6) Util
@@ -1381,7 +1395,7 @@ local function hcCleanup()
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
     voidUnglue()
     _dsTo, _dsReal = nil, nil  -- stop any stomp desync
-    pcall(stopGodAnims)        -- stop godmode emote
+    pcall(godCleanup)          -- stop godmode emote
     pcall(knifeReachRestore)   -- put the knife hitbox back to normal size
     destroyAmmoHud()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_VS_RESTORE") end)
