@@ -99,6 +99,10 @@ local HC = {
     targetOutline = false, outlineColor = Color3.fromRGB(255, 80, 80),
 }
 
+-- true while Auto stomp Targets is desynced onto a victim. While set, every other action
+-- (force hit, auto shoot, knife) is suppressed -- shooting/stabbing cancels the stomp.
+local _stomping = false
+
 -- ============================================================
 --  Target system  (MULTI-target lock list -- Lock adds the priority pick to the
 --  list, Unlock clears it. getTarget() picks the best valid entry from the list
@@ -724,7 +728,7 @@ end))
 local function setForceHit(on) HC.forceHit = on end
 local _fhLast = 0
 track(UIS.InputBegan:Connect(function(input, gpe)
-    if gpe or not HC.forceHit then return end
+    if gpe or not HC.forceHit or _stomping then return end
     if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
     local lc = LocalPlayer.Character
     if not lc or not lc:FindFirstChildOfClass("Tool") then return end   -- holding a gun
@@ -785,7 +789,7 @@ end)
 
 -- main shoot loop (auto shoot + voidshoot)
 track(RunService.Heartbeat:Connect(function()
-    if not (HC.autoShoot or HC.voidshoot) then return end
+    if _stomping or not (HC.autoShoot or HC.voidshoot) then return end
     if tick() - _asLast < HC.autoShootCooldown then return end
     local plr = getTarget()
     if not plr then voidUnglue(); return end
@@ -842,60 +846,73 @@ track(RunService.Heartbeat:Connect(function()
     pcall(function() me:FireServer("Stomp") end)
 end))
 
--- ---- Auto stomp Targets: true DESYNC -- send our REPLICATED position to the target each
---      Stepped (so the server reads us on them) but restore our REAL position each Heartbeat
---      so our character never actually moves locally. Stomp until they're finished, detach. ----
-local _dsTo, _dsReal = nil, nil
-local function localRoot()
-    local c = LocalPlayer.Character
-    return c and c:FindFirstChild("HumanoidRootPart")
+-- ---- Auto stomp Targets (witherhook method): glue our physics-rep root onto the knocked
+--      victim and spoof our pose 3 studs ABOVE them each Heartbeat (server sees us standing
+--      on them), but restore our REAL pose each RenderStep (First) so we stay put locally.
+--      The fake pose is set in Heartbeat and restored in RenderStep -- this ordering is what
+--      makes the server actually see us on the target (Heartbeat-set survives to replication).
+--      While glued, _stomping suppresses shooting/knifing so nothing cancels the stomp. ----
+local STOMP_Y = 3
+local _stompTarget, _stompSavedCF = nil, nil
+local function stompGlue(hrp)
+    local lc = LocalPlayer.Character
+    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+    if not (lhrp and hrp) then return end
+    pcall(function() lhrp:SetNetworkOwner(LocalPlayer) end)
+    pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+    if sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", hrp) end) end
+    _stompSavedCF = lhrp.CFrame                       -- our real spot
+    pcall(function() lhrp.CFrame = CFrame.new(hrp.Position + Vector3.new(0, STOMP_Y, 0)) end)
 end
-track(RunService.Stepped:Connect(function()       -- before physics: replicate the FAKE (target) pos
-    if not _dsTo or not _dsTo.Parent then return end
-    local r = localRoot()
-    if r then pcall(function()
-        r.CFrame = _dsTo.CFrame
-        r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-    end) end
-end))
-track(RunService.Heartbeat:Connect(function()     -- after physics: snap back to our REAL pos locally
-    if not (_dsTo and _dsReal) then return end
-    local r = localRoot()
-    if r then pcall(function() r.CFrame = _dsReal end) end
-end))
-
-local _stompTBusy = false
-task.spawn(function()
-    while not unloaded do
-        if HC.stompTargets and not _stompTBusy then
-            local me = getMainEvent()
-            local victim
-            for _, p in ipairs(liveTargets()) do      -- knocked locked target (ignore checks)
-                if isKnocked(p) and not isDead(p) and p.Character
-                    and p.Character:FindFirstChild("HumanoidRootPart") then
-                    victim = p; break
-                end
+local function stompUnglue()
+    local lc = LocalPlayer.Character
+    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+    if lhrp then
+        if sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", lhrp) end) end
+        if _stompSavedCF then pcall(function() lhrp.CFrame = _stompSavedCF end) end
+    end
+    _stompSavedCF, _stompTarget, _stomping = nil, nil, false
+end
+track(RunService.Heartbeat:Connect(function()
+    if not HC.stompTargets then
+        if _stomping then stompUnglue() end
+        return
+    end
+    local me = getMainEvent(); if not me then return end
+    -- finishing the current victim?
+    if _stompTarget then
+        local stillKnocked = isKnocked(_stompTarget) and not isDead(_stompTarget)
+        if not (_stompTarget.Parent and _stompTarget.Character) or not stillKnocked then
+            stompUnglue()                             -- stomped / gone / up -> drop
+        else
+            local hrp = _stompTarget.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                stompGlue(hrp)                        -- stay glued on top + stomp
+                pcall(function() me:FireServer("Stomp") end)
             end
-            if me and victim then
-                _stompTBusy = true
-                local r = localRoot()
-                if r then
-                    _dsReal = r.CFrame                 -- our home (Heartbeat keeps us here locally)
-                    local deadline = tick() + 1.5
-                    while HC.stompTargets and victim.Parent and isKnocked(victim)
-                        and not isDead(victim) and tick() < deadline do
-                        local vh = victim.Character and victim.Character:FindFirstChild("HumanoidRootPart")
-                        _dsTo = vh                     -- Stepped replicates us onto them
-                        if vh then pcall(function() me:FireServer("Stomp") end) end
-                        task.wait(0.1)
-                    end
-                    _dsTo, _dsReal = nil, nil          -- stop desync (we're already home)
-                end
-                _stompTBusy = false
+            return
+        end
+    end
+    -- pick a new knocked, not-yet-dead locked target and glue onto it
+    for _, plr in ipairs(liveTargets()) do
+        if isKnocked(plr) and not isDead(plr) then
+            local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                _stompTarget, _stomping = plr, true
+                stompGlue(hrp)
+                pcall(function() me:FireServer("Stomp") end)
+                return
             end
         end
-        task.wait(0.1)
+    end
+end))
+-- restore our real pose each render frame so the desync stays put locally
+pcall(function() RunService:UnbindFromRenderStep("WH_HC_STOMP_RESTORE") end)
+RunService:BindToRenderStep("WH_HC_STOMP_RESTORE", Enum.RenderPriority.First.Value, function()
+    if _stomping and _stompSavedCF then
+        local lc = LocalPlayer.Character
+        local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+        if lhrp then pcall(function() lhrp.CFrame = _stompSavedCF end) end
     end
 end)
 
@@ -984,7 +1001,7 @@ local function knifeTargetHrp()
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 track(RunService.Heartbeat:Connect(function(dt)
-    if not HC.knifeAura then return end
+    if not HC.knifeAura or _stomping then return end
     local lc = LocalPlayer.Character
     local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
     local tHrp = knifeTargetHrp()
@@ -1008,7 +1025,7 @@ end))
 -- knife swing clicker
 task.spawn(function()
     while not unloaded do
-        if HC.knifeAura and knifeTargetHrp() then
+        if HC.knifeAura and not _stomping and knifeTargetHrp() then
             pcall(function()
                 VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
                 VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
@@ -1394,7 +1411,8 @@ local function hcCleanup()
     HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
     voidUnglue()
-    _dsTo, _dsReal = nil, nil  -- stop any stomp desync
+    pcall(function() RunService:UnbindFromRenderStep("WH_HC_STOMP_RESTORE") end)
+    pcall(stompUnglue)         -- stop any stomp desync
     pcall(godCleanup)          -- stop godmode emote
     pcall(knifeReachRestore)   -- put the knife hitbox back to normal size
     destroyAmmoHud()
