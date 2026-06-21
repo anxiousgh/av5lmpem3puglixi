@@ -154,7 +154,7 @@ local function submitBlatant(word)
 end
 local function submitLegit(word)
     word = word:lower()
-    task.wait(0.3 + math.random() * 0.3)              -- small pause before starting to type
+    task.wait(0.12 + math.random() * 0.16)            -- brief pause before starting to type
     local misspellAt = (math.random() < 0.04) and math.random(1, #word) or -1   -- very rarely
     for i = 1, #word do
         if i == misspellAt then
@@ -168,7 +168,7 @@ local function submitLegit(word)
             end
         end
         pressKey(word:sub(i, i))
-        task.wait(0.05 + math.random() * 0.08)        -- per-keystroke delay (a bit faster)
+        task.wait(0.035 + math.random() * 0.06)       -- per-keystroke delay (a bit faster still)
     end
     task.wait(0.08)
     pressKey("enter")                                 -- submit
