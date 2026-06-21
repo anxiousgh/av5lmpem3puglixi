@@ -229,6 +229,11 @@ local function canEngage(plr)
     end
     return true
 end
+-- like canEngage but WITHOUT the visible check (knife bot: respects knocked / grabbed /
+-- forcefield / loaded-in, but ignores line of sight).
+local function canEngageNoVis(plr)
+    return validTarget(plr) and passesChecks(plr)
+end
 
 -- screen-space distance from the mouse to a player (math.huge if off-screen)
 local function mouseDist(plr)
@@ -299,7 +304,9 @@ local function getTarget(ignoreChecks)
     if #locked > 0 then pool = locked
     elseif HC.autoSwitch then pool = Players:GetPlayers()
     else return nil end
-    local filter = ignoreChecks and validTarget or canEngage
+    local filter = (type(ignoreChecks) == "function") and ignoreChecks   -- custom filter (knife bot)
+        or (ignoreChecks == true and validTarget)                        -- ignore all checks
+        or canEngage                                                     -- all checks (default)
     local best, bestScore = nil, math.huge
     for _, plr in ipairs(pool) do
         if filter(plr) then
@@ -984,16 +991,27 @@ end))
 local KNIFE_NAME = "[Knife]"
 local _knifeOrbitAngle = 0
 local function knifeTargetHrp()
-    local plr = getTarget()
+    -- knife bot respects knocked/grabbed/forcefield/loaded-in but ignores the visible check
+    local plr = getTarget(canEngageNoVis)
     local char = plr and plr.Character
     return char and char:FindFirstChild("HumanoidRootPart")
 end
+-- fake pos resolver: re-root our physics replication onto the target (network ownership +
+-- PhysicsRepRootPart) so the orbit position sticks server-side instead of rubber-banding.
+local _knifeAttached = false
+local function knifeDetach()
+    if not _knifeAttached then return end
+    local lc = LocalPlayer.Character
+    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+    if lhrp and sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", lhrp) end) end
+    _knifeAttached = false
+end
 track(RunService.Heartbeat:Connect(function(dt)
-    if not HC.knifeAura or _stomping then return end
+    if not HC.knifeAura or _stomping then knifeDetach(); return end
     local lc = LocalPlayer.Character
     local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
     local tHrp = knifeTargetHrp()
-    if not lhrp or not tHrp then return end
+    if not lhrp or not tHrp then knifeDetach(); return end
     local tPos = tHrp.Position
     if tPos ~= tPos or tPos.Magnitude > 1e6 then return end
     local pos
@@ -1006,8 +1024,17 @@ track(RunService.Heartbeat:Connect(function(dt)
     end
     local move = pos - lhrp.Position
     if move.Magnitude > 60 then pos = lhrp.Position + move.Unit * 60 end
-    if pos == pos and (pos - tPos).Magnitude >= 0.5 then
-        pcall(function() lhrp.CFrame = CFrame.new(pos, tPos) end)
+    if pos == pos then
+        local faceTo = ((pos - tPos).Magnitude > 0.5) and tPos or (pos - tHrp.CFrame.LookVector)
+        pcall(function() lhrp:SetNetworkOwner(LocalPlayer) end)
+        pcall(function() tHrp:SetNetworkOwner(LocalPlayer) end)
+        if sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", tHrp) end) end
+        _knifeAttached = true
+        pcall(function()
+            lhrp.CFrame = CFrame.new(pos, faceTo)
+            lhrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            lhrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end)
     end
 end))
 -- knife swing clicker
@@ -1401,6 +1428,7 @@ local function hcCleanup()
     voidUnglue()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_STOMP_RESTORE") end)
     pcall(stompUnglue)         -- stop any stomp desync
+    pcall(knifeDetach)         -- undo knife-bot physics-rep desync
     pcall(godCleanup)          -- stop godmode emote
     pcall(knifeReachRestore)   -- put the knife hitbox back to normal size
     destroyAmmoHud()
