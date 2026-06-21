@@ -109,32 +109,48 @@ local function targetParts(char)
     return char:FindFirstChild(HC.hitPart) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
 end
 -- ---- per-player CHECKS (Checks tab) -- respected by all targeting + shooting ----
-local function isGrabbed(plr)
-    -- The GRABBER's BodyEffects.Grabbed (ObjectValue) points at the VICTIM; the victim's
-    -- OWN Grabbed stays empty. So `plr` is grabbed iff some OTHER player's Grabbed value
-    -- references plr (as the player, its character, or a descendant of it). Matching is
-    -- broad so it works whether the value is the Player, the workspace character, or name.
-    local tChar = hcModel(plr)
-    for _, other in ipairs(Players:GetPlayers()) do
-        if other ~= plr then
-            local m = hcModel(other)
-            local fx = m and m:FindFirstChild("BodyEffects")
-            local g = fx and fx:FindFirstChild("Grabbed")
-            local val = g and g.Value
-            if val ~= nil then
-                if type(val) == "string" then
-                    if val == plr.Name then return true end
-                elseif val == plr or val == plr.Character or val == tChar then
-                    return true
-                elseif typeof(val) == "Instance" then
-                    if val.Name == plr.Name then return true end
-                    if tChar and val:IsDescendantOf(tChar) then return true end
-                    if plr.Character and val:IsDescendantOf(plr.Character) then return true end
-                end
-            end
+-- resolve whatever a Grabbed ObjectValue points at (Player / character model / body
+-- part / name string) down to the victim Player.
+local function resolveGrabVictim(val)
+    if typeof(val) == "Instance" then
+        if val:IsA("Player") then return val end
+        local p = Players:GetPlayerFromCharacter(val)
+        if p then return p end
+        local model = val:IsA("Model") and val or val:FindFirstAncestorWhichIsA("Model")
+        if model then
+            return Players:GetPlayerFromCharacter(model) or Players:FindFirstChild(model.Name)
+        end
+        return Players:FindFirstChild(val.Name)
+    elseif type(val) == "string" then
+        return Players:FindFirstChild(val)
+    end
+    return nil
+end
+-- Build the set of everyone currently grabbed: scan EVERY player's BodyEffects.Grabbed
+-- (the grabber's value points at their victim) and flag each referenced player. Then
+-- isGrabbed is just a membership test, so it applies to everyone, not only the target.
+-- Cached ~0.1s since canEngage calls it per target every frame.
+local _grabbedSet, _grabbedAt = {}, 0
+local function grabbedSet()
+    local now = os.clock()
+    if now - _grabbedAt < 0.1 then return _grabbedSet end
+    _grabbedAt = now
+    local set = {}
+    for _, grabber in ipairs(Players:GetPlayers()) do
+        local m = hcModel(grabber)
+        local fx = m and m:FindFirstChild("BodyEffects")
+        local g = fx and fx:FindFirstChild("Grabbed")
+        local val = g and g.Value
+        if val ~= nil then
+            local victim = resolveGrabVictim(val)
+            if victim then set[victim] = true end
         end
     end
-    return false
+    _grabbedSet = set
+    return set
+end
+local function isGrabbed(plr)
+    return grabbedSet()[plr] == true
 end
 local function hasForceField(plr)
     local ch = plr.Character
