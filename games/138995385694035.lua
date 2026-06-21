@@ -7,7 +7,7 @@
 --    Knife Bot: knife aura (attach/orbit) + auto-equip knife + knife reach (+visualizer)
 --    Checks   : visible(+origin)/knocked/grabbed/forcefield/loaded -- global
 --               target-validity filters respected by all targeting + shooting
---    Misc     : Anti-AFK badge, Force-AFK badge
+--    Misc     : Anti-AFK badge, Force-AFK badge, Godmode
 --    Util     : Target Line, Target Outline
 --
 --  HC Shoot payload (witherhook, no-kick form -- origin==aim is a degenerate
@@ -92,8 +92,8 @@ local HC = {
     knifeAura = false, knifeDist = 3, knifeInterval = 0.6, knifeOrbit = false, knifeOrbitSpeed = 180,
     knifeEquip = false,
     knifeReach = false, knifeReachSize = 10, knifeReachVis = false,
-    -- afk
-    antiAfk = false, forceAfk = false,
+    -- afk + protection
+    antiAfk = false, forceAfk = false, godmode = false,
     -- visuals
     targetLine = false, lineOrigin = "Bottom", lineColor = Color3.fromRGB(255, 60, 60),
     targetOutline = false, outlineColor = Color3.fromRGB(255, 80, 80),
@@ -842,8 +842,33 @@ track(RunService.Heartbeat:Connect(function()
     pcall(function() me:FireServer("Stomp") end)
 end))
 
--- ---- Auto stomp Targets: desync (teleport) onto each knocked locked target and stomp
---      until they're finished, then desync back to our real spot and stop. ----
+-- ---- Auto stomp Targets: DESYNC onto each knocked locked target via network-ownership
+--      + PhysicsRepRootPart ("fake pos resolver" -- re-roots our physics replication onto
+--      the target so the server reads us at them without rubber-banding), stomp until
+--      they're finished, then detach and restore our real spot. ----
+local function attachDesync(targetHrp)
+    local lc = LocalPlayer.Character
+    local r = lc and lc:FindFirstChild("HumanoidRootPart")
+    if not (r and targetHrp and targetHrp.Parent) then return end
+    pcall(function() r:SetNetworkOwner(LocalPlayer) end)         -- usually no-op on client; harmless
+    pcall(function() targetHrp:SetNetworkOwner(LocalPlayer) end)
+    if sethiddenproperty then pcall(function() sethiddenproperty(r, "PhysicsRepRootPart", targetHrp) end) end
+    pcall(function()
+        r.CFrame = targetHrp.CFrame
+        r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end)
+end
+local function detachDesync()
+    local lc = LocalPlayer.Character
+    local r = lc and lc:FindFirstChild("HumanoidRootPart")
+    if r and sethiddenproperty then pcall(function() sethiddenproperty(r, "PhysicsRepRootPart", r) end) end
+end
+local _stompAttach = nil
+track(RunService.Heartbeat:Connect(function()
+    if _stompAttach then attachDesync(_stompAttach) end          -- keep the desync alive each frame
+end))
+
 local _stompTBusy = false
 task.spawn(function()
     while not unloaded do
@@ -865,18 +890,15 @@ task.spawn(function()
                     local deadline = tick() + 1.5
                     while HC.stompTargets and victim.Parent and isKnocked(victim)
                         and not isDead(victim) and tick() < deadline do
-                        local cc = LocalPlayer.Character
-                        local lh = cc and cc:FindFirstChild("HumanoidRootPart")
                         local vh = victim.Character and victim.Character:FindFirstChild("HumanoidRootPart")
-                        if lh and vh then
-                            pcall(function() lh.CFrame = CFrame.new(vh.Position + Vector3.new(0, 1, 0)) end)
-                            pcall(function() me:FireServer("Stomp") end)
-                        end
+                        _stompAttach = vh                 -- Heartbeat desyncs us onto them
+                        if vh then pcall(function() me:FireServer("Stomp") end) end
                         task.wait(0.1)
                     end
-                    local cc2 = LocalPlayer.Character        -- desync back
-                    local lh2 = cc2 and cc2:FindFirstChild("HumanoidRootPart")
-                    if lh2 then pcall(function() lh2.CFrame = saved end) end
+                    _stompAttach = nil
+                    detachDesync()
+                    local lh2 = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                    if lh2 then pcall(function() lh2.CFrame = saved end) end  -- back to our real spot
                 end
                 _stompTBusy = false
             end
@@ -884,6 +906,20 @@ task.spawn(function()
         task.wait(0.1)
     end
 end)
+
+-- ---- Godmode (best-effort vs the server-authoritative health): refill health and clear
+--      the knock / freeze flags every frame. ----
+track(RunService.Heartbeat:Connect(function()
+    if not HC.godmode then return end
+    local ch = LocalPlayer.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if hum then pcall(function() if hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end end) end
+    local fx = hcModel(LocalPlayer) and hcModel(LocalPlayer):FindFirstChild("BodyEffects")
+    if fx then
+        local ko = fx:FindFirstChild("K.O"); if ko and ko.Value then pcall(function() ko.Value = false end) end
+        local fr = fx:FindFirstChild("FROZEN"); if fr and fr.Value then pcall(function() fr.Value = false end) end
+    end
+end))
 
 -- ============================================================
 --  AUTO RELOAD
@@ -1289,6 +1325,10 @@ do
         Callback = function(v) HC.antiAfk = v; if v then HC.forceAfk = false end end })
     Sec:Toggle({ Name = "Force-AFK badge", Flag = "HC_ForceAfk", Default = false,
         Callback = function(v) HC.forceAfk = v; if v then HC.antiAfk = false end end })
+
+    local Sec2 = MiscSub:Section({ Name = "Protection", Side = 2 })
+    Sec2:Toggle({ Name = "Godmode", Flag = "HC_Godmode", Default = false,
+        Callback = function(v) HC.godmode = v end })
 end
 
 -- 6) Util
@@ -1323,10 +1363,11 @@ local function hcCleanup()
     unloaded = true
     setForceHit(false)
     HC.autoShoot, HC.voidshoot, HC.stomp, HC.stompTargets, HC.reload = false, false, false, false, false
-    HC.knifeAura, HC.knifeEquip, HC.antiAfk, HC.forceAfk = false, false, false, false
+    HC.knifeAura, HC.knifeEquip, HC.antiAfk, HC.forceAfk, HC.godmode = false, false, false, false, false
     HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
     voidUnglue()
+    pcall(detachDesync)       -- undo any stomp desync (restore PhysicsRepRootPart)
     pcall(knifeReachRestore)  -- put the knife hitbox back to normal size
     destroyAmmoHud()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_VS_RESTORE") end)
