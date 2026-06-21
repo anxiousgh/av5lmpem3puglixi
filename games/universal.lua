@@ -970,7 +970,7 @@ do
         local hrp = getHRP(); if not hrp or not realCF then return end
         pcall(function()
             if Desync.method ~= "Velocity" then hrp.CFrame = realCF end
-            if realLV then hrp.AssemblyLinearVelocity = realLV end
+            if realLV and realLV.Magnitude < 1000 then hrp.AssemblyLinearVelocity = realLV end  -- never re-apply a fling velocity
             if realAV then hrp.AssemblyAngularVelocity = realAV end
         end)
     end)
@@ -990,7 +990,7 @@ do
         if hrp and realCF then
             pcall(function()
                 hrp.CFrame = realCF
-                if realLV then hrp.AssemblyLinearVelocity = realLV end
+                if realLV and realLV.Magnitude < 1000 then hrp.AssemblyLinearVelocity = realLV end  -- never re-apply a fling velocity
                 if realAV then hrp.AssemblyAngularVelocity = realAV end
             end)
         end
@@ -1255,12 +1255,19 @@ do
         Callback = function(v) orbit.dist = v end })
     OSec:Slider({ Name = "Speed", Flag = "FlingOrbitSpeed", Min = 0, Max = 3000, Default = 400, Decimals = 0,
         Callback = function(v) orbit.speed = v end })
+    local minHSlider, maxHSlider
     OSec:Toggle({ Name = "Height (min/max)", Flag = "FlingOrbitHeightOn", Default = false,
-        Callback = function(v) orbit.heightOn = v end })
-    OSec:Slider({ Name = "Min height", Flag = "FlingOrbitMinH", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
+        Callback = function(v)
+            orbit.heightOn = v
+            pcall(function() minHSlider:SetVisibility(v) end)
+            pcall(function() maxHSlider:SetVisibility(v) end)
+        end })
+    minHSlider = OSec:Slider({ Name = "Min height", Flag = "FlingOrbitMinH", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
         Callback = function(v) orbit.minH = v end })
-    OSec:Slider({ Name = "Max height", Flag = "FlingOrbitMaxH", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
+    maxHSlider = OSec:Slider({ Name = "Max height", Flag = "FlingOrbitMaxH", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
         Callback = function(v) orbit.maxH = v end })
+    pcall(function() minHSlider:SetVisibility(false) end)   -- hidden until Height is on
+    pcall(function() maxHSlider:SetVisibility(false) end)
     OSec:Toggle({ Name = "Lookat target", Flag = "FlingOrbitLook", Default = true,
         Callback = function(v) orbit.lookAt = v end })
     OSec:Toggle({ Name = "Fake Pos", Flag = "FlingOrbitFakePos", Default = false,
@@ -1275,22 +1282,23 @@ do
     local velOn, velMag, velReal = false, 16384, nil
     local function setVel(on)
         velOn = on
-        if not on then   -- clear the leftover huge velocity so turning off doesn't launch you
+        if not on then   -- zero on disable so a leftover fling velocity can't launch you
             local hrp = getHRP()
-            if hrp then pcall(function() hrp.AssemblyLinearVelocity = velReal or Vector3.new(0, 0, 0) end) end
+            if hrp then pcall(function() hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end) end
             velReal = nil
         end
     end
     track(RunService.Heartbeat:Connect(function()
         if not velOn then return end
         local hrp = getHRP(); if not hrp then return end
-        velReal = hrp.AssemblyLinearVelocity
+        local v = hrp.AssemblyLinearVelocity
+        if v.Magnitude < velMag * 0.5 then velReal = v end   -- only capture your real (non-fling) velocity
         pcall(function() hrp.AssemblyLinearVelocity = Vector3.one * velMag end)
     end))
     RunService:BindToRenderStep("WH_FlingVelRestore", Enum.RenderPriority.First.Value, function()
         if not velOn then return end
         local hrp = getHRP()
-        if hrp and velReal then pcall(function() hrp.AssemblyLinearVelocity = velReal end) end
+        if hrp then pcall(function() hrp.AssemblyLinearVelocity = velReal or Vector3.new(0, 0, 0) end) end
     end)
     local VSec = FlingSub:Section({ Name = "Velocity", Side = 2 })
     local velToggle = VSec:Toggle({ Name = "Velocity fling", Flag = "FlingVel", Default = false,
