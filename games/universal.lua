@@ -477,7 +477,10 @@ do
         if not Trig.enabled then return end
         if Library.WindowOpenState then return end   -- don't fire while clicking the menu
         local cam = Workspace.CurrentCamera
-        local mouse = UserInputService:GetMouseLocation()
+        -- GetMouseLocation is screen space (includes the GUI inset); ViewportPointToRay
+        -- wants viewport space, so subtract the inset or the ray lands ~58px too low and
+        -- misses the target you're actually aiming at.
+        local mouse = UserInputService:GetMouseLocation() - game:GetService("GuiService"):GetGuiInset()
         local ray = cam:ViewportPointToRay(mouse.X, mouse.Y)
         local params = RaycastParams.new()
         params.FilterType = Enum.RaycastFilterType.Exclude
