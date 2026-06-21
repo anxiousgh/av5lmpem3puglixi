@@ -812,7 +812,7 @@ local CombatPage = Window:Page({ Name = "Combat" })
 local TargetSub = CombatPage:SubPage({ Name = "Target" })
 do
     local Sec = TargetSub:Section({ Name = "Lock", Side = 1 })
-    Sec:Label({ Name = "Lock / unlock key (closest to mouse)" }):Keybind({
+    Sec:Label({ Name = "Lock Target" }):Keybind({
         Name = "Lock target", Flag = "TargetLockKey", Mode = "Hold", Default = Enum.KeyCode.T,
         Callback = function(state) if state then combatToggleLock() end end })
     Sec:Button({ Name = "Lock nearest to mouse", Callback = combatLockClosest })
