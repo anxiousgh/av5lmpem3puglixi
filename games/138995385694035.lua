@@ -842,31 +842,27 @@ track(RunService.Heartbeat:Connect(function()
     pcall(function() me:FireServer("Stomp") end)
 end))
 
--- ---- Auto stomp Targets: DESYNC onto each knocked locked target via network-ownership
---      + PhysicsRepRootPart ("fake pos resolver" -- re-roots our physics replication onto
---      the target so the server reads us at them without rubber-banding), stomp until
---      they're finished, then detach and restore our real spot. ----
-local function attachDesync(targetHrp)
-    local lc = LocalPlayer.Character
-    local r = lc and lc:FindFirstChild("HumanoidRootPart")
-    if not (r and targetHrp and targetHrp.Parent) then return end
-    pcall(function() r:SetNetworkOwner(LocalPlayer) end)         -- usually no-op on client; harmless
-    pcall(function() targetHrp:SetNetworkOwner(LocalPlayer) end)
-    if sethiddenproperty then pcall(function() sethiddenproperty(r, "PhysicsRepRootPart", targetHrp) end) end
-    pcall(function()
-        r.CFrame = targetHrp.CFrame
+-- ---- Auto stomp Targets: true DESYNC -- send our REPLICATED position to the target each
+--      Stepped (so the server reads us on them) but restore our REAL position each Heartbeat
+--      so our character never actually moves locally. Stomp until they're finished, detach. ----
+local _dsTo, _dsReal = nil, nil
+local function localRoot()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+track(RunService.Stepped:Connect(function()       -- before physics: replicate the FAKE (target) pos
+    if not _dsTo or not _dsTo.Parent then return end
+    local r = localRoot()
+    if r then pcall(function()
+        r.CFrame = _dsTo.CFrame
         r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         r.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-    end)
-end
-local function detachDesync()
-    local lc = LocalPlayer.Character
-    local r = lc and lc:FindFirstChild("HumanoidRootPart")
-    if r and sethiddenproperty then pcall(function() sethiddenproperty(r, "PhysicsRepRootPart", r) end) end
-end
-local _stompAttach = nil
-track(RunService.Heartbeat:Connect(function()
-    if _stompAttach then attachDesync(_stompAttach) end          -- keep the desync alive each frame
+    end) end
+end))
+track(RunService.Heartbeat:Connect(function()     -- after physics: snap back to our REAL pos locally
+    if not (_dsTo and _dsReal) then return end
+    local r = localRoot()
+    if r then pcall(function() r.CFrame = _dsReal end) end
 end))
 
 local _stompTBusy = false
@@ -883,22 +879,18 @@ task.spawn(function()
             end
             if me and victim then
                 _stompTBusy = true
-                local lc = LocalPlayer.Character
-                local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
-                if lhrp then
-                    local saved = lhrp.CFrame
+                local r = localRoot()
+                if r then
+                    _dsReal = r.CFrame                 -- our home (Heartbeat keeps us here locally)
                     local deadline = tick() + 1.5
                     while HC.stompTargets and victim.Parent and isKnocked(victim)
                         and not isDead(victim) and tick() < deadline do
                         local vh = victim.Character and victim.Character:FindFirstChild("HumanoidRootPart")
-                        _stompAttach = vh                 -- Heartbeat desyncs us onto them
+                        _dsTo = vh                     -- Stepped replicates us onto them
                         if vh then pcall(function() me:FireServer("Stomp") end) end
                         task.wait(0.1)
                     end
-                    _stompAttach = nil
-                    detachDesync()
-                    local lh2 = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                    if lh2 then pcall(function() lh2.CFrame = saved end) end  -- back to our real spot
+                    _dsTo, _dsReal = nil, nil          -- stop desync (we're already home)
                 end
                 _stompTBusy = false
             end
@@ -907,18 +899,39 @@ task.spawn(function()
     end
 end)
 
--- ---- Godmode (best-effort vs the server-authoritative health): refill health and clear
---      the knock / freeze flags every frame. ----
-track(RunService.Heartbeat:Connect(function()
-    if not HC.godmode then return end
+-- ---- Godmode (HC-style): play the hitbox-displacing emote animations so incoming hits
+--      land on the contorted/displaced rig instead of registering. Re-applied on respawn. ----
+local GOD_ANIMS = { "rbxassetid://70883871260184", "rbxassetid://10921259953", "rbxassetid://10921257536" }
+local _godChar, _godTracks = nil, {}
+local function stopGodAnims()
+    for _, t in ipairs(_godTracks) do pcall(function() t:Stop() end) end
+    _godTracks, _godChar = {}, nil
+end
+local function ensureGodAnims()
     local ch = LocalPlayer.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-    if hum then pcall(function() if hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end end) end
-    local fx = hcModel(LocalPlayer) and hcModel(LocalPlayer):FindFirstChild("BodyEffects")
-    if fx then
-        local ko = fx:FindFirstChild("K.O"); if ko and ko.Value then pcall(function() ko.Value = false end) end
-        local fr = fx:FindFirstChild("FROZEN"); if fr and fr.Value then pcall(function() fr.Value = false end) end
+    local animator = hum and hum:FindFirstChildOfClass("Animator")
+    if not animator then return end
+    if _godChar == ch and #_godTracks > 0 then
+        for _, t in ipairs(_godTracks) do if not t.IsPlaying then pcall(function() t:Play() end) end end
+        return
     end
+    stopGodAnims()
+    _godChar = ch
+    for _, id in ipairs(GOD_ANIMS) do
+        pcall(function()
+            local a = Instance.new("Animation"); a.AnimationId = id
+            local t = animator:LoadAnimation(a)
+            t.Looped = true
+            t.Priority = Enum.AnimationPriority.Action4
+            t:Play()
+            _godTracks[#_godTracks + 1] = t
+        end)
+    end
+end
+track(RunService.Heartbeat:Connect(function()
+    if HC.godmode then ensureGodAnims()
+    elseif #_godTracks > 0 then stopGodAnims() end
 end))
 
 -- ============================================================
@@ -1367,8 +1380,9 @@ local function hcCleanup()
     HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
     voidUnglue()
-    pcall(detachDesync)       -- undo any stomp desync (restore PhysicsRepRootPart)
-    pcall(knifeReachRestore)  -- put the knife hitbox back to normal size
+    _dsTo, _dsReal = nil, nil  -- stop any stomp desync
+    pcall(stopGodAnims)        -- stop godmode emote
+    pcall(knifeReachRestore)   -- put the knife hitbox back to normal size
     destroyAmmoHud()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_VS_RESTORE") end)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
