@@ -162,6 +162,51 @@ do  -- Respawn (keep position) + the canonical "land upright on my feet" telepor
     end
 end
 
+do  -- Anti-fling + No fall damage (velocity guards on the root; one shared loop)
+    local antiFling, noFall, conn = false, false, nil
+    local MAX_LIN_H = 120   -- a real fling spikes horizontal velocity far past any movement
+    local MAX_ANG   = 30    -- characters shouldn't spin; flings add huge angular velocity
+    local FALL_CAP  = 50    -- max landing speed we allow (server never sees a hard landing)
+    local NEAR_GROUND = 25  -- only soften the last stretch so long falls still feel normal
+    local function step()
+        local hrp = getHRP(); if not hrp then return end
+        if antiFling then
+            local v = hrp.AssemblyLinearVelocity
+            local horiz = Vector3.new(v.X, 0, v.Z)
+            if horiz.Magnitude > MAX_LIN_H then
+                hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)  -- kill horizontal fling, keep gravity
+            end
+            if hrp.AssemblyAngularVelocity.Magnitude > MAX_ANG then
+                hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end
+            local cf = hrp.CFrame
+            if cf.UpVector.Y < 0.7 then  -- tipped over by a fling -> stand back up (keep facing)
+                local look = cf.LookVector
+                local flat = Vector3.new(look.X, 0, look.Z)
+                if flat.Magnitude < 1e-3 then flat = Vector3.new(0, 0, -1) end
+                hrp.CFrame = CFrame.new(cf.Position, cf.Position + flat.Unit)
+            end
+        end
+        if noFall then
+            local v = hrp.AssemblyLinearVelocity
+            if v.Y < -FALL_CAP then  -- falling fast: soften only if the ground is close
+                local params = RaycastParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances = { hrp.Parent }
+                if Workspace:Raycast(hrp.Position, Vector3.new(0, -NEAR_GROUND, 0), params) then
+                    hrp.AssemblyLinearVelocity = Vector3.new(v.X, -FALL_CAP, v.Z)
+                end
+            end
+        end
+    end
+    local function refresh()
+        if (antiFling or noFall) and not conn then conn = track(RunService.Heartbeat:Connect(step))
+        elseif not (antiFling or noFall) and conn then conn:Disconnect(); conn = nil end
+    end
+    function Movement.setAntiFling(on) antiFling = on; refresh() end
+    function Movement.setNoFall(on) noFall = on; refresh() end
+end
+
 do  -- CFrame speed
     local active, mult, conn = false, 2, nil
     function Movement.setCFrameValue(v) mult = v end
@@ -933,6 +978,10 @@ UtilSec:Button({ Name = "Respawn (keep position)",
     Callback = function() Movement.respawn() end })
 UtilSec:Label({ Name = "Respawn key" }):Keybind({ Name = "Respawn", Flag = "RespawnKey", Mode = "Hold",
     Callback = function(state) if state then Movement.respawn() end end })
+UtilSec:Toggle({ Name = "Anti-fling", Flag = "AntiFlingEnabled", Default = false,
+    Callback = function(v) Movement.setAntiFling(v) end })
+UtilSec:Toggle({ Name = "No fall damage", Flag = "NoFallEnabled", Default = false,
+    Callback = function(v) Movement.setNoFall(v) end })
 
 -- ---- Player > Desync subpage ----
 local DesyncSub = PlayerPage:SubPage({ Name = "Desync" })
