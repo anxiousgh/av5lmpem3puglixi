@@ -20,7 +20,15 @@ local MainPage = Window:Page({ Name = "Main" })
 local conns = {}
 local function track(c) conns[#conns + 1] = c; return c end
 
-local S = { on = false, flex = false, mode = "Legit", join = false }
+local S = {
+    on = false, flex = false, mode = "Legit", join = false,
+    startMin = 0.12, startMax = 0.28,   -- pause before typing starts (seconds)
+    keyMin = 0.035, keyMax = 0.095,     -- per-keystroke delay (seconds)
+}
+local function randRange(a, b)          -- random in [a,b]; tolerant of min>max
+    if b < a then a, b = b, a end
+    return a + math.random() * (b - a)
+end
 
 -- ---- word list (fetched once; ~370k words) ----
 local words, wordsReady = {}, false
@@ -154,7 +162,7 @@ local function submitBlatant(word)
 end
 local function submitLegit(word)
     word = word:lower()
-    task.wait(0.12 + math.random() * 0.16)            -- brief pause before starting to type
+    task.wait(randRange(S.startMin, S.startMax))      -- pause before starting to type
     local misspellAt = (math.random() < 0.04) and math.random(1, #word) or -1   -- very rarely
     for i = 1, #word do
         if i == misspellAt then
@@ -168,7 +176,7 @@ local function submitLegit(word)
             end
         end
         pressKey(word:sub(i, i))
-        task.wait(0.035 + math.random() * 0.06)       -- per-keystroke delay (a bit faster still)
+        task.wait(randRange(S.keyMin, S.keyMax))      -- per-keystroke delay
     end
     task.wait(0.08)
     pressKey("enter")                                 -- submit
@@ -257,6 +265,17 @@ do
         while not wordsReady do task.wait(0.25) end
         pcall(function() status:SetText(("Ready -- %d words"):format(#words)) end)
     end)
+
+    -- typing speed: each delay has its own randomized min/max (ms)
+    local Spd = Sub:Section({ Name = "Typing speed (Legit)", Side = 2 })
+    Spd:Slider({ Name = "Start delay min", Flag = "WB_StartMin", Min = 0, Max = 1500, Default = 120, Decimals = 0, Suffix = "ms",
+        Callback = function(v) S.startMin = v / 1000 end })
+    Spd:Slider({ Name = "Start delay max", Flag = "WB_StartMax", Min = 0, Max = 1500, Default = 280, Decimals = 0, Suffix = "ms",
+        Callback = function(v) S.startMax = v / 1000 end })
+    Spd:Slider({ Name = "Key delay min", Flag = "WB_KeyMin", Min = 0, Max = 500, Default = 35, Decimals = 0, Suffix = "ms",
+        Callback = function(v) S.keyMin = v / 1000 end })
+    Spd:Slider({ Name = "Key delay max", Flag = "WB_KeyMax", Min = 0, Max = 500, Default = 95, Decimals = 0, Suffix = "ms",
+        Callback = function(v) S.keyMax = v / 1000 end })
 end
 
 -- universal pages after Main
