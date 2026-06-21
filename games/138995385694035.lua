@@ -76,7 +76,7 @@ local HC = {
     checkVisible = false, visibleOrigin = "Tool Handle",
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
-    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 9,
+    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 11,
     wbVisualize = false,  -- marker at the spot the wallbang would spoof the origin to
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
@@ -329,14 +329,13 @@ end
 -- Normal is set to the hit position (not a unit vector) to match exactly.
 -- Wallbang ("if possible"): the server only lets us spoof our shot origin by ~10-11
 -- studs before it throws "origin mismatch", and it raycasts origin -> hit (a blocked
--- LoS = "wallbang" error). So we search for a spoofed origin within that budget that
--- has CLEAR line of sight to the target -- not only straight through the wall but
--- peeking to ALL sides (around corners). We search DEEPEST-first (closest to the
--- target = furthest past the wall = most margin) so the server's own raycast agrees
--- and it never errors on a razor edge. Returns nil when nothing within budget clears
--- (wall too thick / standing too far back) so the caller skips the shot -- no error.
--- HARD CAP 9: the server kicks for "origin mismatch" past this -- never exceed it.
-local WB_HARD_CAP = 9
+-- LoS = "wallbang" error). So we find the CLOSEST spoofed origin within budget that
+-- has clear LoS to the target (smallest displacement = least suspicious + most likely
+-- to pass): first walk straight toward the target until just past the wall, and only
+-- if no straight point fits do we peek around the cover (closest sideways spot).
+-- Returns nil when nothing within budget clears so the caller skips the shot -- no error.
+-- HARD CAP 11: the server kicks for "origin mismatch" past this -- never exceed it.
+local WB_HARD_CAP = 11
 function wallbangOrigin(realOrigin, part)
     local targetPos = part.Position
     local toT = targetPos - realOrigin
@@ -354,29 +353,36 @@ function wallbangOrigin(realOrigin, part)
         return Workspace:Raycast(from, targetPos - from, params) == nil
     end
     if clearFrom(realOrigin) then return realOrigin end       -- already clear, no spoof
-    -- basis for sideways "peek around the wall" offsets
+    local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)
+    -- 1) straight toward the target: the CLOSEST point past the wall with clear LoS
+    local f = 0.5
+    while f <= math.min(budget, dist - 1) do
+        if clearFrom(realOrigin + fwd * f) then return realOrigin + fwd * f end
+        f = f + 0.5
+    end
+    -- 2) fallback: peek around the cover -- collect sideways/diagonal offsets within
+    --    budget and pick the CLOSEST one (smallest displacement) that clears.
     local up0 = math.abs(fwd.Y) > 0.99 and Vector3.new(1, 0, 0) or Vector3.new(0, 1, 0)
     local right = fwd:Cross(up0); right = (right.Magnitude > 0 and right.Unit) or Vector3.new(1, 0, 0)
     local up = right:Cross(fwd).Unit
-    local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)
-    local maxFwd = math.min(budget, dist - 1)
     local ANG = { 0, 45, 90, 135, 180, 225, 270, 315 }
-    local f = maxFwd
-    while f >= 0 do
-        if f > 0 and clearFrom(realOrigin + fwd * f) then return realOrigin + fwd * f end  -- straight through
-        local lat = 2                                          -- then peek to every side at this depth
-        while lat <= budget do
+    local cands = {}
+    local ff = 0
+    while ff <= budget do
+        local l = 1.5
+        while l <= budget do
             for _, a in ipairs(ANG) do
                 local rad = math.rad(a)
-                local off = fwd * f + (right * math.cos(rad) + up * math.sin(rad)) * lat
-                if off.Magnitude <= budget then
-                    local cand = realOrigin + off
-                    if clearFrom(cand) then return cand end
-                end
+                local off = fwd * ff + (right * math.cos(rad) + up * math.sin(rad)) * l
+                if off.Magnitude <= budget then cands[#cands + 1] = off end
             end
-            lat = lat + 2
+            l = l + 1.5
         end
-        f = f - 2
+        ff = ff + 1.5
+    end
+    table.sort(cands, function(a, b) return a.Magnitude < b.Magnitude end)  -- closest first
+    for _, off in ipairs(cands) do
+        if clearFrom(realOrigin + off) then return realOrigin + off end
     end
     return nil                                                 -- nothing within budget clears
 end
@@ -1094,7 +1100,7 @@ do
         Callback = function(v) HC.forceHitCooldown = v / 1000 end })
     Sec2:Toggle({ Name = "Wallbang if possible", Flag = "HC_Wallbang", Default = false,
         Callback = function(v) HC.wallbang = v end })
-    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 9, Default = 9, Decimals = 0, Suffix = " studs",
+    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 11, Default = 11, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.wallbangOffset = v end })
     Sec2:Toggle({ Name = "Visualize wallbang spot", Flag = "HC_WbVisualize", Default = false,
         Callback = function(v) HC.wbVisualize = v end })
