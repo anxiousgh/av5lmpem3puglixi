@@ -1170,16 +1170,13 @@ do
     local orbit = { on = false, dist = 4, speed = 400, minH = 0, maxH = 0, heightOn = false,
         lookAt = true, fakePos = false, desync = false, pattern = "Orbit" }
     local _attached, _angle, _orbitReal = false, 0, nil
-    -- offset around the target for the chosen pattern. The Min/Max height bob is added on
-    -- top only when the Height toggle is on (each pattern already has its own base shape).
+    local _hCur, _hTarget, _hTimer = 0, 0, 0   -- smooth random height (advanced in the loop by dt)
+    -- offset around the target for the chosen pattern. _hCur is a smooth random height between
+    -- Min/Max (independent of orbit speed), applied only when the Height toggle is on.
     local function orbitOffset()
         local rad = math.rad(_angle)
         local d = orbit.dist
-        local bob = 0
-        if orbit.heightOn then
-            local mid, span = (orbit.minH + orbit.maxH) * 0.5, (orbit.maxH - orbit.minH)
-            bob = mid + (span * 0.5) * math.sin(rad)   -- bob between min/max once per revolution
-        end
+        local bob = orbit.heightOn and _hCur or 0
         local p = orbit.pattern
         if p == "Planetary" then           -- tilted ring (rises over + dips under the target)
             return Vector3.new(math.cos(rad) * d, math.sin(rad) * d * 0.7 + bob, math.sin(rad) * d * 0.5)
@@ -1208,6 +1205,18 @@ do
         local hrp, tHrp = getHRP(), selectedHRP()
         if not (hrp and tHrp) then orbitDetach(); orbitRestoreReal(); return end
         _angle = (_angle + orbit.speed * dt) % 360
+        -- smooth random height: pick a new random target in [min,max] now and then, lerp to
+        -- it by dt (so it glides between heights, never snaps, and ignores the orbit speed).
+        if orbit.heightOn then
+            _hTimer = _hTimer - dt
+            if _hTimer <= 0 then
+                _hTarget = orbit.minH + math.random() * (orbit.maxH - orbit.minH)
+                _hTimer = 0.4 + math.random() * 0.8
+            end
+            _hCur = _hCur + (_hTarget - _hCur) * math.clamp(dt * 3, 0, 1)
+        else
+            _hCur = 0
+        end
         local pos = tHrp.Position + orbitOffset()
         local cf = orbit.lookAt and CFrame.new(pos, tHrp.Position) or CFrame.new(pos)
         if orbit.desync then
@@ -1310,8 +1319,7 @@ do
             end
         end
         pcall(function()
-            hrp.AssemblyLinearVelocity = Vector3.one * velMag
-            hrp.AssemblyAngularVelocity = Vector3.one * velMag   -- spin -> stronger, more reliable fling
+            hrp.AssemblyLinearVelocity = Vector3.one * velMag   -- linear only (no spin), straight from the slider
         end)
     end))
     RunService:BindToRenderStep("WH_FlingVelRestore", Enum.RenderPriority.First.Value, function()
