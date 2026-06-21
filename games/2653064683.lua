@@ -107,22 +107,35 @@ local function getTypebox()
     return ok and tb or nil
 end
 
--- ---- submit (blatant = instant; legit = type it out char-by-char) ----
+-- ---- submit ----
+-- Blatant: fire the finished word straight to the server (instant).
+-- Legit: send REAL key presses via VirtualInputManager so the GAME'S OWN input types it
+-- (the game listens to UserInputService.InputBegan -> builds the word + broadcasts each
+-- keystroke), then Enter. The type bar, your nameplate and everyone else see real typing.
+local VIM = game:GetService("VirtualInputManager")
+local KEY = {}
+for _, kc in ipairs(Enum.KeyCode:GetEnumItems()) do
+    local n = kc.Name
+    if #n == 1 and n:match("%a") then KEY[n:lower()] = kc end
+end
 local function submitBlatant(word)
     fire("TypingEvent", word:upper(), true)
 end
 local function submitLegit(word)
-    local tb = getTypebox()
-    task.wait(0.25 + math.random() * 0.45)            -- "reading" pause
-    local built = ""
-    for i = 1, #word do
-        built = built .. word:sub(i, i)
-        if tb then pcall(function() tb.Text = built:upper() end) end
-        fire("TypingEvent", built:upper(), false)     -- live typing replicates to others
-        task.wait(0.045 + math.random() * 0.075)      -- per-keystroke delay
+    task.wait(0.2 + math.random() * 0.35)             -- "reading" pause
+    for c in word:lower():gmatch(".") do
+        local kc = KEY[c]
+        if kc then
+            pcall(function() VIM:SendKeyEvent(true, kc, false, game) end)
+            task.wait(0.02)
+            pcall(function() VIM:SendKeyEvent(false, kc, false, game) end)
+        end
+        task.wait(0.06 + math.random() * 0.1)         -- per-keystroke delay
     end
-    fire("TypingEvent", word:upper(), true)           -- enter
-    if tb then pcall(function() tb.Text = "" end) end
+    task.wait(0.08)
+    pcall(function() VIM:SendKeyEvent(true, Enum.KeyCode.Return, false, game) end)   -- enter = submit
+    task.wait(0.02)
+    pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game) end)
 end
 
 -- ---- main loop ----
