@@ -460,40 +460,66 @@ end
 -- ============================================================
 --  TRIGGERBOT  (fire when the crosshair is on an enemy)
 -- ============================================================
-local Trig = { enabled = false, delay = 0, teamCheck = true }
+local Trig = { enabled = false, delay = 0, teamCheck = false }
 do
     local VIM; pcall(function() VIM = VirtualInputManager end)
     local lastShot = 0
     local function fire()
         if not VIM then return end
-        task.spawn(function()
+        task.spawn(function()   -- press / release on separate frames so semi-auto guns re-fire
             pcall(function() VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0) end)
             task.wait()
             pcall(function() VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0) end)
         end)
     end
 
+    -- Is the crosshair actually on the locked target's body? A plain raycast gets
+    -- eaten by the viewmodel / arms / gun rendered in front of the camera (and by FX
+    -- bubbles) -- those aren't part of YOUR character so the default filter misses
+    -- them, the ray "hits a Part", and never reaches the enemy. So we penetrate:
+    -- skip anything right next to the camera, non-collidable, or see-through
+    -- (viewmodels / effects), stop at a real solid blocker (wall / other player),
+    -- and report a hit only if we genuinely reach the target. Accessories on the
+    -- target (masks/hats) are pre-filtered so the ray passes through to the body.
+    local function aimingAt(char)
+        local cam = Workspace.CurrentCamera
+        local mouse = UserInputService:GetMouseLocation()
+        local ray = cam:ViewportPointToRay(mouse.X, mouse.Y)
+        local ignore = {}
+        local lc = getChar(); if lc then ignore[#ignore + 1] = lc end
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("Accessory") then ignore[#ignore + 1] = d end
+        end
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = ignore
+        local origin, dir = ray.Origin, ray.Direction * 5000
+        for _ = 1, 12 do
+            local res = Workspace:Raycast(origin, dir, params)
+            if not res or not res.Instance then return false end
+            local inst = res.Instance
+            if inst:IsDescendantOf(char) then return true end            -- reached the enemy
+            if inst.CanCollide == false or inst.Transparency >= 0.5
+                or (res.Position - origin).Magnitude < 6 then            -- viewmodel / fx: pass through
+                ignore[#ignore + 1] = inst
+                params.FilterDescendantsInstances = ignore
+            else
+                return false                                             -- solid wall / other player blocks
+            end
+        end
+        return false
+    end
+
     track(RunService.Heartbeat:Connect(function()
         if not Trig.enabled then return end
         if Library.WindowOpenState then return end   -- don't fire while clicking the menu
-        local cam = Workspace.CurrentCamera
-        -- GetMouseLocation is screen space (includes the GUI inset); ViewportPointToRay
-        -- wants viewport space, so subtract the inset or the ray lands ~58px too low and
-        -- misses the target you're actually aiming at.
-        local mouse = UserInputService:GetMouseLocation() - game:GetService("GuiService"):GetGuiInset()
-        local ray = cam:ViewportPointToRay(mouse.X, mouse.Y)
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        local ignore = {}; local lc = getChar(); if lc then ignore[1] = lc end
-        params.FilterDescendantsInstances = ignore
-        local res = Workspace:Raycast(ray.Origin, ray.Direction * 5000, params)
-        if not res or not res.Instance then return end
-        local model = res.Instance:FindFirstAncestorOfClass("Model")
-        local plr = model and Players:GetPlayerFromCharacter(model)
-        -- triggerbot ONLY fires when the crosshair is on the locked target (Combat > Target)
-        if not combatValid() then return end
-        if not plr or plr ~= Combat.target then return end
-        if not aliveChar(plr) then return end
+        local plr = combatValid()                    -- locked target only (Combat > Target)
+        if not plr or plr == LocalPlayer then return end
+        local char = plr.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not (char and hum and hum.Health > 0) then return end
+        if Trig.teamCheck and plr.Team and plr.Team == LocalPlayer.Team then return end
+        if not aimingAt(char) then return end
         if (tick() - lastShot) * 1000 < Trig.delay then return end
         lastShot = tick()
         fire()
@@ -883,7 +909,7 @@ do
         Name = "Click delay", Flag = "TrigDelay", Min = 0, Max = 1000, Default = 0, Decimals = 0, Suffix = "ms",
         Callback = function(v) Trig.delay = v end,
     })
-    Sec:Toggle({ Name = "Team check", Flag = "TrigTeam", Default = true,
+    Sec:Toggle({ Name = "Team check", Flag = "TrigTeam", Default = false,
         Callback = function(v) Trig.teamCheck = v end })
 end
 
