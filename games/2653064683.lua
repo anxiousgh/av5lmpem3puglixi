@@ -60,7 +60,9 @@ local gameId
 track(gameEvent.OnClientEvent:Connect(function(id) gameId = id end))   -- latest WordBomb game
 local startGame = game:GetService("ReplicatedStorage").Network.Games:FindFirstChild("StartGame")
 local function fire(...)
-    if gameId then pcall(function() gameEvent:FireServer(gameId, ...) end) end
+    if not gameId then return end
+    local args = table.pack(...)
+    pcall(function() gameEvent:FireServer(gameId, table.unpack(args, 1, args.n)) end)
 end
 
 -- ---- UI reads: my turn + the syllable ----
