@@ -77,6 +77,7 @@ local HC = {
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
     forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 9,
+    wbVisualize = false,  -- marker at the spot the wallbang would spoof the origin to
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
     hitSoundEnabled = true, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
@@ -989,6 +990,21 @@ local function ensureHL()
     if not rbHL.Parent then rbHL.Parent = Workspace end
     return rbHL
 end
+-- marker ball at the spoofed wallbang origin
+local wbMarker
+local function ensureWbMarker()
+    if wbMarker and wbMarker.Parent then return wbMarker end
+    wbMarker = Instance.new("Part")
+    wbMarker.Name = "_wb_spot"
+    wbMarker.Shape = Enum.PartType.Ball
+    wbMarker.Size = Vector3.new(1.5, 1.5, 1.5)
+    wbMarker.Anchored, wbMarker.CanCollide, wbMarker.CanQuery, wbMarker.CanTouch = true, false, false, false
+    wbMarker.Material = Enum.Material.Neon
+    wbMarker.Color = Color3.fromRGB(120, 200, 255)
+    wbMarker.Transparency = 1
+    wbMarker.Parent = Workspace:FindFirstChild("Ignored") or Workspace
+    return wbMarker
+end
 track(RunService.RenderStepped:Connect(function()
     -- show who we'll ACTUALLY attack (all checks). If nobody is engageable, fall back
     -- to the no-checks pick so the visual stays on the locked target (e.g. a knocked
@@ -996,7 +1012,7 @@ track(RunService.RenderStepped:Connect(function()
     local g = gv()
     local indicatorOn = g and g.WH and g.WH.targetIndicatorOn
     local plr = nil
-    if HC.targetLine or HC.targetOutline or indicatorOn then plr = getTarget(false) or getTarget(true) end
+    if HC.targetLine or HC.targetOutline or indicatorOn or HC.wbVisualize then plr = getTarget(false) or getTarget(true) end
     publishTarget(plr)  -- target GUI follows the SAME ignore-checks pick as the visuals
     local char = plr and plr.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -1028,6 +1044,24 @@ track(RunService.RenderStepped:Connect(function()
         hl.Enabled = true
     elseif rbHL then
         rbHL.Enabled = false
+    end
+    -- wallbang spot: where the origin gets spoofed to punch through to the target. Only
+    -- shows when there's an actual spoof (target behind cover, reachable within budget);
+    -- hidden when LoS is already clear (origin == us) or no spot fits the budget.
+    local mk = ensureWbMarker()
+    if HC.wbVisualize and char then
+        local lc = LocalPlayer.Character
+        local root = lc and lc:FindFirstChild("HumanoidRootPart")
+        local part = forceShotPart(char)
+        local origin = (root and part) and wallbangOrigin(root.Position, part) or nil
+        if origin and (origin - root.Position).Magnitude > 0.5 then
+            mk.Position = origin
+            mk.Transparency = 0.35
+        else
+            mk.Transparency = 1
+        end
+    else
+        mk.Transparency = 1
     end
 end))
 
@@ -1062,6 +1096,8 @@ do
         Callback = function(v) HC.wallbang = v end })
     Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 9, Default = 9, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.wallbangOffset = v end })
+    Sec2:Toggle({ Name = "Visualize wallbang spot", Flag = "HC_WbVisualize", Default = false,
+        Callback = function(v) HC.wbVisualize = v end })
     -- fake bullet tracer + hit sound (the synth never renders gun visuals)
     Sec2:Toggle({ Name = "Bullet tracers", Flag = "HC_Tracer", Default = true,
         Callback = function(v) HC.tracerEnabled = v end })
@@ -1207,7 +1243,7 @@ local function hcCleanup()
     HC.autoShoot, HC.voidshoot, HC.stomp, HC.stompTargets, HC.reload = false, false, false, false, false
     HC.knifeAura, HC.knifeEquip, HC.antiAfk, HC.forceAfk = false, false, false, false
     HC.knifeReach, HC.knifeReachVis = false, false
-    HC.targetLine, HC.targetOutline, HC.ammoHud = false, false, false
+    HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
     voidUnglue()
     pcall(knifeReachRestore)  -- put the knife hitbox back to normal size
     destroyAmmoHud()
@@ -1215,6 +1251,7 @@ local function hcCleanup()
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     if rbLine then pcall(function() rbLine:Remove() end) end
     if rbHL then pcall(function() rbHL:Destroy() end) end
+    if wbMarker then pcall(function() wbMarker:Destroy() end) end
 end
 do
     local g = gv()
