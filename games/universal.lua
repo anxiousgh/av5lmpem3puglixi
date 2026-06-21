@@ -971,7 +971,7 @@ do
         pcall(function()
             if Desync.method ~= "Velocity" then hrp.CFrame = realCF end
             if realLV and realLV.Magnitude < 1000 then hrp.AssemblyLinearVelocity = realLV end  -- never re-apply a fling velocity
-            if realAV then hrp.AssemblyAngularVelocity = realAV end
+            if realAV and realAV.Magnitude < 1000 then hrp.AssemblyAngularVelocity = realAV end
         end)
     end)
 
@@ -991,7 +991,7 @@ do
             pcall(function()
                 hrp.CFrame = realCF
                 if realLV and realLV.Magnitude < 1000 then hrp.AssemblyLinearVelocity = realLV end  -- never re-apply a fling velocity
-                if realAV then hrp.AssemblyAngularVelocity = realAV end
+                if realAV and realAV.Magnitude < 1000 then hrp.AssemblyAngularVelocity = realAV end
             end)
         end
     end
@@ -1279,13 +1279,20 @@ do
     -- Same as the old velocity desync: REPLICATE the huge velocity on Heartbeat (so the
     -- server flings whoever you touch) but RESTORE your real velocity on RenderStep, so
     -- locally you don't actually get launched.
-    local velOn, velMag, velReal = false, 16384, nil
+    -- Velocity fling: apply huge LINEAR + ANGULAR (spin) velocity -- the spin makes the
+    -- on-contact fling far more reliable. "Through target" overlaps the locked target (with
+    -- network ownership) so contact is guaranteed instead of relying on bumping into them.
+    -- Your real velocity/pose is restored each RenderStep so you stay put.
+    local velOn, velThrough, velMag, velReal, velRealCF = false, false, 16384, nil, nil
     local function setVel(on)
         velOn = on
         if not on then   -- zero on disable so a leftover fling velocity can't launch you
             local hrp = getHRP()
-            if hrp then pcall(function() hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end) end
-            velReal = nil
+            if hrp then pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end) end
+            velReal, velRealCF = nil, nil
         end
     end
     track(RunService.Heartbeat:Connect(function()
@@ -1293,16 +1300,34 @@ do
         local hrp = getHRP(); if not hrp then return end
         local v = hrp.AssemblyLinearVelocity
         if v.Magnitude < velMag * 0.5 then velReal = v end   -- only capture your real (non-fling) velocity
-        pcall(function() hrp.AssemblyLinearVelocity = Vector3.one * velMag end)
+        velRealCF = hrp.CFrame
+        if velThrough then
+            local tHrp = selectedHRP()   -- the locked target (Combat > Target)
+            if tHrp then
+                pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+                pcall(function() tHrp:SetNetworkOwner(LocalPlayer) end)
+                pcall(function() hrp.CFrame = tHrp.CFrame end)   -- overlap = guaranteed contact
+            end
+        end
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.one * velMag
+            hrp.AssemblyAngularVelocity = Vector3.one * velMag   -- spin -> stronger, more reliable fling
+        end)
     end))
     RunService:BindToRenderStep("WH_FlingVelRestore", Enum.RenderPriority.First.Value, function()
         if not velOn then return end
         local hrp = getHRP()
-        if hrp then pcall(function() hrp.AssemblyLinearVelocity = velReal or Vector3.new(0, 0, 0) end) end
+        if hrp then pcall(function()
+            hrp.AssemblyLinearVelocity = velReal or Vector3.new(0, 0, 0)
+            hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            if velThrough and velRealCF then hrp.CFrame = velRealCF end   -- stay put while flinging through them
+        end) end
     end)
     local VSec = FlingSub:Section({ Name = "Velocity", Side = 2 })
     local velToggle = VSec:Toggle({ Name = "Velocity fling", Flag = "FlingVel", Default = false,
         Callback = function(v) setVel(v) end })
+    VSec:Toggle({ Name = "Through target", Flag = "FlingVelThrough", Default = false,
+        Callback = function(v) velThrough = v end })
     VSec:Slider({ Name = "Velocity magnitude", Flag = "FlingVelMag", Min = 50, Max = 16384, Default = 16384, Decimals = 0,
         Callback = function(v) velMag = v end })
     VSec:Label({ Name = "Toggle key" }):Keybind({ Name = "Velocity fling", Flag = "FlingVelKey", Mode = "Toggle",
