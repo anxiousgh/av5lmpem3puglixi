@@ -101,11 +101,13 @@ local function shootMurderer()
     local part = targetHitPart(victim.Character)
     if not part then return false, "no_victim" end
     local theirCF = part.CFrame
-    -- origin = our REAL gun muzzle (GunRaycastAttachment) -- matches what the game sends,
-    -- so it always passes the server's origin check. Correct arg order (origin, target).
+    -- origin = our REAL gun-muzzle POSITION (passes the server's origin check) but AIMED
+    -- at the murderer. The server fires along the origin's look direction, so without
+    -- re-aiming it shoots wherever the gun happens to face -> misses. Correct arg order.
     local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     local att = hrp and hrp:FindFirstChild("GunRaycastAttachment")
-    local origin = (att and att.WorldCFrame) or (hrp and hrp.CFrame) or CFrame.new()
+    local muzzle = (att and att.WorldPosition) or (hrp and hrp.Position) or part.Position
+    local origin = CFrame.new(muzzle, part.Position)
     pcall(function() remote:FireServer(origin, theirCF) end)
     return true
 end
@@ -250,6 +252,16 @@ if hasDrawing then
     track(RunService.RenderStepped:Connect(function()
         local cam = Workspace.CurrentCamera
         if not cam then return end
+
+        -- drop a gun-drop label the instant its part is gone (picked up / round ended);
+        -- the text isn't a child of the part, so it would otherwise linger on screen.
+        for part, m in pairs(dropDraws) do
+            if not (part and part.Parent and gunDropCache[part]) then
+                if m.hl then pcall(function() m.hl:Destroy() end) end
+                if m.draw then pcall(function() m.draw:Remove() end) end
+                dropDraws[part] = nil
+            end
+        end
 
         if state.idEsp then
             for _, plr in ipairs(Players:GetPlayers()) do
