@@ -292,7 +292,7 @@ end
 -- ============================================================
 local Combat = {
     target = nil,
-    line = false, outline = false,
+    line = false, lineOrigin = "Bottom", outline = false,
     lineColor = Color3.fromRGB(255, 60, 60), outlineColor = Color3.fromRGB(255, 80, 80),
 }
 local function combatValid()
@@ -352,7 +352,12 @@ do
             local sp = cam:WorldToViewportPoint(part.Position)
             if sp.Z > 0 then
                 local vs = cam.ViewportSize
-                local a, b = Vector2.new(vs.X * 0.5, vs.Y), Vector2.new(sp.X, sp.Y)
+                local o, a = Combat.lineOrigin
+                if o == "Top" then a = Vector2.new(vs.X * 0.5, 0)
+                elseif o == "Center" then a = Vector2.new(vs.X * 0.5, vs.Y * 0.5)
+                elseif o == "Mouse" then a = UserInputService:GetMouseLocation()
+                else a = Vector2.new(vs.X * 0.5, vs.Y) end   -- Bottom (default)
+                local b = Vector2.new(sp.X, sp.Y)
                 local mid, d = (a + b) / 2, (b - a)
                 line.Size = UDim2.fromOffset(2, d.Magnitude)
                 line.Position = UDim2.fromOffset(mid.X, mid.Y)
@@ -435,20 +440,10 @@ do
         if not CamLock.enabled then stickyTarget = nil; return end
         if Library.WindowOpenState then return end   -- don't fight you while in the menu
 
-        local part, plr
-        if combatValid() then
-            -- a manually locked target (Combat > Target) overrides the closest-pick
-            plr = Combat.target
-            part = resolvePart(plr)
-        elseif CamLock.sticky then
-            -- keep the current target while valid; only re-acquire when it drops
-            part = stickyPart(stickyTarget)
-            if part then plr = stickyTarget
-            else stickyTarget, part = findClosest(); plr = stickyTarget end
-        else
-            stickyTarget = nil
-            plr, part = findClosest()
-        end
+        -- camlock ONLY aims at the manually locked target (Combat > Target); nothing
+        -- locked = it doesn't aim at all.
+        local plr = combatValid()
+        local part = plr and resolvePart(plr)
         -- publish the locked target for the Target Indicator widget (nil = none)
         if getgenv then
             local g = getgenv()
@@ -492,9 +487,9 @@ do
         if not res or not res.Instance then return end
         local model = res.Instance:FindFirstAncestorOfClass("Model")
         local plr = model and Players:GetPlayerFromCharacter(model)
-        if not plr or plr == LocalPlayer then return end
-        if combatValid() and plr ~= Combat.target then return end   -- only the locked target
-        if not teamOk(plr, Trig.teamCheck) then return end
+        -- triggerbot ONLY fires when the crosshair is on the locked target (Combat > Target)
+        if not combatValid() then return end
+        if not plr or plr ~= Combat.target then return end
         if not aliveChar(plr) then return end
         if (tick() - lastShot) * 1000 < Trig.delay then return end
         lastShot = tick()
@@ -821,6 +816,9 @@ do
     local Sec2 = TargetSub:Section({ Name = "Visuals", Side = 2 })
     Sec2:Toggle({ Name = "Tracer line", Flag = "TargetLine", Default = false,
         Callback = function(v) Combat.line = v end })
+    Sec2:Dropdown({ Name = "Line origin", Flag = "TargetLineOrigin", Default = "Bottom", Multi = false,
+        Items = { "Bottom", "Top", "Center", "Mouse" },
+        Callback = function(v) Combat.lineOrigin = (type(v) == "table" and v[1]) or v or "Bottom" end })
     Sec2:Label({ Name = "Line color" }):Colorpicker({ Flag = "TargetLineColor", Default = Combat.lineColor,
         Callback = function(c) Combat.lineColor = c end })
     Sec2:Toggle({ Name = "Outline", Flag = "TargetOutline", Default = false,
