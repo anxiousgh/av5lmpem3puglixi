@@ -124,12 +124,17 @@ end
 --  Murderer -- knife kill (your Knife's own remotes)
 --  KnifeStabbed = the swing, HandleTouched = register a hit on a part.
 -- ============================================================
+-- the Knife's remotes live in the tool whether it's equipped (Character) or just held
+-- in the Backpack -- so kill-all works WITHOUT having to hold/equip the knife.
 local function knifeEvents()
-    local ch = LocalPlayer.Character
-    local knife = ch and ch:FindFirstChild("Knife")
-    local ev = knife and knife:FindFirstChild("Events")
-    if not ev then return nil end
-    return ev:FindFirstChild("KnifeStabbed"), ev:FindFirstChild("HandleTouched")
+    local function pull(parent)
+        local knife = parent and parent:FindFirstChild("Knife")
+        local ev = knife and knife:FindFirstChild("Events")
+        if ev then return ev:FindFirstChild("KnifeStabbed"), ev:FindFirstChild("HandleTouched") end
+    end
+    local s, t = pull(LocalPlayer.Character)
+    if s and t then return s, t end
+    return pull(LocalPlayer:FindFirstChild("Backpack"))
 end
 local function victimPart(plr)
     local ch = plr and plr.Character
@@ -147,7 +152,7 @@ local function knifeKillAll(range, silent)
     local stab, touch = knifeEvents()
     if not (stab and touch) then
         if not silent then
-            Library:Notification("You're not holding the Knife", 3, Color3.fromRGB(255, 180, 60))
+            Library:Notification("You're not the Murderer (no Knife)", 3, Color3.fromRGB(255, 180, 60))
         end
         return false
     end
