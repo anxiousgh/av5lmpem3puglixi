@@ -4567,7 +4567,7 @@ do
                     Name = "\0",
                     Parent = Library.Holder.Instance,
                     Position = UDim2.new(0.4242021143436432, 0, 0.7932242751121521, 0),
-                    Size = UDim2.new(0, 256, 0, 80),
+                    Size = UDim2.new(0, 256, 0, 104),
                     BorderSizePixel = 0,
                     BackgroundColor3 = Library.Theme["Background"]
                 }):AddToTheme({ BackgroundColor3 = 'Background' })
@@ -4701,21 +4701,27 @@ do
                     BorderSizePixel = 0
                 }):AddToTheme({ TextColor3 = 'Text' })
 
-                -- [wh] secondary line: @username | distance | health % (updated live)
-                Items["Extra"] = Library:Create("TextLabel", {
-                    Name = "\0",
-                    FontFace = Library.Font,
-                    TextSize = Library.FontSize,
-                    Parent = Items["Stuff"].Instance,
-                    TextColor3 = Library.Theme["Text"],
-                    Text = "",
-                    LayoutOrder = 1,
-                    TextTransparency = 0.4,
-                    Size = UDim2.new(1, 0, 0, 13),
-                    BackgroundTransparency = 1,
-                    TextXAlignment = Enum.TextXAlignment.Left,
-                    BorderSizePixel = 0
-                }):AddToTheme({ TextColor3 = 'Text' })
+                -- [wh] stacked lines under the display name: @username, then distance,
+                -- then the tool the target is holding (distance + tool update live).
+                local function subLabel(order)
+                    return Library:Create("TextLabel", {
+                        Name = "\0",
+                        FontFace = Library.Font,
+                        TextSize = Library.FontSize,
+                        Parent = Items["Stuff"].Instance,
+                        TextColor3 = Library.Theme["Text"],
+                        Text = "",
+                        LayoutOrder = order,
+                        TextTransparency = 0.4,
+                        Size = UDim2.new(1, 0, 0, 13),
+                        BackgroundTransparency = 1,
+                        TextXAlignment = Enum.TextXAlignment.Left,
+                        BorderSizePixel = 0
+                    }):AddToTheme({ TextColor3 = 'Text' })
+                end
+                Items["Extra"]    = subLabel(1)  -- @username
+                Items["Distance"] = subLabel(2)  -- distance
+                Items["Tool"]     = subLabel(3)  -- held tool
 
                 Library:Create("UIListLayout", {
                     Name = "\0",
@@ -4769,6 +4775,8 @@ do
                 if not Target then
                     Items["Name"].Instance.Text = "No target selected"
                     Items["Extra"].Instance.Text = ""
+                    Items["Distance"].Instance.Text = ""
+                    Items["Tool"].Instance.Text = ""
                     Items["Avatar"].Instance.Image = "rbxasset://textures/ui/GuiImagePlaceholder.png"
                     Items["Value"].Instance.Text = "0/0"
                     Items["HealthbarFill"]:Tween({ Size = UDim2.new(0, 0, 1, 0) })
@@ -4787,6 +4795,8 @@ do
                 local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
                 if not Humanoid then
                     Items["Value"].Instance.Text = "0/0"
+                    Items["Distance"].Instance.Text = ""
+                    Items["Tool"].Instance.Text = ""
                     Items["HealthbarFill"]:Tween({ Size = UDim2.new(0, 0, 1, 0) })
                     return false
                 end
@@ -4794,7 +4804,7 @@ do
                 BoundTarget = Target
                 BoundHumanoid = Humanoid
 
-                -- live secondary line: @username | distance | health % (throttled)
+                -- live: distance (below @username) and the held tool (below distance)
                 local LocalPlayer = Players.LocalPlayer
                 local acc = 0
                 DistanceConnection = game:GetService("RunService").Heartbeat:Connect(function(dt)
@@ -4802,19 +4812,17 @@ do
                     acc = acc + dt
                     if acc < 0.1 then return end
                     acc = 0
-                    local parts = {}
-                    if Display ~= Username then parts[#parts + 1] = "@" .. Username end
                     local lc = LocalPlayer.Character
                     local lr = lc and lc:FindFirstChild("HumanoidRootPart")
                     local tc = Target.Character
                     local tr = tc and tc:FindFirstChild("HumanoidRootPart")
                     if lr and tr then
-                        parts[#parts + 1] = math.floor((lr.Position - tr.Position).Magnitude + 0.5) .. " studs"
+                        Items["Distance"].Instance.Text = math.floor((lr.Position - tr.Position).Magnitude + 0.5) .. " studs"
+                    else
+                        Items["Distance"].Instance.Text = "-- studs"
                     end
-                    if Humanoid.MaxHealth > 0 then
-                        parts[#parts + 1] = math.floor(Humanoid.Health / Humanoid.MaxHealth * 100 + 0.5) .. "%"
-                    end
-                    Items["Extra"].Instance.Text = table.concat(parts, "  |  ")
+                    local tool = tc and tc:FindFirstChildOfClass("Tool")
+                    Items["Tool"].Instance.Text = "Holding: " .. (tool and tool.Name or "Nothing")
                 end)
 
                 local function UpdateHealth(Health)
