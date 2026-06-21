@@ -46,10 +46,18 @@ local function getMainEvent() return ReplicatedStorage:FindFirstChild("MainEvent
 -- ============================================================
 --  HC state (BodyEffects under workspace.Players.Characters.<name>)
 -- ============================================================
+-- HC parks character models under workspace.Players.Characters normally, but moves
+-- players who are in a 1v1 into workspace.Players.InBox. Scan every subfolder so the
+-- knocked/dead checks find the model wherever the game put it.
 local function hcModel(plr)
     local wsp = Workspace:FindFirstChild("Players")
-    local chars = wsp and wsp:FindFirstChild("Characters")
-    return (chars and chars:FindFirstChild(plr.Name)) or plr.Character
+    if wsp then
+        for _, folder in ipairs(wsp:GetChildren()) do
+            local m = folder:FindFirstChild(plr.Name)
+            if m and m:IsA("Model") then return m end
+        end
+    end
+    return plr.Character
 end
 local function isKnocked(plr)
     local m = hcModel(plr)
