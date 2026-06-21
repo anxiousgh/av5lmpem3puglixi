@@ -65,26 +65,18 @@ local function findGunShoot()
     return pull(LocalPlayer.Character) or pull(LocalPlayer:FindFirstChild("Backpack"))
 end
 
--- hit CFrame: Head first (head shots register the same), then HRP / torso,
--- then any BasePart so a shot always fires even on weird rigs.
-local function targetHitCF(char)
+-- hit part: Head first (head shots register the same), then HRP / torso, then any
+-- BasePart so a shot always fires even on weird rigs.
+local function targetHitPart(char)
     if not char then return nil end
-    local head = char:FindFirstChild("Head")
-    if head and head:IsA("BasePart") then return head.CFrame end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if hrp and hrp:IsA("BasePart") then return hrp.CFrame end
-    local p = char:FindFirstChild("LowerTorso") or char:FindFirstChild("Torso")
-        or char:FindFirstChild("UpperTorso")
-    if p and p:IsA("BasePart") then return p.CFrame end
-    local any = char:FindFirstChildWhichIsA("BasePart")
-    return any and any.CFrame or nil
+    return char:FindFirstChild("Head")
+        or char:FindFirstChild("HumanoidRootPart")
+        or char:FindFirstChild("LowerTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso")
+        or char:FindFirstChildWhichIsA("BasePart")
 end
--- shooter position: CFrame.new(pos) (no basis vectors) -- matches the
--- payload MM2's server validates against where it thinks we are.
-local function myPosCF()
-    local c = LocalPlayer.Character
-    local hrp = c and c:FindFirstChild("HumanoidRootPart")
-    return hrp and CFrame.new(hrp.Position) or nil
+local function targetHitCF(char)
+    local p = targetHitPart(char)
+    return p and p.CFrame or nil
 end
 
 local function findMurderer()
@@ -105,11 +97,18 @@ local function shootMurderer()
     if not remote then return false, "no_gun" end
     local victim = findMurderer()
     if not victim then return false, "no_murderer" end
-    local theirCF = targetHitCF(victim.Character)
-    if not theirCF then return false, "no_victim" end
-    local myPos = myPosCF()
-    if not myPos then return false, "no_my_hrp" end
-    pcall(function() remote:FireServer(theirCF, myPos) end)
+    local part = targetHitPart(victim.Character)
+    if not part then return false, "no_victim" end
+    local theirCF = part.CFrame
+    -- POINT-BLANK ORIGIN: instead of shooting from our real position (whose origin->hit ray
+    -- the server can have blocked by map geometry/distance -> whole-round, map-dependent
+    -- misses), put the origin ~3 studs from the murderer, AIMED at them. The server's ray
+    -- then starts right next to the target and can't be blocked. Falls back to a fixed offset.
+    local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local toUs = myHrp and (myHrp.Position - part.Position) or Vector3.new(0, 0, 3)
+    local dir = (toUs.Magnitude > 1) and toUs.Unit or Vector3.new(0, 0, 1)
+    local origin = CFrame.new(part.Position + dir * 3, part.Position)
+    pcall(function() remote:FireServer(theirCF, origin) end)
     return true
 end
 local function tryShoot()
