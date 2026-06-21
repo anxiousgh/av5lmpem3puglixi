@@ -1167,8 +1167,25 @@ do
     end
 
     -- ---------- Orbit ----------
-    local orbit = { on = false, dist = 4, speed = 400, height = 0, lookAt = true, fakePos = false, desync = false, threeD = false }
+    local orbit = { on = false, dist = 4, speed = 400, minH = 0, maxH = 0,
+        lookAt = true, fakePos = false, desync = false, pattern = "Orbit" }
     local _attached, _angle, _orbitReal = false, 0, nil
+    -- the orbit offset around the target for the chosen pattern; height sweeps min..max
+    local function orbitOffset()
+        local rad = math.rad(_angle)
+        local d, span = orbit.dist, (orbit.maxH - orbit.minH)
+        local bob = orbit.minH + span * (0.5 + 0.5 * math.sin(rad))   -- bob between min/max
+        local p = orbit.pattern
+        if p == "Planetary" then          -- tilted ring (rises over + dips under the target)
+            return Vector3.new(math.cos(rad) * d, math.sin(rad) * d * 0.6 + bob, math.sin(rad) * d * 0.6)
+        elseif p == "Vertical" then        -- loop straight over the top
+            return Vector3.new(0, math.sin(rad) * d + bob, math.cos(rad) * d)
+        elseif p == "Spiral" then          -- flat ring while height sweeps min->max
+            return Vector3.new(math.cos(rad) * d, orbit.minH + span * ((_angle % 360) / 360), math.sin(rad) * d)
+        else                               -- "Orbit": flat horizontal ring, height bobs min..max
+            return Vector3.new(math.cos(rad) * d, bob, math.sin(rad) * d)
+        end
+    end
     local function orbitDetach()
         if not _attached then return end
         local hrp = getHRP()
@@ -1186,22 +1203,16 @@ do
         local hrp, tHrp = getHRP(), selectedHRP()
         if not (hrp and tHrp) then orbitDetach(); orbitRestoreReal(); return end
         _angle = (_angle + orbit.speed * dt) % 360
-        local rad = math.rad(_angle)
-        local off = Vector3.new(math.cos(rad), 0, math.sin(rad)) * orbit.dist
-        if orbit.threeD then off = off + Vector3.new(0, math.sin(rad * 2) * orbit.dist, 0) end  -- orbit on more directions
-        local pos = tHrp.Position + off + Vector3.new(0, orbit.height, 0)
+        local pos = tHrp.Position + orbitOffset()
         local cf = orbit.lookAt and CFrame.new(pos, tHrp.Position) or CFrame.new(pos)
         if orbit.desync then
             -- custom-desync style: replicate the orbit pose to the server each Heartbeat but
             -- keep our REAL character where it is (restored each RenderStep) -- the server
             -- sees us orbiting (flings the target) while we don't actually move there.
+            -- DON'T touch velocity here: zeroing it kills your walk speed + animations.
             if _attached then orbitDetach() end
             _orbitReal = hrp.CFrame   -- our real home (RenderStep restored it last frame)
-            pcall(function()
-                hrp.CFrame = cf
-                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            end)
+            pcall(function() hrp.CFrame = cf end)
         else
             orbitRestoreReal()   -- in case desync was just turned off
             if orbit.fakePos then
@@ -1228,22 +1239,27 @@ do
     end)
 
     local OSec = FlingSub:Section({ Name = "Orbit", Side = 1 })
-    OSec:Toggle({ Name = "Orbit selected player", Flag = "FlingOrbit", Default = false,
+    local orbitToggle = OSec:Toggle({ Name = "Orbit target", Flag = "FlingOrbit", Default = false,
         Callback = function(v) orbit.on = v end })
+    OSec:Label({ Name = "Toggle key" }):Keybind({ Name = "Orbit", Flag = "FlingOrbitKey", Mode = "Toggle",
+        Callback = function(state) orbitToggle:Set(state and true or false) end })
+    OSec:Dropdown({ Name = "Orbit directions", Flag = "FlingOrbitPattern", Default = "Orbit", Multi = false,
+        Items = { "Orbit", "Planetary", "Vertical", "Spiral" },
+        Callback = function(v) orbit.pattern = (type(v) == "table" and v[1]) or v or "Orbit" end })
     OSec:Slider({ Name = "Distance", Flag = "FlingOrbitDist", Min = 0, Max = 30, Default = 4, Decimals = 1, Suffix = " studs",
         Callback = function(v) orbit.dist = v end })
     OSec:Slider({ Name = "Speed", Flag = "FlingOrbitSpeed", Min = 0, Max = 3000, Default = 400, Decimals = 0,
         Callback = function(v) orbit.speed = v end })
-    OSec:Slider({ Name = "Height", Flag = "FlingOrbitHeight", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
-        Callback = function(v) orbit.height = v end })
+    OSec:Slider({ Name = "Min height", Flag = "FlingOrbitMinH", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
+        Callback = function(v) orbit.minH = v end })
+    OSec:Slider({ Name = "Max height", Flag = "FlingOrbitMaxH", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
+        Callback = function(v) orbit.maxH = v end })
     OSec:Toggle({ Name = "Lookat target", Flag = "FlingOrbitLook", Default = true,
         Callback = function(v) orbit.lookAt = v end })
     OSec:Toggle({ Name = "Fake Pos", Flag = "FlingOrbitFakePos", Default = false,
         Callback = function(v) orbit.fakePos = v end })
     OSec:Toggle({ Name = "Desync", Flag = "FlingOrbitDesync", Default = false,
         Callback = function(v) orbit.desync = v end })
-    OSec:Toggle({ Name = "Orbit directions", Flag = "FlingOrbitDirs", Default = false,
-        Callback = function(v) orbit.threeD = v end })
 
     -- ---------- Velocity (moved out of Desync) ----------
     -- Same as the old velocity desync: REPLICATE the huge velocity on Heartbeat (so the
