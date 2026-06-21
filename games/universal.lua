@@ -974,7 +974,7 @@ do
 
     Sec:Dropdown({
         Name = "Method", Flag = "DesyncMethod", Default = "Void", Multi = false,
-        Items = { "Void", "Spin", "Velocity", "Freeze", "Custom" },
+        Items = { "Void", "Spin", "Freeze", "Custom" },
         Callback = function(v)
             local m = (type(v) == "table" and v[1]) or v or "Void"
             -- switching method = clean slate: turn both toggles off so a spoof
@@ -1013,9 +1013,6 @@ do
     local spin = Sec:Slider({ Name = "Spin speed", Flag = "DesyncSpin",
         Min = 1, Max = 90, Default = 2, Decimals = 0,
         Callback = function(v) Desync.spinSpeed = v end })
-    local vel = Sec:Slider({ Name = "Velocity magnitude", Flag = "DesyncVel",
-        Min = 50, Max = 16384, Default = 16384, Decimals = 0,
-        Callback = function(v) Desync.velMag = v end })
     local cx = Sec:Textbox({ Name = "Custom X", Flag = "DesyncX", Default = "0",
         Numeric = true, Placeholder = "X", Callback = function(v) Desync.customX = tonumber(v) or 0 end })
     local cy = Sec:Textbox({ Name = "Custom Y", Flag = "DesyncY", Default = "0",
@@ -1024,7 +1021,7 @@ do
         Numeric = true, Placeholder = "Z", Callback = function(v) Desync.customZ = tonumber(v) or 0 end })
 
     local VALUE_CONTROLS = {
-        Void = { voidMin, voidMax }, Spin = { spin }, Velocity = { vel }, Custom = { cx, cy, cz },
+        Void = { voidMin, voidMax }, Spin = { spin }, Custom = { cx, cy, cz },
     }
     function showFor(method)
         local isFreeze = (method == "Freeze")
@@ -1039,6 +1036,91 @@ do
     end
 
     showFor("Void")   -- initial visibility matches the default method
+end
+
+-- ============================================================
+--  Fling  (orbit the selected player + velocity fling)
+--  Target = the player selected in the hub's player list (ctx.Playerlist).
+-- ============================================================
+local FlingSub = PlayerPage:SubPage({ Name = "Fling" })
+do
+    local function selectedHRP()
+        local pl = ctx.Playerlist
+        local sel = pl and pl.Selected
+        local plr = sel and sel.Player
+        local ch = plr and plr.Character
+        return ch and ch:FindFirstChild("HumanoidRootPart")
+    end
+
+    -- ---------- Orbit ----------
+    local orbit = { on = false, dist = 4, speed = 400, height = 0, lookAt = true, fakePos = false, threeD = false }
+    local _attached, _angle = false, 0
+    local function orbitDetach()
+        if not _attached then return end
+        local hrp = getHRP()
+        if hrp and sethiddenproperty then pcall(function() sethiddenproperty(hrp, "PhysicsRepRootPart", hrp) end) end
+        _attached = false
+    end
+    track(RunService.Heartbeat:Connect(function(dt)
+        if not orbit.on then orbitDetach(); return end
+        local hrp, tHrp = getHRP(), selectedHRP()
+        if not (hrp and tHrp) then orbitDetach(); return end
+        _angle = (_angle + orbit.speed * dt) % 360
+        local rad = math.rad(_angle)
+        local off = Vector3.new(math.cos(rad), 0, math.sin(rad)) * orbit.dist
+        if orbit.threeD then off = off + Vector3.new(0, math.sin(rad * 2) * orbit.dist, 0) end  -- orbit on more directions
+        local pos = tHrp.Position + off + Vector3.new(0, orbit.height, 0)
+        if orbit.fakePos then
+            -- fake pos resolver: re-root our physics replication onto the target so the
+            -- orbit sticks server-side (network ownership + PhysicsRepRootPart).
+            pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+            pcall(function() tHrp:SetNetworkOwner(LocalPlayer) end)
+            if sethiddenproperty then pcall(function() sethiddenproperty(hrp, "PhysicsRepRootPart", tHrp) end) end
+            _attached = true
+        elseif _attached then
+            orbitDetach()
+        end
+        pcall(function()
+            hrp.CFrame = orbit.lookAt and CFrame.new(pos, tHrp.Position) or CFrame.new(pos)
+            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end)
+    end))
+
+    local OSec = FlingSub:Section({ Name = "Orbit", Side = 1 })
+    OSec:Toggle({ Name = "Orbit selected player", Flag = "FlingOrbit", Default = false,
+        Callback = function(v) orbit.on = v end })
+    OSec:Slider({ Name = "Distance", Flag = "FlingOrbitDist", Min = 0, Max = 30, Default = 4, Decimals = 1, Suffix = " studs",
+        Callback = function(v) orbit.dist = v end })
+    OSec:Slider({ Name = "Speed", Flag = "FlingOrbitSpeed", Min = 0, Max = 3000, Default = 400, Decimals = 0,
+        Callback = function(v) orbit.speed = v end })
+    OSec:Slider({ Name = "Height", Flag = "FlingOrbitHeight", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
+        Callback = function(v) orbit.height = v end })
+    OSec:Toggle({ Name = "Lookat target", Flag = "FlingOrbitLook", Default = true,
+        Callback = function(v) orbit.lookAt = v end })
+    OSec:Toggle({ Name = "Fake Pos", Flag = "FlingOrbitFakePos", Default = false,
+        Callback = function(v) orbit.fakePos = v end })
+    OSec:Toggle({ Name = "Orbit directions", Flag = "FlingOrbitDirs", Default = false,
+        Callback = function(v) orbit.threeD = v end })
+
+    -- ---------- Velocity (moved out of Desync) ----------
+    local velMag, velConn = 16384, nil
+    local function setVel(on)
+        if velConn then velConn:Disconnect(); velConn = nil end
+        if on then
+            velConn = track(RunService.Heartbeat:Connect(function()
+                local hrp = getHRP()
+                if hrp then pcall(function() hrp.AssemblyLinearVelocity = Vector3.one * velMag end) end
+            end))
+        end
+    end
+    local VSec = FlingSub:Section({ Name = "Velocity", Side = 2 })
+    local velToggle = VSec:Toggle({ Name = "Velocity fling", Flag = "FlingVel", Default = false,
+        Callback = function(v) setVel(v) end })
+    VSec:Slider({ Name = "Velocity magnitude", Flag = "FlingVelMag", Min = 50, Max = 16384, Default = 16384, Decimals = 0,
+        Callback = function(v) velMag = v end })
+    VSec:Label({ Name = "Toggle key" }):Keybind({ Name = "Velocity fling", Flag = "FlingVelKey", Mode = "Toggle",
+        Callback = function(state) velToggle:Set(state and true or false) end })
 end
 
 -- ============================================================
