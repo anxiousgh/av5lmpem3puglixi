@@ -331,14 +331,13 @@ end
 -- spread PRNG check -- sending a non-degenerate aim (real bulletOrigin->target)
 -- makes the server validate spread and KICK for "spoofing spread pattern".
 -- Normal is set to the hit position (not a unit vector) to match exactly.
--- Wallbang ("if possible"): the server only lets us spoof our shot origin by ~10-11
--- studs before it throws "origin mismatch", and it raycasts origin -> hit (a blocked
--- LoS = "wallbang" error). So we find the CLOSEST spoofed origin within budget that
--- has clear LoS to the target (smallest displacement = least suspicious + most likely
--- to pass): first walk straight toward the target until just past the wall, and only
--- if no straight point fits do we peek around the cover (closest sideways spot).
--- Returns nil when nothing within budget clears so the caller skips the shot -- no error.
--- HARD CAP 11: the server kicks for "origin mismatch" past this -- never exceed it.
+-- Wallbang ("if possible"): the server only lets us spoof our shot origin by ~10-11 studs
+-- before "origin mismatch", and it raycasts origin -> hit (blocked LoS = "wallbang" error,
+-- and an origin INSIDE a wall also errors). So a valid spoof origin must be (a) within
+-- budget, (b) in OPEN AIR -- not embedded in a wall -- and (c) have clear LoS to the target.
+-- We gather candidates (straight through the wall, UP into the sky to shoot someone below,
+-- and peeks around cover) and pick the CLOSEST valid one. nil = skip the shot (no error).
+-- HARD CAP 11: the server kicks for origin mismatch past this -- never exceed it.
 local WB_HARD_CAP = 11
 function wallbangOrigin(realOrigin, part)
     local targetPos = part.Position
@@ -350,60 +349,49 @@ function wallbangOrigin(realOrigin, part)
     local lc = LocalPlayer.Character; if lc then ignore[#ignore + 1] = lc end
     local ig = Workspace:FindFirstChild("Ignored"); if ig then ignore[#ignore + 1] = ig end
     local tchar = part:FindFirstAncestorWhichIsA("Model"); if tchar then ignore[#ignore + 1] = tchar end
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = ignore
-    local function clearFrom(from)  -- only WALLS block (our char + target are ignored)
-        return Workspace:Raycast(from, targetPos - from, params) == nil
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = ignore
+    local op = OverlapParams.new()
+    op.FilterType = Enum.RaycastFilterType.Exclude
+    op.FilterDescendantsInstances = ignore
+    local function clearFrom(from)        -- clear LoS to the target? (walls block)
+        return Workspace:Raycast(from, targetPos - from, rp) == nil
+    end
+    local function inAir(pos)             -- NOT embedded in a solid wall?
+        local ok, parts = pcall(function() return Workspace:GetPartBoundsInRadius(pos, 0.6, op) end)
+        if not ok then return true end
+        for _, p in ipairs(parts) do if p.CanCollide then return false end end
+        return true
     end
     if clearFrom(realOrigin) then return realOrigin end       -- already clear, no spoof
     local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)
-    -- Primary: raycast BACK from the target to find the wall's target-facing surface, then
-    -- place the origin 1 stud past it -- just behind the wall, in open space on the target's
-    -- side. Only use it if within budget AND it actually has clear LoS (truly shootable).
-    local back = Workspace:Raycast(targetPos, realOrigin - targetPos, params)
-    if back then
-        local origin = back.Position + fwd * 1   -- 1 stud toward the target = behind the wall
-        if (origin - realOrigin).Magnitude <= budget and clearFrom(origin) then
-            return origin
-        end
-    end
-    -- Fallback: step straight toward the target to the closest clearing point (+1 stud out).
-    local maxF = math.min(budget, dist - 1)
-    local f = 0.5
-    while f <= maxF do
-        if clearFrom(realOrigin + fwd * f) then
-            local pushed = math.min(f + 1, maxF)
-            if clearFrom(realOrigin + fwd * pushed) then return realOrigin + fwd * pushed end
-            return realOrigin + fwd * f
-        end
-        f = f + 0.5
-    end
-    -- 2) fallback: peek around the cover -- collect sideways/diagonal offsets within
-    --    budget and pick the CLOSEST one (smallest displacement) that clears.
+    -- basis for sideways peeks
     local up0 = math.abs(fwd.Y) > 0.99 and Vector3.new(1, 0, 0) or Vector3.new(0, 1, 0)
     local right = fwd:Cross(up0); right = (right.Magnitude > 0 and right.Unit) or Vector3.new(1, 0, 0)
     local up = right:Cross(fwd).Unit
-    local ANG = { 0, 45, 90, 135, 180, 225, 270, 315 }
+    local worldUp = Vector3.new(0, 1, 0)
     local cands = {}
-    local ff = 0
-    while ff <= budget do
-        local l = 1.5
-        while l <= budget do
-            for _, a in ipairs(ANG) do
+    local function add(off) if off.Magnitude <= budget then cands[#cands + 1] = off end end
+    for f = 1, budget, 1 do add(fwd * f) end                  -- straight through the wall
+    for u = 1, budget, 1 do                                   -- up into the air (hit someone below us)
+        add(worldUp * u)
+        add(fwd * math.min(3, budget) + worldUp * u)
+    end
+    for f = 0, budget, 2 do                                   -- peek around cover (every side)
+        for l = 2, budget, 2 do
+            for a = 0, 315, 45 do
                 local rad = math.rad(a)
-                local off = fwd * ff + (right * math.cos(rad) + up * math.sin(rad)) * l
-                if off.Magnitude <= budget then cands[#cands + 1] = off end
+                add(fwd * f + (right * math.cos(rad) + up * math.sin(rad)) * l)
             end
-            l = l + 1.5
         end
-        ff = ff + 1.5
     end
     table.sort(cands, function(a, b) return a.Magnitude < b.Magnitude end)  -- closest first
     for _, off in ipairs(cands) do
-        if clearFrom(realOrigin + off) then return realOrigin + off end
+        local origin = realOrigin + off
+        if inAir(origin) and clearFrom(origin) then return origin end       -- in open air AND shootable
     end
-    return nil                                                 -- nothing within budget clears
+    return nil                                                -- nothing valid within budget
 end
 
 -- can we wallbang this player at all? (origin-spoof check, cached briefly since the
