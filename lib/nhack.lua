@@ -4701,6 +4701,22 @@ do
                     BorderSizePixel = 0
                 }):AddToTheme({ TextColor3 = 'Text' })
 
+                -- [wh] secondary line: @username | distance | health % (updated live)
+                Items["Extra"] = Library:Create("TextLabel", {
+                    Name = "\0",
+                    FontFace = Library.Font,
+                    TextSize = Library.FontSize,
+                    Parent = Items["Stuff"].Instance,
+                    TextColor3 = Library.Theme["Text"],
+                    Text = "",
+                    LayoutOrder = 1,
+                    TextTransparency = 0.4,
+                    Size = UDim2.new(1, 0, 0, 13),
+                    BackgroundTransparency = 1,
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    BorderSizePixel = 0
+                }):AddToTheme({ TextColor3 = 'Text' })
+
                 Library:Create("UIListLayout", {
                     Name = "\0",
                     Parent = Items["Stuff"].Instance,
@@ -4709,6 +4725,7 @@ do
             end
 
             local HealthConnection = nil
+            local DistanceConnection = nil
             local BoundTarget = nil
             local BoundHumanoid = nil
 
@@ -4738,6 +4755,10 @@ do
                     HealthConnection:Disconnect()
                     HealthConnection = nil
                 end
+                if DistanceConnection then
+                    DistanceConnection:Disconnect()
+                    DistanceConnection = nil
+                end
                 BoundTarget = nil
                 BoundHumanoid = nil
             end
@@ -4747,15 +4768,18 @@ do
 
                 if not Target then
                     Items["Name"].Instance.Text = "No target selected"
+                    Items["Extra"].Instance.Text = ""
                     Items["Avatar"].Instance.Image = "rbxasset://textures/ui/GuiImagePlaceholder.png"
                     Items["Value"].Instance.Text = "0/0"
                     Items["HealthbarFill"]:Tween({ Size = UDim2.new(0, 0, 1, 0) })
                     return false
                 end
 
-                local Name = Target.Name
+                local Username = Target.Name
+                local Display  = Target.DisplayName or Username
 
-                Items["Name"].Instance.Text = Name
+                Items["Name"].Instance.Text = Display
+                Items["Extra"].Instance.Text = (Display ~= Username) and ("@" .. Username) or ""
                 Items["Avatar"].Instance.Image = Players:GetUserThumbnailAsync(Target.UserId, Enum.ThumbnailType
                     .HeadShot, Enum.ThumbnailSize.Size420x420)
 
@@ -4769,6 +4793,29 @@ do
 
                 BoundTarget = Target
                 BoundHumanoid = Humanoid
+
+                -- live secondary line: @username | distance | health % (throttled)
+                local LocalPlayer = Players.LocalPlayer
+                local acc = 0
+                DistanceConnection = game:GetService("RunService").Heartbeat:Connect(function(dt)
+                    if BoundTarget ~= Target then return end
+                    acc = acc + dt
+                    if acc < 0.1 then return end
+                    acc = 0
+                    local parts = {}
+                    if Display ~= Username then parts[#parts + 1] = "@" .. Username end
+                    local lc = LocalPlayer.Character
+                    local lr = lc and lc:FindFirstChild("HumanoidRootPart")
+                    local tc = Target.Character
+                    local tr = tc and tc:FindFirstChild("HumanoidRootPart")
+                    if lr and tr then
+                        parts[#parts + 1] = math.floor((lr.Position - tr.Position).Magnitude + 0.5) .. " studs"
+                    end
+                    if Humanoid.MaxHealth > 0 then
+                        parts[#parts + 1] = math.floor(Humanoid.Health / Humanoid.MaxHealth * 100 + 0.5) .. "%"
+                    end
+                    Items["Extra"].Instance.Text = table.concat(parts, "  |  ")
+                end)
 
                 local function UpdateHealth(Health)
                     if BoundTarget ~= Target or BoundHumanoid ~= Humanoid then
