@@ -354,14 +354,22 @@ function wallbangOrigin(realOrigin, part)
     end
     if clearFrom(realOrigin) then return realOrigin end       -- already clear, no spoof
     local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)
-    -- 1) straight toward the target: find the closest point past the wall, then nudge a
-    --    few studs FURTHER out so the origin sits clearly past the wall (not on its
-    --    surface, which reads as "inside" and can still get rejected), capped at budget.
+    -- Primary: raycast BACK from the target to find the wall's target-facing surface, then
+    -- place the origin 1 stud past it -- just behind the wall, in open space on the target's
+    -- side. Only use it if within budget AND it actually has clear LoS (truly shootable).
+    local back = Workspace:Raycast(targetPos, realOrigin - targetPos, params)
+    if back then
+        local origin = back.Position + fwd * 1   -- 1 stud toward the target = behind the wall
+        if (origin - realOrigin).Magnitude <= budget and clearFrom(origin) then
+            return origin
+        end
+    end
+    -- Fallback: step straight toward the target to the closest clearing point (+1 stud out).
     local maxF = math.min(budget, dist - 1)
     local f = 0.5
     while f <= maxF do
         if clearFrom(realOrigin + fwd * f) then
-            local pushed = math.min(f + 3, maxF)
+            local pushed = math.min(f + 1, maxF)
             if clearFrom(realOrigin + fwd * pushed) then return realOrigin + fwd * pushed end
             return realOrigin + fwd * f
         end
@@ -826,13 +834,56 @@ local function someoneBelow(onlyTarget)
 end
 local _stompLast = 0
 track(RunService.Heartbeat:Connect(function()
-    if not (HC.stomp or HC.stompTargets) then return end
+    if not HC.stomp then return end
     if tick() - _stompLast < 0.1 then return end
     local me = getMainEvent(); if not me then return end
-    if not someoneBelow(HC.stompTargets and not HC.stomp) then return end
+    if not someoneBelow(false) then return end
     _stompLast = tick()
     pcall(function() me:FireServer("Stomp") end)
 end))
+
+-- ---- Auto stomp Targets: desync (teleport) onto each knocked locked target and stomp
+--      until they're finished, then desync back to our real spot and stop. ----
+local _stompTBusy = false
+task.spawn(function()
+    while not unloaded do
+        if HC.stompTargets and not _stompTBusy then
+            local me = getMainEvent()
+            local victim
+            for _, p in ipairs(liveTargets()) do      -- knocked locked target (ignore checks)
+                if isKnocked(p) and not isDead(p) and p.Character
+                    and p.Character:FindFirstChild("HumanoidRootPart") then
+                    victim = p; break
+                end
+            end
+            if me and victim then
+                _stompTBusy = true
+                local lc = LocalPlayer.Character
+                local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+                if lhrp then
+                    local saved = lhrp.CFrame
+                    local deadline = tick() + 1.5
+                    while HC.stompTargets and victim.Parent and isKnocked(victim)
+                        and not isDead(victim) and tick() < deadline do
+                        local cc = LocalPlayer.Character
+                        local lh = cc and cc:FindFirstChild("HumanoidRootPart")
+                        local vh = victim.Character and victim.Character:FindFirstChild("HumanoidRootPart")
+                        if lh and vh then
+                            pcall(function() lh.CFrame = CFrame.new(vh.Position + Vector3.new(0, 1, 0)) end)
+                            pcall(function() me:FireServer("Stomp") end)
+                        end
+                        task.wait(0.1)
+                    end
+                    local cc2 = LocalPlayer.Character        -- desync back
+                    local lh2 = cc2 and cc2:FindFirstChild("HumanoidRootPart")
+                    if lh2 then pcall(function() lh2.CFrame = saved end) end
+                end
+                _stompTBusy = false
+            end
+        end
+        task.wait(0.1)
+    end
+end)
 
 -- ============================================================
 --  AUTO RELOAD
@@ -1003,29 +1054,34 @@ local function ensureHL()
     if not rbHL.Parent then rbHL.Parent = Workspace end
     return rbHL
 end
--- marker ball at the spoofed wallbang origin (with a Highlight so it shows through walls)
-local wbMarker, wbHL
+-- small white marker at the spoofed wallbang origin. A BillboardGui (AlwaysOnTop)
+-- renders the dot over geometry so it's visible through walls.
+local wbMarker, wbBG
 local function ensureWbMarker()
     if wbMarker and wbMarker.Parent then return wbMarker end
     wbMarker = Instance.new("Part")
     wbMarker.Name = "_wb_spot"
     wbMarker.Shape = Enum.PartType.Ball
-    wbMarker.Size = Vector3.new(1.5, 1.5, 1.5)
+    wbMarker.Size = Vector3.new(0.6, 0.6, 0.6)
     wbMarker.Anchored, wbMarker.CanCollide, wbMarker.CanQuery, wbMarker.CanTouch = true, false, false, false
     wbMarker.Material = Enum.Material.Neon
-    wbMarker.Color = Color3.fromRGB(120, 200, 255)
+    wbMarker.Color = Color3.fromRGB(255, 255, 255)
     wbMarker.Transparency = 1
     wbMarker.Parent = Workspace:FindFirstChild("Ignored") or Workspace
-    wbHL = Instance.new("Highlight")
-    wbHL.Adornee = wbMarker
-    wbHL.FillColor = Color3.fromRGB(120, 200, 255)
-    wbHL.FillTransparency = 0.2
-    wbHL.OutlineColor = Color3.fromRGB(190, 235, 255)
-    wbHL.OutlineTransparency = 0
-    wbHL.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop   -- render through walls
-    wbHL.Enabled = false
-    pcall(function() wbHL.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
-    if not wbHL.Parent then wbHL.Parent = wbMarker end
+    wbBG = Instance.new("BillboardGui")
+    wbBG.Name = "_wb_bg"
+    wbBG.AlwaysOnTop = true                 -- draw over walls
+    wbBG.Size = UDim2.fromOffset(10, 10)
+    wbBG.Adornee = wbMarker
+    wbBG.Enabled = false
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.fromScale(1, 1)
+    dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    dot.BorderSizePixel = 0
+    dot.Parent = wbBG
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(1, 0); c.Parent = dot
+    pcall(function() wbBG.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not wbBG.Parent then wbBG.Parent = wbMarker end
     return wbMarker
 end
 track(RunService.RenderStepped:Connect(function()
@@ -1080,14 +1136,14 @@ track(RunService.RenderStepped:Connect(function()
         if origin and (origin - root.Position).Magnitude > 0.5 then
             mk.Position = origin
             mk.Transparency = 0.3
-            if wbHL then wbHL.Enabled = true end
+            if wbBG then wbBG.Enabled = true end
         else
             mk.Transparency = 1
-            if wbHL then wbHL.Enabled = false end
+            if wbBG then wbBG.Enabled = false end
         end
     else
         mk.Transparency = 1
-        if wbHL then wbHL.Enabled = false end
+        if wbBG then wbBG.Enabled = false end
     end
 end))
 
@@ -1148,7 +1204,7 @@ do
     local Sec4 = CombatSub:Section({ Name = "Auto Stomp", Side = 2 })
     Sec4:Toggle({ Name = "Auto stomp", Flag = "HC_Stomp", Default = false,
         Callback = function(v) HC.stomp = v end })
-    Sec4:Toggle({ Name = "Auto stomp targets only", Flag = "HC_StompTargets", Default = false,
+    Sec4:Toggle({ Name = "Auto stomp Targets", Flag = "HC_StompTargets", Default = false,
         Callback = function(v) HC.stompTargets = v end })
     Sec4:Slider({ Name = "Stomp radius", Flag = "HC_StompRadius", Min = 1, Max = 30, Default = 5, Decimals = 0,
         Callback = function(v) HC.stompRadius = v end })
@@ -1278,7 +1334,7 @@ local function hcCleanup()
     if rbLine then pcall(function() rbLine:Remove() end) end
     if rbHL then pcall(function() rbHL:Destroy() end) end
     if wbMarker then pcall(function() wbMarker:Destroy() end) end
-    if wbHL then pcall(function() wbHL:Destroy() end) end
+    if wbBG then pcall(function() wbBG:Destroy() end) end
 end
 do
     local g = gv()
