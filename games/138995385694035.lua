@@ -110,10 +110,31 @@ local function targetParts(char)
 end
 -- ---- per-player CHECKS (Checks tab) -- respected by all targeting + shooting ----
 local function isGrabbed(plr)
-    local m = hcModel(plr)
-    local fx = m and m:FindFirstChild("BodyEffects")
-    local g = fx and fx:FindFirstChild("Grabbed")
-    return g ~= nil and g.Value ~= nil
+    -- The GRABBER's BodyEffects.Grabbed (ObjectValue) points at the VICTIM; the victim's
+    -- OWN Grabbed stays empty. So `plr` is grabbed iff some OTHER player's Grabbed value
+    -- references plr (as the player, its character, or a descendant of it). Matching is
+    -- broad so it works whether the value is the Player, the workspace character, or name.
+    local tChar = hcModel(plr)
+    for _, other in ipairs(Players:GetPlayers()) do
+        if other ~= plr then
+            local m = hcModel(other)
+            local fx = m and m:FindFirstChild("BodyEffects")
+            local g = fx and fx:FindFirstChild("Grabbed")
+            local val = g and g.Value
+            if val ~= nil then
+                if type(val) == "string" then
+                    if val == plr.Name then return true end
+                elseif val == plr or val == plr.Character or val == tChar then
+                    return true
+                elseif typeof(val) == "Instance" then
+                    if val.Name == plr.Name then return true end
+                    if tChar and val:IsDescendantOf(tChar) then return true end
+                    if plr.Character and val:IsDescendantOf(plr.Character) then return true end
+                end
+            end
+        end
+    end
+    return false
 end
 local function hasForceField(plr)
     local ch = plr.Character
