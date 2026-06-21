@@ -7,7 +7,7 @@
 --  Identity: a Tool named "Gun" -> Sheriff, "Knife" -> Murderer
 --  (checked in the Character AND the Backpack).
 --    * Sheriff shoot : Gun.Shoot:FireServer(originCF, targetCF)  -- origin FIRST
---      (we spoof origin to point-blank by the murderer so the server's ray can't miss)
+--      (origin = our real GunRaycastAttachment; target = murderer's head)
 --    * Murderer knife: Knife.Events.KnifeStabbed:FireServer() (swing) then
 --                      Knife.Events.HandleTouched:FireServer(victimPart) per kill
 --    * Gun pickup    : briefly teleport HRP onto a "GunDrop" BasePart
@@ -58,7 +58,6 @@ end
 --  The Gun's "Shoot" remote works whether the Gun is equipped
 --  (in Character) or just held in the Backpack.
 -- ============================================================
-local wallbang = false   -- Sheriff: spoof the shot origin point-blank by the murderer (through walls)
 local function findGunShoot()
     local function pull(parent)
         local gun = parent and parent:FindFirstChild("Gun")
@@ -102,22 +101,11 @@ local function shootMurderer()
     local part = targetHitPart(victim.Character)
     if not part then return false, "no_victim" end
     local theirCF = part.CFrame
-    local origin
-    if wallbang then
-        -- WALLBANG: put the origin ~2 studs from the murderer, AIMED at them, so the
-        -- server's origin->hit ray starts right next to the target -- past any wall
-        -- between us and them, and at any distance.
-        local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local toUs = myHrp and (myHrp.Position - part.Position) or Vector3.new(0, 0, 2)
-        local dir = (toUs.Magnitude > 1) and toUs.Unit or Vector3.new(0, 0, 1)
-        origin = CFrame.new(part.Position + dir * 2, part.Position)
-    else
-        -- LEGIT: our real gun muzzle -- line-of-sight only, like a normal shot.
-        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local att = hrp and hrp:FindFirstChild("GunRaycastAttachment")
-        origin = (att and att.WorldCFrame) or (hrp and hrp.CFrame) or CFrame.new()
-    end
-    -- the game sends Shoot:FireServer(originCF, targetCF) -- origin FIRST, target SECOND.
+    -- origin = our REAL gun muzzle (GunRaycastAttachment) -- matches what the game sends,
+    -- so it always passes the server's origin check. Correct arg order (origin, target).
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local att = hrp and hrp:FindFirstChild("GunRaycastAttachment")
+    local origin = (att and att.WorldCFrame) or (hrp and hrp.CFrame) or CFrame.new()
     pcall(function() remote:FireServer(origin, theirCF) end)
     return true
 end
@@ -345,8 +333,6 @@ SheriffSec:Button({ Name = "Shoot murderer", Callback = tryShoot })
 SheriffSec:Label({ Name = "Shoot key" }):Keybind({
     Name = "Shoot murderer", Flag = "MM2_ShootKey", Mode = "Hold", Default = Enum.KeyCode.K,
     Callback = function(state2) if state2 then tryShoot() end end })
-SheriffSec:Toggle({ Name = "Wallbang (through walls)", Flag = "MM2_Wallbang", Default = false,
-    Callback = function(v) wallbang = v end })
 
 local KnifeSec = Sub:Section({ Name = "Murderer knife", Side = 1 })
 KnifeSec:Button({ Name = "Kill all", Callback = function() knifeKillAll(nil) end })
