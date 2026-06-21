@@ -355,7 +355,7 @@ do
                 local o, a = Combat.lineOrigin
                 if o == "Top" then a = Vector2.new(vs.X * 0.5, 0)
                 elseif o == "Center" then a = Vector2.new(vs.X * 0.5, vs.Y * 0.5)
-                elseif o == "Mouse" then a = UserInputService:GetMouseLocation()
+                elseif o == "Mouse" then a = UserInputService:GetMouseLocation() - game:GetService("GuiService"):GetGuiInset()
                 else a = Vector2.new(vs.X * 0.5, vs.Y) end   -- Bottom (default)
                 local b = Vector2.new(sp.X, sp.Y)
                 local mid, d = (a + b) / 2, (b - a)
@@ -1167,22 +1167,27 @@ do
     end
 
     -- ---------- Orbit ----------
-    local orbit = { on = false, dist = 4, speed = 400, minH = 0, maxH = 0,
+    local orbit = { on = false, dist = 4, speed = 400, minH = 0, maxH = 0, heightOn = false,
         lookAt = true, fakePos = false, desync = false, pattern = "Orbit" }
     local _attached, _angle, _orbitReal = false, 0, nil
-    -- the orbit offset around the target for the chosen pattern; height sweeps min..max
+    -- offset around the target for the chosen pattern. The Min/Max height bob is added on
+    -- top only when the Height toggle is on (each pattern already has its own base shape).
     local function orbitOffset()
         local rad = math.rad(_angle)
-        local d, span = orbit.dist, (orbit.maxH - orbit.minH)
-        local bob = orbit.minH + span * (0.5 + 0.5 * math.sin(rad))   -- bob between min/max
+        local d = orbit.dist
+        local bob = 0
+        if orbit.heightOn then
+            local mid, span = (orbit.minH + orbit.maxH) * 0.5, (orbit.maxH - orbit.minH)
+            bob = mid + (span * 0.5) * math.sin(rad)   -- bob between min/max once per revolution
+        end
         local p = orbit.pattern
-        if p == "Planetary" then          -- tilted ring (rises over + dips under the target)
-            return Vector3.new(math.cos(rad) * d, math.sin(rad) * d * 0.6 + bob, math.sin(rad) * d * 0.6)
-        elseif p == "Vertical" then        -- loop straight over the top
+        if p == "Planetary" then           -- tilted ring (rises over + dips under the target)
+            return Vector3.new(math.cos(rad) * d, math.sin(rad) * d * 0.7 + bob, math.sin(rad) * d * 0.5)
+        elseif p == "Vertical" then        -- vertical loop straight over the top
             return Vector3.new(0, math.sin(rad) * d + bob, math.cos(rad) * d)
-        elseif p == "Spiral" then          -- flat ring while height sweeps min->max
-            return Vector3.new(math.cos(rad) * d, orbit.minH + span * ((_angle % 360) / 360), math.sin(rad) * d)
-        else                               -- "Orbit": flat horizontal ring, height bobs min..max
+        elseif p == "Spiral" then          -- flat ring with a slow continuous vertical wind
+            return Vector3.new(math.cos(rad) * d, math.sin(math.rad(_angle * 0.25)) * d + bob, math.sin(rad) * d)
+        else                               -- "Orbit": plain flat horizontal ring
             return Vector3.new(math.cos(rad) * d, bob, math.sin(rad) * d)
         end
     end
@@ -1250,6 +1255,8 @@ do
         Callback = function(v) orbit.dist = v end })
     OSec:Slider({ Name = "Speed", Flag = "FlingOrbitSpeed", Min = 0, Max = 3000, Default = 400, Decimals = 0,
         Callback = function(v) orbit.speed = v end })
+    OSec:Toggle({ Name = "Height (min/max)", Flag = "FlingOrbitHeightOn", Default = false,
+        Callback = function(v) orbit.heightOn = v end })
     OSec:Slider({ Name = "Min height", Flag = "FlingOrbitMinH", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
         Callback = function(v) orbit.minH = v end })
     OSec:Slider({ Name = "Max height", Flag = "FlingOrbitMaxH", Min = -20, Max = 20, Default = 0, Decimals = 1, Suffix = " studs",
