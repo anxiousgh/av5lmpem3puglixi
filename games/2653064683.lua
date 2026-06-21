@@ -3,9 +3,10 @@
 --
 --  Auto-answer. The game validates words SERVER-side (no client dictionary), so we
 --  just feed it a REAL word containing the current syllable, fetched from an English
---  word list. Submit = Network.Games.GameEvent:FireServer(GameID, "TypingEvent", word, true)
---  (the game's own final-submit call). The syllable is the InfoFrame.TextFrame letters;
---  it's our turn when the Typebar.Typebox goes Active. GameID is captured off GameEvent.
+--  word list. The syllable + whose turn it is are read from the game Data (found via
+--  getgc): Data.Prompt = clean syllable, Data.Players[Data.PossessorIndex] = current
+--  UserId. Blatant submit = GameEvent:FireServer(GameID,"TypingEvent",word,true) (the
+--  game's own final-submit). Legit submit = real keystrokes via VirtualInputManager.
 -- ============================================================
 local ctx = ({ ... })[1]
 local Library = ctx.Library
