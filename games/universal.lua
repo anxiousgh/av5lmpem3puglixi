@@ -1167,39 +1167,65 @@ do
     end
 
     -- ---------- Orbit ----------
-    local orbit = { on = false, dist = 4, speed = 400, height = 0, lookAt = true, fakePos = false, threeD = false }
-    local _attached, _angle = false, 0
+    local orbit = { on = false, dist = 4, speed = 400, height = 0, lookAt = true, fakePos = false, desync = false, threeD = false }
+    local _attached, _angle, _orbitReal = false, 0, nil
     local function orbitDetach()
         if not _attached then return end
         local hrp = getHRP()
         if hrp and sethiddenproperty then pcall(function() sethiddenproperty(hrp, "PhysicsRepRootPart", hrp) end) end
         _attached = false
     end
+    local function orbitRestoreReal()   -- put our real character back (desync mode)
+        if not _orbitReal then return end
+        local hrp = getHRP()
+        if hrp then pcall(function() hrp.CFrame = _orbitReal end) end
+        _orbitReal = nil
+    end
     track(RunService.Heartbeat:Connect(function(dt)
-        if not orbit.on then orbitDetach(); return end
+        if not orbit.on then orbitDetach(); orbitRestoreReal(); return end
         local hrp, tHrp = getHRP(), selectedHRP()
-        if not (hrp and tHrp) then orbitDetach(); return end
+        if not (hrp and tHrp) then orbitDetach(); orbitRestoreReal(); return end
         _angle = (_angle + orbit.speed * dt) % 360
         local rad = math.rad(_angle)
         local off = Vector3.new(math.cos(rad), 0, math.sin(rad)) * orbit.dist
         if orbit.threeD then off = off + Vector3.new(0, math.sin(rad * 2) * orbit.dist, 0) end  -- orbit on more directions
         local pos = tHrp.Position + off + Vector3.new(0, orbit.height, 0)
-        if orbit.fakePos then
-            -- fake pos resolver: re-root our physics replication onto the target so the
-            -- orbit sticks server-side (network ownership + PhysicsRepRootPart).
-            pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
-            pcall(function() tHrp:SetNetworkOwner(LocalPlayer) end)
-            if sethiddenproperty then pcall(function() sethiddenproperty(hrp, "PhysicsRepRootPart", tHrp) end) end
-            _attached = true
-        elseif _attached then
-            orbitDetach()
+        local cf = orbit.lookAt and CFrame.new(pos, tHrp.Position) or CFrame.new(pos)
+        if orbit.desync then
+            -- custom-desync style: replicate the orbit pose to the server each Heartbeat but
+            -- keep our REAL character where it is (restored each RenderStep) -- the server
+            -- sees us orbiting (flings the target) while we don't actually move there.
+            if _attached then orbitDetach() end
+            _orbitReal = hrp.CFrame   -- our real home (RenderStep restored it last frame)
+            pcall(function()
+                hrp.CFrame = cf
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end)
+        else
+            orbitRestoreReal()   -- in case desync was just turned off
+            if orbit.fakePos then
+                -- fake pos resolver: re-root our physics replication onto the target.
+                pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+                pcall(function() tHrp:SetNetworkOwner(LocalPlayer) end)
+                if sethiddenproperty then pcall(function() sethiddenproperty(hrp, "PhysicsRepRootPart", tHrp) end) end
+                _attached = true
+            elseif _attached then
+                orbitDetach()
+            end
+            pcall(function()
+                hrp.CFrame = cf
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end)
         end
-        pcall(function()
-            hrp.CFrame = orbit.lookAt and CFrame.new(pos, tHrp.Position) or CFrame.new(pos)
-            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        end)
     end))
+    RunService:BindToRenderStep("WH_FlingOrbitRestore", Enum.RenderPriority.First.Value, function()
+        if orbit.on and orbit.desync and _orbitReal then
+            local hrp = getHRP()
+            if hrp then pcall(function() hrp.CFrame = _orbitReal end) end
+        end
+    end)
 
     local OSec = FlingSub:Section({ Name = "Orbit", Side = 1 })
     OSec:Toggle({ Name = "Orbit selected player", Flag = "FlingOrbit", Default = false,
@@ -1214,6 +1240,8 @@ do
         Callback = function(v) orbit.lookAt = v end })
     OSec:Toggle({ Name = "Fake Pos", Flag = "FlingOrbitFakePos", Default = false,
         Callback = function(v) orbit.fakePos = v end })
+    OSec:Toggle({ Name = "Desync", Flag = "FlingOrbitDesync", Default = false,
+        Callback = function(v) orbit.desync = v end })
     OSec:Toggle({ Name = "Orbit directions", Flag = "FlingOrbitDirs", Default = false,
         Callback = function(v) orbit.threeD = v end })
 
@@ -1222,7 +1250,14 @@ do
     -- server flings whoever you touch) but RESTORE your real velocity on RenderStep, so
     -- locally you don't actually get launched.
     local velOn, velMag, velReal = false, 16384, nil
-    local function setVel(on) velOn = on end
+    local function setVel(on)
+        velOn = on
+        if not on then   -- clear the leftover huge velocity so turning off doesn't launch you
+            local hrp = getHRP()
+            if hrp then pcall(function() hrp.AssemblyLinearVelocity = velReal or Vector3.new(0, 0, 0) end) end
+            velReal = nil
+        end
+    end
     track(RunService.Heartbeat:Connect(function()
         if not velOn then return end
         local hrp = getHRP(); if not hrp then return end
