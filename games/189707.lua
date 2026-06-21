@@ -43,7 +43,7 @@ track(RunService.RenderStepped:Connect(function()
             hrp.AssemblyLinearVelocity = Vector3.new(v.X, -FALL_CAP, v.Z)
         end
     end
-end)
+end))
 
 do
     local Sub = MainPage:SubPage({ Name = "Survival" })
