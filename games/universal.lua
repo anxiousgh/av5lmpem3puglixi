@@ -284,6 +284,100 @@ end
 -- ============================================================
 --  CAMLOCK  (camera lock to the nearest target inside the FOV)
 -- ============================================================
+-- ============================================================
+--  SHARED LOCKED TARGET  (Combat > Target subpage)
+--  One locked Player that camlock, triggerbot and the Fling orbit all use. Lock =
+--  the player nearest the mouse; pressing the lock key again clears it. Optional
+--  tracer line + outline follow whoever's locked.
+-- ============================================================
+local Combat = {
+    target = nil,
+    line = false, outline = false,
+    lineColor = Color3.fromRGB(255, 60, 60), outlineColor = Color3.fromRGB(255, 80, 80),
+}
+local function combatValid()
+    local plr = Combat.target
+    if plr and (plr == LocalPlayer or not plr.Parent) then Combat.target = nil end
+    return Combat.target
+end
+local function combatChar()
+    local plr = combatValid()
+    return plr and plr.Character
+end
+local function combatPart()   -- nil while dead (keep them locked through respawn)
+    local ch = combatChar(); if not ch then return nil end
+    local hum = ch:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return nil end
+    return ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart") or ch:FindFirstChildWhichIsA("BasePart")
+end
+local function combatLockClosest()
+    local cam = Workspace.CurrentCamera
+    local mouse = UserInputService:GetMouseLocation()
+    local best, bestD
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local c = aliveChar(plr)
+            local part = c and (c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Head"))
+            if part then
+                local sp, on = cam:WorldToViewportPoint(part.Position)
+                if on then
+                    local d = (mouse - Vector2.new(sp.X, sp.Y)).Magnitude
+                    if not bestD or d < bestD then bestD, best = d, plr end
+                end
+            end
+        end
+    end
+    Combat.target = best
+end
+local function combatToggleLock()
+    if Combat.target then Combat.target = nil else combatLockClosest() end
+end
+-- target visuals: tracer (GUI frame -- Drawing.Line flickers on this executor) + outline
+do
+    local gui, line, hl
+    local function ensureGui()
+        if gui and gui.Parent then return end
+        gui = Instance.new("ScreenGui")
+        gui.Name = "_wh_target"; gui.ResetOnSpawn = false; gui.IgnoreGuiInset = false
+        pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+        if not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+        line = Instance.new("Frame")
+        line.BorderSizePixel = 0; line.AnchorPoint = Vector2.new(0.5, 0.5); line.Visible = false; line.Parent = gui
+    end
+    track(RunService.RenderStepped:Connect(function()
+        local part = combatPart()
+        if Combat.line and part then
+            ensureGui()
+            local cam = Workspace.CurrentCamera
+            local sp = cam:WorldToViewportPoint(part.Position)
+            if sp.Z > 0 then
+                local vs = cam.ViewportSize
+                local a, b = Vector2.new(vs.X * 0.5, vs.Y), Vector2.new(sp.X, sp.Y)
+                local mid, d = (a + b) / 2, (b - a)
+                line.Size = UDim2.fromOffset(2, d.Magnitude)
+                line.Position = UDim2.fromOffset(mid.X, mid.Y)
+                line.Rotation = math.deg(math.atan2(d.Y, d.X)) - 90
+                line.BackgroundColor3 = Combat.lineColor
+                line.Visible = true
+            elseif line then line.Visible = false end
+        elseif line then line.Visible = false end
+
+        local ch = combatChar()
+        if Combat.outline and ch then
+            if not (hl and hl.Parent) then
+                hl = Instance.new("Highlight")
+                hl.FillTransparency = 1; hl.OutlineTransparency = 0
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                pcall(function() hl.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+                if not hl.Parent then hl.Parent = Workspace end
+            end
+            if hl.Adornee ~= ch then hl.Adornee = ch end
+            hl.OutlineColor = Combat.outlineColor
+            hl.Enabled = true
+        elseif hl then hl.Enabled = false end
+    end))
+end
+
 local CamLock = {
     enabled = false, fov = 120, smoothing = 0.5, sticky = false,
     teamCheck = true, hitPart = "Head", visibleCheck = false, showFov = false,
@@ -342,7 +436,11 @@ do
         if Library.WindowOpenState then return end   -- don't fight you while in the menu
 
         local part, plr
-        if CamLock.sticky then
+        if combatValid() then
+            -- a manually locked target (Combat > Target) overrides the closest-pick
+            plr = Combat.target
+            part = resolvePart(plr)
+        elseif CamLock.sticky then
             -- keep the current target while valid; only re-acquire when it drops
             part = stickyPart(stickyTarget)
             if part then plr = stickyTarget
@@ -395,6 +493,7 @@ do
         local model = res.Instance:FindFirstAncestorOfClass("Model")
         local plr = model and Players:GetPlayerFromCharacter(model)
         if not plr or plr == LocalPlayer then return end
+        if combatValid() and plr ~= Combat.target then return end   -- only the locked target
         if not teamOk(plr, Trig.teamCheck) then return end
         if not aliveChar(plr) then return end
         if (tick() - lastShot) * 1000 < Trig.delay then return end
@@ -709,6 +808,26 @@ end
 --  COMBAT  (Aimbot = camlock, Triggerbot)
 -- ============================================================
 local CombatPage = Window:Page({ Name = "Combat" })
+
+local TargetSub = CombatPage:SubPage({ Name = "Target" })
+do
+    local Sec = TargetSub:Section({ Name = "Lock", Side = 1 })
+    Sec:Label({ Name = "Lock / unlock key (closest to mouse)" }):Keybind({
+        Name = "Lock target", Flag = "TargetLockKey", Mode = "Hold", Default = Enum.KeyCode.T,
+        Callback = function(state) if state then combatToggleLock() end end })
+    Sec:Button({ Name = "Lock nearest to mouse", Callback = combatLockClosest })
+    Sec:Button({ Name = "Unlock", Callback = function() Combat.target = nil end })
+
+    local Sec2 = TargetSub:Section({ Name = "Visuals", Side = 2 })
+    Sec2:Toggle({ Name = "Tracer line", Flag = "TargetLine", Default = false,
+        Callback = function(v) Combat.line = v end })
+    Sec2:Label({ Name = "Line color" }):Colorpicker({ Flag = "TargetLineColor", Default = Combat.lineColor,
+        Callback = function(c) Combat.lineColor = c end })
+    Sec2:Toggle({ Name = "Outline", Flag = "TargetOutline", Default = false,
+        Callback = function(v) Combat.outline = v end })
+    Sec2:Label({ Name = "Outline color" }):Colorpicker({ Flag = "TargetOutlineColor", Default = Combat.outlineColor,
+        Callback = function(c) Combat.outlineColor = c end })
+end
 
 local AimSub = CombatPage:SubPage({ Name = "Aimbot" })
 do
@@ -1045,10 +1164,7 @@ end
 local FlingSub = PlayerPage:SubPage({ Name = "Fling" })
 do
     local function selectedHRP()
-        local pl = ctx.Playerlist
-        local sel = pl and pl.Selected
-        local plr = sel and sel.Player
-        local ch = plr and plr.Character
+        local ch = combatChar()   -- the locked target (Combat > Target subpage)
         return ch and ch:FindFirstChild("HumanoidRootPart")
     end
 
@@ -1104,16 +1220,22 @@ do
         Callback = function(v) orbit.threeD = v end })
 
     -- ---------- Velocity (moved out of Desync) ----------
-    local velMag, velConn = 16384, nil
-    local function setVel(on)
-        if velConn then velConn:Disconnect(); velConn = nil end
-        if on then
-            velConn = track(RunService.Heartbeat:Connect(function()
-                local hrp = getHRP()
-                if hrp then pcall(function() hrp.AssemblyLinearVelocity = Vector3.one * velMag end) end
-            end))
-        end
-    end
+    -- Same as the old velocity desync: REPLICATE the huge velocity on Heartbeat (so the
+    -- server flings whoever you touch) but RESTORE your real velocity on RenderStep, so
+    -- locally you don't actually get launched.
+    local velOn, velMag, velReal = false, 16384, nil
+    local function setVel(on) velOn = on end
+    track(RunService.Heartbeat:Connect(function()
+        if not velOn then return end
+        local hrp = getHRP(); if not hrp then return end
+        velReal = hrp.AssemblyLinearVelocity
+        pcall(function() hrp.AssemblyLinearVelocity = Vector3.one * velMag end)
+    end))
+    RunService:BindToRenderStep("WH_FlingVelRestore", Enum.RenderPriority.First.Value, function()
+        if not velOn then return end
+        local hrp = getHRP()
+        if hrp and velReal then pcall(function() hrp.AssemblyLinearVelocity = velReal end) end
+    end)
     local VSec = FlingSub:Section({ Name = "Velocity", Side = 2 })
     local velToggle = VSec:Toggle({ Name = "Velocity fling", Flag = "FlingVel", Default = false,
         Callback = function(v) setVel(v) end })
