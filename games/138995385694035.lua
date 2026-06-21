@@ -3,8 +3,8 @@
 --
 --  "Main" tab first, then the universal base. Subpages:
 --    Combat   : Target, Force Hit, Auto Reload, Auto Stomp, Auto Stomp Targets
---    Ragebot  : Auto Shoot, Auto Equip, Voidshoot
---    Knife Bot: knife aura (attach/orbit) + auto-equip knife
+--    Ragebot  : Auto Shoot, Auto Equip
+--    Knife Bot: knife aura (attach/orbit) + auto-equip knife + knife reach (+visualizer)
 --    Checks   : visible(+origin)/knocked/grabbed/forcefield/loaded -- global
 --               target-validity filters respected by all targeting + shooting
 --    Misc     : Anti-AFK badge, Force-AFK badge
@@ -90,6 +90,7 @@ local HC = {
     -- knife bot
     knifeAura = false, knifeDist = 3, knifeInterval = 0.6, knifeOrbit = false, knifeOrbitSpeed = 180,
     knifeEquip = false,
+    knifeReach = false, knifeReachSize = 10, knifeReachVis = false,
     -- afk
     antiAfk = false, forceAfk = false,
     -- visuals
@@ -673,7 +674,6 @@ track(UIS.InputBegan:Connect(function(input, gpe)
     local char = plr.Character; if not char then return end
     local part = forceShotPart(char); if not part then return end
     _fhLast = tick()
-    publishTarget(plr)
     fireShootAt(part)
 end))
 
@@ -730,7 +730,6 @@ track(RunService.Heartbeat:Connect(function()
     if tick() - _asLast < HC.autoShootCooldown then return end
     local plr = getTarget()
     if not plr then voidUnglue(); return end
-    publishTarget(plr)
     local char = plr.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
@@ -870,6 +869,52 @@ task.spawn(function()
     end
 end)
 
+-- ---- KNIFE REACH: resize [Knife]/Handle/HITBOX_PART (max 13 -- above trips HC's
+--      anti-cheat). Re-applied on Heartbeat so it survives respawn/re-equip. The
+--      visualizer puts a Highlight on the (resized) hitbox so you see the real reach. ----
+local KR_DEFAULT = Vector3.new(2.5, 1, 1)
+local KR_MAX = 13
+local function knifeHitbox()
+    local function find(p)
+        local k = p and p:FindFirstChild(KNIFE_NAME)
+        local h = k and k:FindFirstChild("Handle")
+        return h and h:FindFirstChild("HITBOX_PART")
+    end
+    return find(LocalPlayer.Character) or find(LocalPlayer:FindFirstChild("Backpack"))
+end
+local function knifeReachRestore()
+    local hb = knifeHitbox()
+    if hb then
+        pcall(function() hb.Size = KR_DEFAULT; hb.Transparency = 1 end)
+        local hl = hb:FindFirstChild("_kr_hl"); if hl then hl:Destroy() end
+    end
+end
+track(RunService.Heartbeat:Connect(function()
+    local hb = knifeHitbox(); if not hb then return end
+    if HC.knifeReach then
+        local s = math.clamp(HC.knifeReachSize or 10, 1, KR_MAX)
+        local target = Vector3.new(s, s, s)
+        if hb.Size ~= target then pcall(function() hb.Size = target end) end
+        if hb.Transparency ~= 0.9999 then pcall(function() hb.Transparency = 0.9999 end) end
+        local hl = hb:FindFirstChild("_kr_hl")
+        if HC.knifeReachVis then
+            if not hl then
+                hl = Instance.new("Highlight")
+                hl.Name = "_kr_hl"
+                hl.Adornee = hb
+                hl.FillColor = Color3.fromRGB(255, 90, 90)
+                hl.FillTransparency = 0.75
+                hl.OutlineColor = Color3.fromRGB(255, 90, 90)
+                hl.OutlineTransparency = 0
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                hl.Parent = hb
+            end
+        elseif hl then hl:Destroy() end
+    else
+        if hb.Size ~= KR_DEFAULT then knifeReachRestore() end
+    end
+end))
+
 -- ============================================================
 --  AFK BADGES  (MainEvent RequestAFKDisplay + watch HRP.CharacterAFK)
 -- ============================================================
@@ -911,8 +956,11 @@ track(RunService.RenderStepped:Connect(function()
     -- show who we'll ACTUALLY attack (all checks). If nobody is engageable, fall back
     -- to the no-checks pick so the visual stays on the locked target (e.g. a knocked
     -- person we can't hit) instead of vanishing.
+    local g = gv()
+    local indicatorOn = g and g.WH and g.WH.targetIndicatorOn
     local plr = nil
-    if HC.targetLine or HC.targetOutline then plr = getTarget(false) or getTarget(true) end
+    if HC.targetLine or HC.targetOutline or indicatorOn then plr = getTarget(false) or getTarget(true) end
+    publishTarget(plr)  -- target GUI follows the SAME ignore-checks pick as the visuals
     local char = plr and plr.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     -- line
@@ -1025,10 +1073,6 @@ do
         Callback = function(v) HC.autoEquip = v end })
     Sec2:Textbox({ Name = "Tool name", Flag = "HC_AutoEquipTool", Placeholder = "exact tool name",
         Callback = function(v) HC.autoEquipTool = v or "" end })
-
-    local Sec3 = RageSub:Section({ Name = "Voidshoot", Side = 2 })
-    Sec3:Toggle({ Name = "Voidshoot (desync to target)", Flag = "HC_Voidshoot", Default = false,
-        Callback = function(v) HC.voidshoot = v; if not v then voidUnglue() end end })
 end
 
 -- 3) Knife Bot
@@ -1049,6 +1093,14 @@ do
     local Sec2 = KnifeSub:Section({ Name = "Knife", Side = 2 })
     Sec2:Toggle({ Name = "Auto equip knife", Flag = "HC_KnifeEquip", Default = false,
         Callback = function(v) HC.knifeEquip = v end })
+
+    local Sec3 = KnifeSub:Section({ Name = "Knife reach", Side = 2 })
+    Sec3:Toggle({ Name = "Knife reach", Flag = "HC_KnifeReach", Default = false,
+        Callback = function(v) HC.knifeReach = v end })
+    Sec3:Slider({ Name = "Reach", Flag = "HC_KnifeReachSize", Min = 2, Max = 13, Default = 10, Decimals = 0, Suffix = " studs",
+        Callback = function(v) HC.knifeReachSize = v end })
+    Sec3:Toggle({ Name = "Reach visualizer", Flag = "HC_KnifeReachVis", Default = false,
+        Callback = function(v) HC.knifeReachVis = v end })
 end
 
 -- 4) Checks  -- global target-validity filters; everything that targets/shoots
@@ -1117,8 +1169,10 @@ local function hcCleanup()
     setForceHit(false)
     HC.autoShoot, HC.voidshoot, HC.stomp, HC.stompTargets, HC.reload = false, false, false, false, false
     HC.knifeAura, HC.knifeEquip, HC.antiAfk, HC.forceAfk = false, false, false, false
+    HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud = false, false, false
     voidUnglue()
+    pcall(knifeReachRestore)  -- put the knife hitbox back to normal size
     destroyAmmoHud()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_VS_RESTORE") end)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
