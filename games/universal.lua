@@ -1491,7 +1491,12 @@ do
         for _, part in ipairs(char:GetChildren()) do
             if part:IsA("BasePart") then               -- body part
                 local ok, p = pcall(function() return part:Clone() end)
-                if ok and p then prepPart(p); p.Parent = m; partMap[p] = part end
+                if ok and p then
+                    prepPart(p)
+                    if p.Name == "HumanoidRootPart" then p.Name = "Root" end  -- a stray "HumanoidRootPart" gets nuked by anti-cheat; rename it
+                    p.Parent = m
+                    partMap[p] = part
+                end
             elseif part:IsA("Accessory") then          -- hat / accessory: clone its Handle
                 local handle = part:FindFirstChild("Handle")
                 if handle and handle:IsA("BasePart") then
