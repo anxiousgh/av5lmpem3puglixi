@@ -1425,6 +1425,116 @@ end
 --  VISUALS  (ESP)
 -- ============================================================
 local VisualsPage = Window:Page({ Name = "Visuals" })
+
+-- ============================================================
+--  SERVER POS  -- a local clone of your body pinned to where your client is
+--  replicating to the server (the pre-physics / Stepped CFrame). With desync on
+--  it shows the gap; in sync it overlaps you. Client-created -> only you see it.
+-- ============================================================
+do
+    local SP = VisualsPage:SubPage({ Name = "Server Pos" })
+    local cfg = {
+        on = false, transparency = 0.5, material = "ForceField",
+        color = Color3.fromRGB(255, 60, 60),
+        outline = false, outlineColor = Color3.fromRGB(255, 255, 255),
+    }
+    local MATERIALS = { "ForceField", "Neon", "Plastic", "SmoothPlastic", "Glass", "Metal" }
+    local clone, hl, serverCF
+
+    local function applyStyle()
+        if not clone then return end
+        local mat = Enum.Material[cfg.material] or Enum.Material.ForceField
+        for _, p in ipairs(clone:GetChildren()) do
+            if p:IsA("BasePart") then
+                pcall(function()
+                    p.Color = cfg.color; p.Transparency = cfg.transparency; p.Material = mat
+                end)
+            end
+        end
+        if cfg.outline then
+            if not (hl and hl.Parent) then
+                hl = Instance.new("Highlight")
+                hl.FillTransparency = 1
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            end
+            hl.Adornee = clone; hl.OutlineColor = cfg.outlineColor; hl.Parent = clone
+        elseif hl then pcall(function() hl:Destroy() end); hl = nil end
+    end
+
+    local function clearClone()
+        if hl then pcall(function() hl:Destroy() end); hl = nil end
+        if clone then pcall(function() clone:Destroy() end); clone = nil end
+    end
+    local function buildClone()
+        clearClone()
+        local char = LocalPlayer.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+        local m = Instance.new("Model"); m.Name = "\0"
+        for _, part in ipairs(char:GetChildren()) do
+            if part:IsA("BasePart") then
+                local ok, p = pcall(function() return part:Clone() end)
+                if ok and p then
+                    for _, ch in ipairs(p:GetChildren()) do   -- keep only visual children
+                        if not (ch:IsA("SpecialMesh") or ch:IsA("Decal") or ch:IsA("Texture") or ch:IsA("DataModelMesh")) then
+                            pcall(function() ch:Destroy() end)
+                        end
+                    end
+                    p.Anchored = true; p.CanCollide = false; p.CanQuery = false
+                    p.CanTouch = false; p.Massless = true
+                    p.Parent = m
+                end
+            end
+        end
+        if not m:FindFirstChild("HumanoidRootPart") then m:Destroy(); return end
+        m.Parent = workspace   -- client-created instance: stays local, never replicates
+        clone = m
+        applyStyle()
+    end
+
+    -- capture the value the server receives (HRP CFrame just before physics)
+    track(RunService.Stepped:Connect(function()
+        if not cfg.on then return end
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then serverCF = hrp.CFrame end
+    end))
+    -- pin the clone to that CFrame, mirroring your current pose
+    track(RunService.RenderStepped:Connect(function()
+        if not (cfg.on and clone and serverCF) then return end
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local inv = hrp.CFrame:Inverse()
+        for _, cp in ipairs(clone:GetChildren()) do
+            if cp:IsA("BasePart") then
+                local rp = char:FindFirstChild(cp.Name)
+                if rp and rp:IsA("BasePart") then
+                    cp.CFrame = serverCF * (inv * rp.CFrame)
+                end
+            end
+        end
+    end))
+    track(LocalPlayer.CharacterAdded:Connect(function()
+        if cfg.on then task.wait(0.6); buildClone() end
+    end))
+
+    local Sec = SP:Section({ Name = "Server position clone", Side = 1 })
+    Sec:Toggle({ Name = "Enabled", Flag = "SrvPosOn", Default = false,
+        Callback = function(v) cfg.on = v; if v then buildClone() else clearClone() end end })
+    Sec:Slider({ Name = "Transparency", Flag = "SrvPosTrans", Min = 0, Max = 1, Default = 0.5, Decimals = 2,
+        Callback = function(v) cfg.transparency = v; applyStyle() end })
+    Sec:Dropdown({ Name = "Material", Flag = "SrvPosMat", Default = "ForceField", Multi = false, Items = MATERIALS,
+        Callback = function(v) cfg.material = (type(v) == "table" and v[1]) or v or "ForceField"; applyStyle() end })
+    Sec:Label({ Name = "Color" }):Colorpicker({ Flag = "SrvPosColor", Default = cfg.color,
+        Callback = function(c) cfg.color = c; applyStyle() end })
+
+    local Sec2 = SP:Section({ Name = "Outline", Side = 2 })
+    Sec2:Toggle({ Name = "Outline", Flag = "SrvPosOutline", Default = false,
+        Callback = function(v) cfg.outline = v; applyStyle() end })
+    Sec2:Label({ Name = "Outline color" }):Colorpicker({ Flag = "SrvPosOutlineColor", Default = cfg.outlineColor,
+        Callback = function(c) cfg.outlineColor = c; applyStyle() end })
+end
+
 local EspSub = VisualsPage:SubPage({ Name = "ESP" })
 do
     local Sec = EspSub:Section({ Name = "Player ESP", Side = 1 })
