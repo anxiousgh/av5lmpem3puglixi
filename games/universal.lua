@@ -1433,9 +1433,11 @@ do
         on = false, transparency = 0.5, material = "ForceField",
         color = Color3.fromRGB(255, 60, 60),
         outline = false, outlineColor = Color3.fromRGB(255, 255, 255),
+        extraDelay = 0.1,   -- clone lags by network ping + this, so it sits where the server actually has you
     }
     local MATERIALS = { "ForceField", "Neon", "Plastic", "SmoothPlastic", "Glass", "Metal" }
-    local clone, hl, serverCF
+    local clone, hl
+    local history = {}      -- timestamped {t, cf} samples of the replicated CFrame, oldest-first
 
     local function applyStyle()
         if not clone then return end
@@ -1487,19 +1489,28 @@ do
         applyStyle()
     end
 
-    -- capture the value the server receives (HRP CFrame just before physics)
+    -- buffer the value the server receives (HRP CFrame just before physics), timestamped
     track(RunService.Stepped:Connect(function()
         if not cfg.on then return end
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if hrp then serverCF = hrp.CFrame end
+        if not hrp then return end
+        local now = os.clock()
+        history[#history + 1] = { t = now, cf = hrp.CFrame }
+        while history[1] and now - history[1].t > 2 do table.remove(history, 1) end   -- keep ~2s of samples
     end))
-    -- pin the clone to that CFrame, mirroring your current pose
+    -- pin the clone to where you were (ping + extra) seconds ago = where the server has you NOW
     track(RunService.RenderStepped:Connect(function()
-        if not (cfg.on and clone and serverCF) then return end
+        if not (cfg.on and clone) or #history == 0 then return end
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not hrp then return end
+        local ping = 0; pcall(function() ping = LocalPlayer:GetNetworkPing() end)   -- seconds
+        local targetT = os.clock() - (ping + cfg.extraDelay)
+        local serverCF = history[1].cf
+        for i = #history, 1, -1 do            -- newest sample at or before targetT
+            if history[i].t <= targetT then serverCF = history[i].cf; break end
+        end
         local inv = hrp.CFrame:Inverse()
         for _, cp in ipairs(clone:GetChildren()) do
             if cp:IsA("BasePart") then
@@ -1523,6 +1534,8 @@ do
         Callback = function(v) cfg.material = (type(v) == "table" and v[1]) or v or "ForceField"; applyStyle() end })
     Sec:Label({ Name = "Color" }):Colorpicker({ Flag = "SrvPosColor", Default = cfg.color,
         Callback = function(c) cfg.color = c; applyStyle() end })
+    Sec:Slider({ Name = "Extra delay (ping +)", Flag = "SrvPosDelay", Min = 0, Max = 1, Default = 0.1, Decimals = 2, Suffix = "s",
+        Callback = function(v) cfg.extraDelay = v end })
 
     local Sec2 = SP:Section({ Name = "Outline", Side = 2 })
     Sec2:Toggle({ Name = "Outline", Flag = "SrvPosOutline", Default = false,
