@@ -1372,6 +1372,56 @@ do
 end
 
 -- ============================================================
+--  MISC  (utility toggles)
+-- ============================================================
+local MiscSub = PlayerPage:SubPage({ Name = "Misc" })
+do
+    local Sec = MiscSub:Section({ Name = "Chat", Side = 1 })
+    local TextChatService = game:GetService("TextChatService")
+    local StarterGui = game:GetService("StarterGui")
+    local function cfg(name) return TextChatService:FindFirstChild(name) end
+    local saved, chatOn, lastAssert = nil, false, 0
+
+    local function forceOn()
+        pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, true) end)
+        local cw, cib = cfg("ChatWindowConfiguration"), cfg("ChatInputBarConfiguration")
+        if cw then pcall(function() cw.Enabled = true end) end       -- new TextChatService window
+        if cib then pcall(function() cib.Enabled = true end) end     -- new chat input bar
+    end
+    local function applyChat(on)
+        if on then
+            if not saved then   -- remember the original state once, to restore later
+                saved = {}
+                local ok, v = pcall(function() return StarterGui:GetCoreGuiEnabled(Enum.CoreGuiType.Chat) end)
+                saved.core = ok and v or nil
+                local cw, cib = cfg("ChatWindowConfiguration"), cfg("ChatInputBarConfiguration")
+                saved.window = cw and cw.Enabled
+                saved.input  = cib and cib.Enabled
+            end
+            forceOn()
+        elseif saved then       -- restore exactly what it was before we forced it on
+            if saved.core ~= nil then
+                pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, saved.core) end)
+            end
+            local cw, cib = cfg("ChatWindowConfiguration"), cfg("ChatInputBarConfiguration")
+            if cw and saved.window ~= nil then pcall(function() cw.Enabled = saved.window end) end
+            if cib and saved.input ~= nil then pcall(function() cib.Enabled = saved.input end) end
+            saved = nil
+        end
+    end
+
+    Sec:Toggle({ Name = "Force enable chat", Flag = "ForceChat", Default = false,
+        Callback = function(v) chatOn = v; applyChat(v) end })
+    -- re-assert while on so a game that keeps disabling chat can't win it back
+    track(RunService.Heartbeat:Connect(function()
+        if not chatOn then return end
+        if tick() - lastAssert < 1 then return end
+        lastAssert = tick()
+        forceOn()
+    end))
+end
+
+-- ============================================================
 --  VISUALS  (ESP)
 -- ============================================================
 local VisualsPage = Window:Page({ Name = "Visuals" })
