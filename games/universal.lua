@@ -1363,8 +1363,6 @@ do
     local VSec = FlingSub:Section({ Name = "Velocity", Side = 2 })
     local velToggle = VSec:Toggle({ Name = "Velocity fling", Flag = "FlingVel", Default = false,
         Callback = function(v) setVel(v) end })
-    VSec:Toggle({ Name = "Through target", Flag = "FlingVelThrough", Default = false,
-        Callback = function(v) velThrough = v end })
     VSec:Slider({ Name = "Velocity magnitude", Flag = "FlingVelMag", Min = 50, Max = 16384, Default = 16384, Decimals = 0,
         Callback = function(v) velMag = v end })
     VSec:Label({ Name = "Toggle key" }):Keybind({ Name = "Velocity fling", Flag = "FlingVelKey", Mode = "Toggle",
@@ -1372,9 +1370,12 @@ do
 end
 
 -- ============================================================
---  MISC  (utility toggles)
+--  VISUALS  (ESP)
 -- ============================================================
-local MiscSub = PlayerPage:SubPage({ Name = "Misc" })
+local VisualsPage = Window:Page({ Name = "Visuals" })
+
+-- ---- Misc utility toggles (Force enable chat) ----
+local MiscSub = VisualsPage:SubPage({ Name = "Misc" })
 do
     local Sec = MiscSub:Section({ Name = "Chat", Side = 1 })
     local TextChatService = game:GetService("TextChatService")
@@ -1420,11 +1421,6 @@ do
         forceOn()
     end))
 end
-
--- ============================================================
---  VISUALS  (ESP)
--- ============================================================
-local VisualsPage = Window:Page({ Name = "Visuals" })
 
 -- ============================================================
 --  SERVER POS  -- a local clone of your body pinned to where your client is
