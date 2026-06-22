@@ -1373,9 +1373,13 @@ end
 --  VISUALS  (ESP)
 -- ============================================================
 local VisualsPage = Window:Page({ Name = "Visuals" })
+-- subpages pre-declared here to control tab order: ESP first, Misc last
+local EspSub    = VisualsPage:SubPage({ Name = "ESP" })
+local SrvPosSub = VisualsPage:SubPage({ Name = "Server Pos" })
+local WorldSub  = VisualsPage:SubPage({ Name = "World" })
+local MiscSub   = VisualsPage:SubPage({ Name = "Misc" })
 
 -- ---- Misc utility toggles (Force enable chat) ----
-local MiscSub = VisualsPage:SubPage({ Name = "Misc" })
 do
     local Sec = MiscSub:Section({ Name = "Chat", Side = 1 })
     local TextChatService = game:GetService("TextChatService")
@@ -1428,16 +1432,17 @@ end
 --  it shows the gap; in sync it overlaps you. Client-created -> only you see it.
 -- ============================================================
 do
-    local SP = VisualsPage:SubPage({ Name = "Server Pos" })
+    local SP = SrvPosSub
+    local EXTRA_DELAY = 0.11   -- clone lags by network ping + this (fixed); sits where the server has you
     local cfg = {
         on = false, transparency = 0.5, material = "ForceField",
         color = Color3.fromRGB(255, 60, 60),
         outline = false, outlineColor = Color3.fromRGB(255, 255, 255),
-        extraDelay = 0.1,   -- clone lags by network ping + this, so it sits where the server actually has you
     }
     local MATERIALS = { "ForceField", "Neon", "Plastic", "SmoothPlastic", "Glass", "Metal" }
     local clone, hl
     local history = {}      -- timestamped {t, cf} samples of the replicated CFrame, oldest-first
+    local partMap = {}      -- clonePart -> realPart (handles duplicate-named accessory Handles)
 
     local function applyStyle()
         if not clone then return end
@@ -1463,27 +1468,34 @@ do
         if hl then pcall(function() hl:Destroy() end); hl = nil end
         if clone then pcall(function() clone:Destroy() end); clone = nil end
     end
+    local function prepPart(p)   -- strip to visuals + make it a static local part
+        for _, ch in ipairs(p:GetChildren()) do
+            if not (ch:IsA("SpecialMesh") or ch:IsA("Decal") or ch:IsA("Texture") or ch:IsA("DataModelMesh")) then
+                pcall(function() ch:Destroy() end)
+            end
+        end
+        p.Anchored = true; p.CanCollide = false; p.CanQuery = false
+        p.CanTouch = false; p.Massless = true
+    end
     local function buildClone()
         clearClone()
+        partMap = {}
         local char = LocalPlayer.Character
         if not char or not char:FindFirstChild("HumanoidRootPart") then return end
         local m = Instance.new("Model"); m.Name = "\0"
         for _, part in ipairs(char:GetChildren()) do
-            if part:IsA("BasePart") then
+            if part:IsA("BasePart") then               -- body part
                 local ok, p = pcall(function() return part:Clone() end)
-                if ok and p then
-                    for _, ch in ipairs(p:GetChildren()) do   -- keep only visual children
-                        if not (ch:IsA("SpecialMesh") or ch:IsA("Decal") or ch:IsA("Texture") or ch:IsA("DataModelMesh")) then
-                            pcall(function() ch:Destroy() end)
-                        end
-                    end
-                    p.Anchored = true; p.CanCollide = false; p.CanQuery = false
-                    p.CanTouch = false; p.Massless = true
-                    p.Parent = m
+                if ok and p then prepPart(p); p.Parent = m; partMap[p] = part end
+            elseif part:IsA("Accessory") then          -- hat / accessory: clone its Handle
+                local handle = part:FindFirstChild("Handle")
+                if handle and handle:IsA("BasePart") then
+                    local ok, p = pcall(function() return handle:Clone() end)
+                    if ok and p then prepPart(p); p.Parent = m; partMap[p] = handle end
                 end
             end
         end
-        if not m:FindFirstChild("HumanoidRootPart") then m:Destroy(); return end
+        if not next(partMap) then m:Destroy(); return end
         m.Parent = workspace   -- client-created instance: stays local, never replicates
         clone = m
         applyStyle()
@@ -1506,18 +1518,15 @@ do
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not hrp then return end
         local ping = 0; pcall(function() ping = LocalPlayer:GetNetworkPing() end)   -- seconds
-        local targetT = os.clock() - (ping + cfg.extraDelay)
+        local targetT = os.clock() - (ping + EXTRA_DELAY)
         local serverCF = history[1].cf
         for i = #history, 1, -1 do            -- newest sample at or before targetT
             if history[i].t <= targetT then serverCF = history[i].cf; break end
         end
         local inv = hrp.CFrame:Inverse()
-        for _, cp in ipairs(clone:GetChildren()) do
-            if cp:IsA("BasePart") then
-                local rp = char:FindFirstChild(cp.Name)
-                if rp and rp:IsA("BasePart") then
-                    cp.CFrame = serverCF * (inv * rp.CFrame)
-                end
+        for cp, rp in pairs(partMap) do       -- body parts + accessory handles
+            if cp.Parent and rp.Parent then
+                cp.CFrame = serverCF * (inv * rp.CFrame)
             end
         end
     end))
@@ -1534,8 +1543,6 @@ do
         Callback = function(v) cfg.material = (type(v) == "table" and v[1]) or v or "ForceField"; applyStyle() end })
     Sec:Label({ Name = "Color" }):Colorpicker({ Flag = "SrvPosColor", Default = cfg.color,
         Callback = function(c) cfg.color = c; applyStyle() end })
-    Sec:Slider({ Name = "Extra delay (ping +)", Flag = "SrvPosDelay", Min = 0, Max = 1, Default = 0.1, Decimals = 2, Suffix = "s",
-        Callback = function(v) cfg.extraDelay = v end })
 
     local Sec2 = SP:Section({ Name = "Outline", Side = 2 })
     Sec2:Toggle({ Name = "Outline", Flag = "SrvPosOutline", Default = false,
@@ -1544,7 +1551,7 @@ do
         Callback = function(c) cfg.outlineColor = c; applyStyle() end })
 end
 
-local EspSub = VisualsPage:SubPage({ Name = "ESP" })
+-- EspSub pre-declared above (tab order)
 do
     local Sec = EspSub:Section({ Name = "Player ESP", Side = 1 })
     if not hasDrawing then
@@ -1724,7 +1731,7 @@ do
     end
 
     -- ---- UI ----
-    local WorldSub = VisualsPage:SubPage({ Name = "World" })
+    -- WorldSub pre-declared above (tab order)
 
     local LSec = WorldSub:Section({ Name = "Lighting", Side = 1 })
     LSec:Slider({ Name = "Time of day", Flag = "WorldTime", Min = 0, Max = 24,
