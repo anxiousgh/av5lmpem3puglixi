@@ -1468,12 +1468,17 @@ do
         if hl then pcall(function() hl:Destroy() end); hl = nil end
         if clone then pcall(function() clone:Destroy() end); clone = nil end
     end
-    local function prepPart(p)   -- strip to visuals + make it a static local part
+    local function prepPart(p)   -- bare mesh shape, NO textures, so custom color/material shows
         for _, ch in ipairs(p:GetChildren()) do
-            if not (ch:IsA("SpecialMesh") or ch:IsA("Decal") or ch:IsA("Texture") or ch:IsA("DataModelMesh")) then
-                pcall(function() ch:Destroy() end)
+            if ch:IsA("Decal") or ch:IsA("Texture") then
+                pcall(function() ch:Destroy() end)                 -- drop face / surface textures
+            elseif ch:IsA("DataModelMesh") then
+                if ch:IsA("SpecialMesh") then pcall(function() ch.TextureId = "" end) end  -- keep shape, drop its texture
+            else
+                pcall(function() ch:Destroy() end)                 -- welds / attachments / scripts / particles
             end
         end
+        if p:IsA("MeshPart") then pcall(function() p.TextureID = "" end) end   -- clear MeshPart texture
         p.Anchored = true; p.CanCollide = false; p.CanQuery = false
         p.CanTouch = false; p.Massless = true
     end
