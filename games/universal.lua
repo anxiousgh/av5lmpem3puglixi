@@ -1506,33 +1506,31 @@ do
         applyStyle()
     end
 
-    -- buffer the value the server receives (HRP CFrame just before physics), timestamped
+    -- buffer the FULL pose (every tracked part's world CFrame, pre-physics), timestamped,
+    -- so both position AND animation can be replayed delayed
     track(RunService.Stepped:Connect(function()
         if not cfg.on then return end
-        local char = LocalPlayer.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return end
         local now = os.clock()
-        history[#history + 1] = { t = now, cf = hrp.CFrame }
+        local snap = {}
+        for _, rp in pairs(partMap) do
+            if rp.Parent then snap[rp] = rp.CFrame end
+        end
+        history[#history + 1] = { t = now, poses = snap }
         while history[1] and now - history[1].t > 2 do table.remove(history, 1) end   -- keep ~2s of samples
     end))
-    -- pin the clone to where you were (ping + extra) seconds ago = where the server has you NOW
+    -- render the clone from the snapshot (ping + 0.11) seconds ago = the server's pose+pos NOW
     track(RunService.RenderStepped:Connect(function()
         if not (cfg.on and clone) or #history == 0 then return end
-        local char = LocalPlayer.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return end
         local ping = 0; pcall(function() ping = LocalPlayer:GetNetworkPing() end)   -- seconds
         local targetT = os.clock() - (ping + EXTRA_DELAY)
-        local serverCF = history[1].cf
+        local sample = history[1]
         for i = #history, 1, -1 do            -- newest sample at or before targetT
-            if history[i].t <= targetT then serverCF = history[i].cf; break end
+            if history[i].t <= targetT then sample = history[i]; break end
         end
-        local inv = hrp.CFrame:Inverse()
+        if not sample then return end
         for cp, rp in pairs(partMap) do       -- body parts + accessory handles
-            if cp.Parent and rp.Parent then
-                cp.CFrame = serverCF * (inv * rp.CFrame)
-            end
+            local cf = sample.poses[rp]
+            if cf and cp.Parent then cp.CFrame = cf end
         end
     end))
     track(LocalPlayer.CharacterAdded:Connect(function()
