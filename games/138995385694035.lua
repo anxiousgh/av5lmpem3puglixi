@@ -1216,14 +1216,24 @@ end))
 --      (restored ~1.5s later). Remember the real JumpPower and re-assert it whenever the
 --      game zeroes it, so jumping is never blocked. ----
 local _jpReal = 50
+local function _fjHum()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
 track(RunService.Heartbeat:Connect(function()
     if not HC.forceJump then return end
-    local c = LocalPlayer.Character
-    local hum = c and c:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
+    local hum = _fjHum(); if not hum then return end
     if hum.JumpPower > 0 then _jpReal = hum.JumpPower          -- learn the normal value
     elseif _jpReal > 0 then pcall(function() hum.JumpPower = _jpReal end) end  -- game zeroed it -> restore
     if not hum.UseJumpPower then pcall(function() hum.UseJumpPower = true end) end
+end))
+-- restore JumpPower the instant a jump is REQUESTED, to win the race against the game's
+-- zeroing. We do NOT force the jump state -- the normal mechanic only jumps when grounded,
+-- so this just lifts the 3-jump cap; it never becomes an infinite air-jump / fly.
+track(UIS.JumpRequest:Connect(function()
+    if not HC.forceJump then return end
+    local hum = _fjHum()
+    if hum and hum.JumpPower < _jpReal and _jpReal > 0 then pcall(function() hum.JumpPower = _jpReal end) end
 end))
 
 -- ============================================================
