@@ -1151,7 +1151,7 @@ local function tpShoot()
                 place(cf); RunService.Heartbeat:Wait()
             end
             local ls = tick()
-            while tick() - ls < 0.3 do place(cf); RunService.Heartbeat:Wait() end   -- linger so the shot is validated at the cover spot before we teleport back (avoids origin mismatch)
+            while tick() - ls < 0.5 do place(cf); RunService.Heartbeat:Wait() end   -- linger so the shot is validated at the cover spot before we teleport back (avoids origin mismatch)
         end)
         _tpsWallbang = false
         HC.wallbangOffset = savedWbOffset
