@@ -96,7 +96,7 @@ local HC = {
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
     tpShootMethod = "Wallbang", tpShootDist = 30,
     -- stomp / reload
-    stomp = false, stompTargets = false, stompRadius = 5,
+    stomp = false, stompTargets = false, stompRadius = 5, stompTeleport = false,
     reload = false, reloadKey = Enum.KeyCode.R, reloadThreshold = 0,
     -- knife bot
     knifeAura = false, knifeDist = 3, knifeInterval = 0.6, knifeOrbit = false, knifeOrbitSpeed = 180,
@@ -882,12 +882,19 @@ local function stompGlue(hrp)
     local lc = LocalPlayer.Character
     local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
     if not (lhrp and hrp) then return end
-    pcall(function() lhrp:SetNetworkOwner(LocalPlayer) end)
-    pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
-    if sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", hrp) end) end
-    _stompSavedCF = lhrp.CFrame                       -- our real spot
     local stompCF = CFrame.new(hrp.Position + Vector3.new(0, STOMP_Y, 0))
-    pcall(function() lhrp.CFrame = stompCF end)
+    if HC.stompTeleport then
+        -- TELEPORT mode: actually move on top of the victim (no desync, no local restore)
+        _stompSavedCF = nil
+        pcall(function() lhrp.CFrame = stompCF end)
+    else
+        -- SPOOF mode: desync our physics-rep root onto the victim, keep our real pose locally
+        pcall(function() lhrp:SetNetworkOwner(LocalPlayer) end)
+        pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+        if sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", hrp) end) end
+        _stompSavedCF = lhrp.CFrame                   -- our real spot (restored each RenderStep)
+        pcall(function() lhrp.CFrame = stompCF end)
+    end
     local g = gv(); if g and g.WH and g.WH.markServerCF then g.WH.markServerCF(stompCF) end   -- Server Pos clone follows the stomp
 end
 local function stompUnglue()
@@ -983,29 +990,9 @@ local function tpsCoverSpot(targetModel, thrp)
     if down then return CFrame.new(down.Position - Vector3.new(0, 6, 0)) end
     return CFrame.new(tpos - Vector3.new(0, 15, 0))
 end
--- fallback target: nearest player to the mouse (when nothing is locked)
-local function tpsNearestToMouse()
-    local cam = Workspace.CurrentCamera
-    local mouse = UIS:GetMouseLocation()
-    local best, bestD
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            local m = hcModel(p)
-            local hrp = m and m:FindFirstChild("HumanoidRootPart")
-            if hrp and not isDead(p) then
-                local sp, on = cam:WorldToViewportPoint(hrp.Position)
-                if on and sp.Z > 0 then
-                    local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
-                    if not bestD or d < bestD then bestD, best = d, p end
-                end
-            end
-        end
-    end
-    return best
-end
 local function tpShoot()
     if _tpsActive then return end
-    local plr = getTarget(false) or getTarget(true) or tpsNearestToMouse()
+    local plr = getTarget(false)          -- locked targets only, with all Checks applied
     if not plr then return end
     local tmodel = plr.Character or hcModel(plr)
     local thrp = tmodel and tmodel:FindFirstChild("HumanoidRootPart")
@@ -1013,6 +1000,8 @@ local function tpShoot()
     local lc = LocalPlayer.Character
     local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
     if not lhrp then return end
+    -- need a gun out -- default to the double barrel
+    if not lc:FindFirstChildOfClass("Tool") then tryEquipNamed("[DoubleBarrel]") end
 
     _tpsActive = true
     local saved = lhrp.CFrame
@@ -1056,9 +1045,11 @@ local function tpShoot()
                     cf = tpsCoverSpot(tmodel, thrp)
                     _tpsWallbang = true
                 end
-                for _ = 1, 8 do place(cf); RunService.Heartbeat:Wait() end   -- settle so the server registers us
+                local s = tick()
+                while tick() - s < 0.1 do place(cf); RunService.Heartbeat:Wait() end   -- settle so the server registers us
                 fire()
-                for _ = 1, 6 do place(cf); RunService.Heartbeat:Wait() end
+                s = tick()
+                while tick() - s < 0.12 do place(cf); RunService.Heartbeat:Wait() end   -- linger ~0.12s before returning
             end
         end)
         _tpsWallbang = false
@@ -1458,6 +1449,9 @@ do
         Callback = function(v) HC.stomp = v end })
     Sec4:Toggle({ Name = "Auto stomp Targets", Flag = "HC_StompTargets", Default = false,
         Callback = function(v) HC.stompTargets = v end })
+    Sec4:Dropdown({ Name = "Stomp Targets mode", Flag = "HC_StompMode", Default = "Spoof", Multi = false,
+        Items = { "Spoof", "Teleport" },
+        Callback = function(v) HC.stompTeleport = (((type(v) == "table" and v[1]) or v) == "Teleport") end })
     Sec4:Slider({ Name = "Stomp radius", Flag = "HC_StompRadius", Min = 1, Max = 30, Default = 5, Decimals = 0,
         Callback = function(v) HC.stompRadius = v end })
 end
