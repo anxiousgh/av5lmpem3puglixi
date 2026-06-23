@@ -1289,7 +1289,7 @@ do
     OSec:Dropdown({ Name = "Orbit directions", Flag = "FlingOrbitPattern", Default = "Orbit", Multi = false,
         Items = { "Orbit", "Planetary", "Vertical", "Spiral" },
         Callback = function(v) orbit.pattern = (type(v) == "table" and v[1]) or v or "Orbit" end })
-    OSec:Slider({ Name = "Distance", Flag = "FlingOrbitDist", Min = 0, Max = 30, Default = 4, Decimals = 1, Suffix = " studs",
+    OSec:Slider({ Name = "Distance", Flag = "FlingOrbitDist", Min = 0.05, Max = 30, Default = 4, Decimals = 2, Suffix = " studs",
         Callback = function(v) orbit.dist = v end })
     OSec:Slider({ Name = "Speed", Flag = "FlingOrbitSpeed", Min = 0, Max = 3000, Default = 400, Decimals = 0,
         Callback = function(v) orbit.speed = v end })
