@@ -836,11 +836,22 @@ do
                         local p1, p2 = char:FindFirstChild(bone[1]), char:FindFirstChild(bone[2])
                         local line = s[i]
                         if p1 and p2 and line then
-                            local a, aOn = cam:WorldToViewportPoint(p1.Position)
-                            local b, bOn = cam:WorldToViewportPoint(p2.Position)
-                            if aOn and bOn then
-                                setLine(line, Vector2.new(a.X, a.Y), Vector2.new(b.X, b.Y), Esp.color)
+                            -- godmode / displacement emotes fling a limb tens of studs away,
+                            -- which stretches its bone across the whole screen. A real bone
+                            -- segment is only a few studs -- drop anything implausibly long.
+                            if (p1.Position - p2.Position).Magnitude > 12 then
+                                line.Visible = false
+                            else
+                                local a, aOn = cam:WorldToViewportPoint(p1.Position)
+                                local b, bOn = cam:WorldToViewportPoint(p2.Position)
+                                if aOn and bOn then
+                                    setLine(line, Vector2.new(a.X, a.Y), Vector2.new(b.X, b.Y), Esp.color)
+                                else
+                                    line.Visible = false
+                                end
                             end
+                        elseif line then
+                            line.Visible = false
                         end
                     end
                 end
