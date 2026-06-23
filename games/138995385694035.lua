@@ -1016,6 +1016,18 @@ local function tpsCoverSpot(targetModel, thrp, part)
     end
     return nil
 end
+-- guaranteed fallback: drop just under the street/ground beneath the target. The road is
+-- the cover (they can't shoot down through it); the origin-spoof peeks straight up through
+-- the thin slab to the target. Works even if our body ends up inside the slab -- only the
+-- spoofed origin needs clear air, and that's a short hop up.
+local function tpsBelowStreet(targetModel, thrp)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = tpsIgnoreList(targetModel)
+    local down = Workspace:Raycast(thrp.Position + Vector3.new(0, 2, 0), Vector3.new(0, -200, 0), params)
+    local top = (down and down.Position) or (thrp.Position - Vector3.new(0, 3, 0))
+    return CFrame.new(top - Vector3.new(0, 3, 0))
+end
 local function tpShoot()
     if _tpsActive then return end
     local plr = getTarget(canEngageNoVis) -- locked targets, all Checks EXCEPT the visible check
@@ -1073,9 +1085,10 @@ local function tpShoot()
                     for _ = 1, 3 do RunService.Heartbeat:Wait() end   -- let the gun finish equipping
                     local th = plr.Character or hcModel(plr)
                     th = th and th:FindFirstChild("HumanoidRootPart")
-                    local part = th and forceShotPart(plr.Character or hcModel(plr))
-                    cf = (th and part) and tpsCoverSpot(tmodel, th, part)
-                    if not cf then return end           -- no safe + shootable spot -> bail, no error
+                    if not th then return end
+                    local part = forceShotPart(plr.Character or hcModel(plr))
+                    -- a validated cover spot, else fall back to just under the street
+                    cf = (part and tpsCoverSpot(tmodel, th, part)) or tpsBelowStreet(tmodel, th)
                     _tpsWallbang = true
                 end
                 local s = tick()
