@@ -699,6 +699,8 @@ do
     end
 
     local CHAMS_LIMIT = 32   -- the engine only renders ~32 Highlights at once
+    local GLOW_LIMIT  = 6    -- PointLights are FAR costlier than Highlights (dynamic lighting
+                             -- tanks FPS) -- only the closest few get the glow aura
 
     track(RunService.RenderStepped:Connect(function()
         local cam = Workspace.CurrentCamera
@@ -711,9 +713,9 @@ do
         -- rest are disabled). Without this, far/extra players silently fail to
         -- highlight -- which also looked like "respawned/joined players don't get
         -- chams" once the cap was already used up by everyone else.
-        local chamsTop = nil
+        local chamsTop, glowTop = nil, nil
         if Esp.enabled and Esp.chams then
-            chamsTop = {}
+            chamsTop, glowTop = {}, {}
             local list = {}
             local myPos = myHRP and myHRP.Position
             for plr2 in pairs(objs) do
@@ -727,6 +729,7 @@ do
             end
             table.sort(list, function(a, b) return a[2] < b[2] end)
             for i = 1, math.min(#list, CHAMS_LIMIT) do chamsTop[list[i][1]] = true end
+            for i = 1, math.min(#list, GLOW_LIMIT) do glowTop[list[i][1]] = true end
         end
 
         for plr, o in pairs(objs) do
@@ -750,8 +753,10 @@ do
                 h.OutlineColor = Esp.chamsOutline
                 h.FillTransparency = Esp.chamsTransparency
                 h.OutlineTransparency = 0
-                local lt = ensureGlow(o, char)
-                if lt then lt.Enabled = true; lt.Color = Esp.chamsFill end
+                if glowTop and glowTop[plr] then
+                    local lt = ensureGlow(o, char)
+                    if lt then lt.Enabled = true; lt.Color = Esp.chamsFill end
+                elseif o.glow then pcall(function() o.glow:Destroy() end); o.glow = nil end
             else
                 if o.chams then o.chams.Enabled = false end
                 -- destroy (not just disable) the glow light so it fully disappears
@@ -829,9 +834,22 @@ do
                     end
                 end
 
-                -- skeleton (per-part on-screen)
-                if Esp.skeleton and char then
+                -- skeleton (per-part on-screen). It's ~18 GUI frames per player, so only
+                -- build it for on-screen players within a sane range (a pixel blob beyond
+                -- that, not worth the cost) and project each part ONCE, reused across bones.
+                if Esp.skeleton and char and on
+                   and (not myHRP or (myHRP.Position - hrp.Position).Magnitude <= 350) then
                     local s = ensureSkel(o)
+                    local vpCache = {}
+                    local function vpOf(part)
+                        local v = vpCache[part]
+                        if v == nil then
+                            local pos, onS = cam:WorldToViewportPoint(part.Position)
+                            v = (onS and Vector2.new(pos.X, pos.Y)) or false
+                            vpCache[part] = v
+                        end
+                        return v
+                    end
                     for i, bone in ipairs(BONES) do
                         local p1, p2 = char:FindFirstChild(bone[1]), char:FindFirstChild(bone[2])
                         local line = s[i]
@@ -842,10 +860,9 @@ do
                             if (p1.Position - p2.Position).Magnitude > 12 then
                                 line.Visible = false
                             else
-                                local a, aOn = cam:WorldToViewportPoint(p1.Position)
-                                local b, bOn = cam:WorldToViewportPoint(p2.Position)
-                                if aOn and bOn then
-                                    setLine(line, Vector2.new(a.X, a.Y), Vector2.new(b.X, b.Y), Esp.color)
+                                local a, b = vpOf(p1), vpOf(p2)
+                                if a and b then
+                                    setLine(line, a, b, Esp.color)
                                 else
                                     line.Visible = false
                                 end
