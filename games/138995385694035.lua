@@ -1056,9 +1056,25 @@ local function tpsBelowStreet(targetModel, thrp)
     local top = (down and down.Position) or (thrp.Position - Vector3.new(0, 3, 0))
     return CFrame.new(top - Vector3.new(0, 3, 0))
 end
+-- closest LOCKED target that passes the checks (minus visible). Ranked by world distance,
+-- NOT the crosshair -- so TP-shoot works on a locked target without looking at them.
+local function tpsPickTarget()
+    local lc = LocalPlayer.Character
+    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+    local best, bestD
+    for _, plr in ipairs(liveTargets()) do
+        if canEngageNoVis(plr) then
+            local m = hcModel(plr)
+            local hrp = m and m:FindFirstChild("HumanoidRootPart")
+            local d = (hrp and lhrp) and (hrp.Position - lhrp.Position).Magnitude or math.huge
+            if not bestD or d < bestD then bestD, best = d, plr end
+        end
+    end
+    return best
+end
 local function tpShoot()
     if _tpsActive then return end
-    local plr = getTarget(canEngageNoVis) -- locked targets, all Checks EXCEPT the visible check
+    local plr = tpsPickTarget()           -- locked target, checks minus visible, no crosshair needed
     if not plr then return end
     local tmodel = plr.Character or hcModel(plr)
     local thrp = tmodel and tmodel:FindFirstChild("HumanoidRootPart")
@@ -1105,18 +1121,19 @@ local function tpShoot()
         pcall(function()
             if method == "Glue" or method == "Inside" then
                 local yoff = (method == "Glue") and TPS_GLUE_Y or 0
-                local start, fired = tick(), false
-                while tick() - start < 1.6 do          -- settle 0.2s -> shoot -> linger ~1.4s
+                local start, firedAt = tick(), nil
+                while true do
                     local th = plr.Character or hcModel(plr)
                     th = th and th:FindFirstChild("HumanoidRootPart")
                     if not th then break end
                     place(CFrame.new(th.Position + Vector3.new(0, yoff, 0)))
-                    if not fired and tick() - start >= 0.2 then fired = fire() end   -- retry each frame until it lands
+                    if not firedAt and tick() - start >= 0.2 and fire() then firedAt = tick() end   -- retry until it lands
+                    if firedAt and tick() - firedAt >= 0.18 then break end   -- stay 0.18s after the shot
+                    if tick() - start >= 1.2 then break end                  -- safety if it can't fire
                     RunService.Heartbeat:Wait()
                 end
             else
                 local cf
-                local bstart = tick()
                 if method == "Above" then
                     cf = CFrame.new(thrp.Position + Vector3.new(0, HC.tpShootDist, 0))
                 elseif method == "Below" then
@@ -1147,7 +1164,8 @@ local function tpShoot()
                     end
                     place(cf); RunService.Heartbeat:Wait()
                 end
-                while tick() - bstart < 1.6 do place(cf); RunService.Heartbeat:Wait() end   -- stay ~1.6s before returning
+                local ls = tick()
+                while tick() - ls < 0.18 do place(cf); RunService.Heartbeat:Wait() end   -- stay 0.18s before returning
             end
         end)
         _tpsWallbang = false
