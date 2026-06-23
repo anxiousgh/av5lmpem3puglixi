@@ -1128,8 +1128,8 @@ local function tpShoot()
                     if not th then break end
                     place(CFrame.new(th.Position + Vector3.new(0, yoff, 0)))
                     if not firedAt and tick() - start >= 0.2 and fire() then firedAt = tick() end   -- retry until it lands
-                    if firedAt and tick() - firedAt >= 0.18 then break end   -- stay 0.18s after the shot
-                    if tick() - start >= 1.2 then break end                  -- safety if it can't fire
+                    if firedAt and tick() - firedAt >= 0.5 then break end     -- stay 0.5s after the shot
+                    if not firedAt and tick() - start >= 1.2 then break end   -- safety if it can't fire
                     RunService.Heartbeat:Wait()
                 end
             else
@@ -1165,7 +1165,7 @@ local function tpShoot()
                     place(cf); RunService.Heartbeat:Wait()
                 end
                 local ls = tick()
-                while tick() - ls < 0.18 do place(cf); RunService.Heartbeat:Wait() end   -- stay 0.18s before returning
+                while tick() - ls < 0.15 do place(cf); RunService.Heartbeat:Wait() end   -- stay 0.15s before returning
             end
         end)
         _tpsWallbang = false
