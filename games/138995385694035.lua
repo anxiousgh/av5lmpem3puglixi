@@ -1085,9 +1085,11 @@ local function tpShoot()
     end
     local function fire()
         local m = plr.Character or hcModel(plr)
-        local part = m and forceShotPart(m); if not part then return end
+        local part = m and forceShotPart(m); if not part then return false end
         if HC.autoEquip and HC.autoEquipTool ~= "" then tryEquipNamed(HC.autoEquipTool) end
-        pcall(function() fireShootAt(part) end)
+        local ok = false
+        pcall(function() ok = fireShootAt(part) end)
+        return ok   -- false if no valid origin (e.g. wallbang couldn't find a clear spoof)
     end
 
     task.spawn(function()
@@ -1103,7 +1105,7 @@ local function tpShoot()
                     th = th and th:FindFirstChild("HumanoidRootPart")
                     if not th then break end
                     place(CFrame.new(th.Position + Vector3.new(0, yoff, 0)))
-                    if not fired and tick() - start >= 0.2 then fired = true; fire() end
+                    if not fired and tick() - start >= 0.2 then fired = fire() end   -- retry each frame until it lands
                     RunService.Heartbeat:Wait()
                 end
             else
@@ -1124,9 +1126,22 @@ local function tpShoot()
                 end
                 local s = tick()
                 while tick() - s < 0.1 do place(cf); RunService.Heartbeat:Wait() end   -- settle so the server registers us
-                fire()
+                -- keep trying until the shot actually goes out -- the target may move or the
+                -- spoof origin may need a fresh spot; for wallbang, re-pick cover on each miss
+                local fired, ftry = false, tick()
+                while not fired and tick() - ftry < 0.4 do
+                    fired = fire()
+                    if not fired and _tpsWallbang then
+                        local th2 = plr.Character or hcModel(plr)
+                        th2 = th2 and th2:FindFirstChild("HumanoidRootPart")
+                        local part2 = forceShotPart(plr.Character or hcModel(plr))
+                        local ncf = (th2 and part2) and (tpsCoverSpot(tmodel, th2, part2) or tpsBelowStreet(tmodel, th2))
+                        if ncf then cf = ncf end
+                    end
+                    place(cf); RunService.Heartbeat:Wait()
+                end
                 s = tick()
-                while tick() - s < 0.12 do place(cf); RunService.Heartbeat:Wait() end   -- linger ~0.12s before returning
+                while tick() - s < 0.12 do place(cf); RunService.Heartbeat:Wait() end   -- linger before returning
             end
         end)
         _tpsWallbang = false
