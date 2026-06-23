@@ -103,7 +103,7 @@ local HC = {
     knifeEquip = false,
     knifeReach = false, knifeReachSize = 10, knifeReachVis = false,
     -- afk + protection
-    antiAfk = false, forceAfk = false, godmode = false,
+    antiAfk = false, forceAfk = false, godmode = false, forceJump = false,
     -- visuals
     targetLine = false, lineOrigin = "Bottom", lineColor = Color3.fromRGB(255, 60, 60),
     targetOutline = false, outlineColor = Color3.fromRGB(255, 80, 80),
@@ -1227,6 +1227,20 @@ track(LocalPlayer.CharacterAdded:Connect(function()
     if HC.godmode then godApply() end
 end))
 
+-- ---- Force Allow Jump: the game caps you at 3 jumps by setting Humanoid.JumpPower = 0
+--      (restored ~1.5s later). Remember the real JumpPower and re-assert it whenever the
+--      game zeroes it, so jumping is never blocked. ----
+local _jpReal = 50
+track(RunService.Heartbeat:Connect(function()
+    if not HC.forceJump then return end
+    local c = LocalPlayer.Character
+    local hum = c and c:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    if hum.JumpPower > 0 then _jpReal = hum.JumpPower          -- learn the normal value
+    elseif _jpReal > 0 then pcall(function() hum.JumpPower = _jpReal end) end  -- game zeroed it -> restore
+    if not hum.UseJumpPower then pcall(function() hum.UseJumpPower = true end) end
+end))
+
 -- ============================================================
 --  AUTO RELOAD
 -- ============================================================
@@ -1668,6 +1682,8 @@ do
     local Sec2 = MiscSub:Section({ Name = "Protection", Side = 2 })
     Sec2:Toggle({ Name = "Godmode", Flag = "HC_Godmode", Default = false,
         Callback = function(v) godSet(v) end })
+    Sec2:Toggle({ Name = "Force Allow Jump", Flag = "HC_ForceJump", Default = false,
+        Callback = function(v) HC.forceJump = v end })
 end
 
 -- 6) Util
