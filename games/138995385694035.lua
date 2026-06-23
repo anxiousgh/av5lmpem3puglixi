@@ -890,7 +890,7 @@ local function someoneBelow(onlyTarget)
 end
 local _stompLast = 0
 track(RunService.Heartbeat:Connect(function()
-    if not HC.stomp then return end
+    if not HC.stomp or _tpsActive then return end
     if tick() - _stompLast < 0.1 then return end
     local me = getMainEvent(); if not me then return end
     if not someoneBelow(false) then return end
@@ -937,6 +937,7 @@ local function stompUnglue()
     _stompSavedCF, _stompTarget, _stomping = nil, nil, false
 end
 track(RunService.Heartbeat:Connect(function()
+    if _tpsActive then return end   -- don't glue / capture a return point while TP-shooting
     if not HC.stompTargets then
         if _stomping then stompUnglue() end
         return
@@ -972,7 +973,7 @@ end))
 -- restore our real pose each render frame so the desync stays put locally
 pcall(function() RunService:UnbindFromRenderStep("WH_HC_STOMP_RESTORE") end)
 RunService:BindToRenderStep("WH_HC_STOMP_RESTORE", Enum.RenderPriority.First.Value, function()
-    if _stomping and _stompSavedCF and not HC.stompTeleport then
+    if _stomping and _stompSavedCF and not HC.stompTeleport and not _tpsActive then
         local lc = LocalPlayer.Character
         local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
         if lhrp then pcall(function() lhrp.CFrame = _stompSavedCF end) end
