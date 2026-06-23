@@ -975,22 +975,46 @@ local function tpsIgnoreList(targetModel)
     end
     return ig
 end
--- a spot the target can't shoot us at but we can hit them from: just past the nearest wall,
--- or under the floor beneath them (we punch the shot back out with wallbangOrigin).
-local function tpsCoverSpot(targetModel, thrp)
+-- a spot the target can't shoot us from, but from which a VALID <=11-stud origin-spoof
+-- still reaches them. We validate every candidate with wallbangOrigin itself, so we only
+-- teleport somewhere the shot will actually land (no "wallbang"/origin-mismatch errors,
+-- no silently-skipped shots). Under-the-floor spots are listed first -- the spoof there is
+-- a short, reliable straight-up peek (the classic "the ground" cover).
+local function tpsCoverSpot(targetModel, thrp, part)
     local tpos = thrp.Position
+    local ignore = tpsIgnoreList(targetModel)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = tpsIgnoreList(targetModel)
-    for a = 0, 315, 45 do                         -- ring out from the target, hide behind the first wall
+    params.FilterDescendantsInstances = ignore
+    local op = OverlapParams.new()
+    op.FilterType = Enum.RaycastFilterType.Exclude
+    op.FilterDescendantsInstances = ignore
+    local function inAir(pos)                  -- a spot we can stand in (not buried in a wall)
+        local ok, parts = pcall(function() return Workspace:GetPartBoundsInRadius(pos, 1.5, op) end)
+        if not ok then return true end
+        for _, p in ipairs(parts) do if p.CanCollide then return false end end
+        return true
+    end
+    local function hasCover(pos)               -- the target's shots are blocked (can't hit us)
+        return Workspace:Raycast(pos, tpos - pos, params) ~= nil
+    end
+
+    local cands = {}
+    for _, d in ipairs({ 4, 5, 6, 7, 9 }) do cands[#cands + 1] = tpos - Vector3.new(0, d, 0) end  -- under the floor
+    for a = 0, 330, 30 do                       -- behind walls: just past the first wall, near its edge
         local rad = math.rad(a)
         local dir = Vector3.new(math.cos(rad), 0, math.sin(rad))
-        local res = Workspace:Raycast(tpos + Vector3.new(0, 1, 0), dir * 40, params)
-        if res and res.Distance > 4 then return CFrame.new(res.Position + dir * 3) end
+        local res = Workspace:Raycast(tpos + Vector3.new(0, 1, 0), dir * 50, params)
+        if res then cands[#cands + 1] = res.Position + dir * 2 + Vector3.new(0, 0.5, 0) end
     end
-    local down = Workspace:Raycast(tpos, Vector3.new(0, -60, 0), params)   -- under the floor
-    if down then return CFrame.new(down.Position - Vector3.new(0, 6, 0)) end
-    return CFrame.new(tpos - Vector3.new(0, 15, 0))
+
+    for _, pos in ipairs(cands) do              -- best: in air, covered, AND a valid spoof exists
+        if inAir(pos) and hasCover(pos) and wallbangOrigin(pos, part) then return CFrame.new(pos) end
+    end
+    for _, pos in ipairs(cands) do              -- relax cover before giving up (still needs a spoof)
+        if inAir(pos) and wallbangOrigin(pos, part) then return CFrame.new(pos) end
+    end
+    return nil
 end
 local function tpShoot()
     if _tpsActive then return end
@@ -1009,6 +1033,8 @@ local function tpShoot()
     local saved = lhrp.CFrame
     local method = HC.tpShootMethod
     local g = gv()
+    local savedWbOffset = HC.wallbangOffset
+    if method == "Wallbang" then HC.wallbangOffset = 11 end   -- use the full origin-spoof budget
     local function curHRP()
         local c = LocalPlayer.Character
         return c and c:FindFirstChild("HumanoidRootPart")
@@ -1044,7 +1070,12 @@ local function tpShoot()
                 elseif method == "Below" then
                     cf = CFrame.new(thrp.Position - Vector3.new(0, HC.tpShootDist, 0))
                 else                                    -- Wallbang
-                    cf = tpsCoverSpot(tmodel, thrp)
+                    for _ = 1, 3 do RunService.Heartbeat:Wait() end   -- let the gun finish equipping
+                    local th = plr.Character or hcModel(plr)
+                    th = th and th:FindFirstChild("HumanoidRootPart")
+                    local part = th and forceShotPart(plr.Character or hcModel(plr))
+                    cf = (th and part) and tpsCoverSpot(tmodel, th, part)
+                    if not cf then return end           -- no safe + shootable spot -> bail, no error
                     _tpsWallbang = true
                 end
                 local s = tick()
@@ -1055,6 +1086,7 @@ local function tpShoot()
             end
         end)
         _tpsWallbang = false
+        HC.wallbangOffset = savedWbOffset
         local h = curHRP(); if h then pcall(function() h.CFrame = saved end) end
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(saved) end) end
         _tpsActive = false
