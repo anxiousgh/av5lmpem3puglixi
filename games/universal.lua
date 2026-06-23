@@ -1248,25 +1248,25 @@ do
         end
         local pos = tHrp.Position + orbitOffset()
         local cf = orbit.lookAt and CFrame.new(pos, tHrp.Position) or CFrame.new(pos)
+        -- Fake Pos: re-root our physics replication onto the target. Applied in BOTH modes
+        -- now (it used to be skipped while Desync was on).
+        if orbit.fakePos then
+            pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+            pcall(function() tHrp:SetNetworkOwner(LocalPlayer) end)
+            if sethiddenproperty then pcall(function() sethiddenproperty(hrp, "PhysicsRepRootPart", tHrp) end) end
+            _attached = true
+        elseif _attached then
+            orbitDetach()
+        end
         if orbit.desync then
             -- custom-desync style: replicate the orbit pose to the server each Heartbeat but
             -- keep our REAL character where it is (restored each RenderStep) -- the server
             -- sees us orbiting (flings the target) while we don't actually move there.
             -- DON'T touch velocity here: zeroing it kills your walk speed + animations.
-            if _attached then orbitDetach() end
             _orbitReal = hrp.CFrame   -- our real home (RenderStep restored it last frame)
             pcall(function() hrp.CFrame = cf end)
         else
             orbitRestoreReal()   -- in case desync was just turned off
-            if orbit.fakePos then
-                -- fake pos resolver: re-root our physics replication onto the target.
-                pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
-                pcall(function() tHrp:SetNetworkOwner(LocalPlayer) end)
-                if sethiddenproperty then pcall(function() sethiddenproperty(hrp, "PhysicsRepRootPart", tHrp) end) end
-                _attached = true
-            elseif _attached then
-                orbitDetach()
-            end
             pcall(function()
                 hrp.CFrame = cf
                 hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
