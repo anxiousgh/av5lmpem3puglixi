@@ -93,6 +93,8 @@ local HC = {
     autoShoot = false, autoShootDist = 250, autoShootCooldown = 0.15, autoShootVis = true,
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
+    -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
+    tpShootMethod = "Wallbang", tpShootDist = 30,
     -- stomp / reload
     stomp = false, stompTargets = false, stompRadius = 5,
     reload = false, reloadKey = Enum.KeyCode.R, reloadThreshold = 0,
@@ -110,6 +112,7 @@ local HC = {
 -- true while Auto stomp Targets is desynced onto a victim. While set, every other action
 -- (force hit, auto shoot, knife) is suppressed -- shooting/stabbing cancels the stomp.
 local _stomping = false
+local _tpsActive = false   -- TP-shoot burst in progress (suppresses the auto-shoot loop)
 
 -- ============================================================
 --  Target system  (MULTI-target lock list -- Lock adds the priority pick to the
@@ -436,6 +439,7 @@ end
 
 -- spoofed shot origin (wallbang / voidshoot) so the tracer FX can start from it, not the muzzle
 local _fhSpoofOrigin, _fhSpoofAt = nil, 0
+local _tpsWallbang = false   -- TP-shoot "Wallbang" mode: force the origin-spoof for this shot
 local function fireShootAt(part)
     if not part then return false end
     local me = getMainEvent(); if not me then return false end
@@ -449,13 +453,13 @@ local function fireShootAt(part)
     local origin = (sent and sent.Position) or root.Position
     -- Wallbang: spoof the origin just enough to clear the wall (within the server's
     -- ~10-stud tolerance). Skipped while voidshooting (origin is already on the target).
-    if HC.wallbang and not sent then
+    if (HC.wallbang or _tpsWallbang) and not sent then
         origin = wallbangOrigin(origin, part)
         if not origin then return false end   -- no clear origin within budget -> skip, no error
     end
     -- remember the spoofed origin so the tracer FX draws from it (not the on-screen muzzle).
     -- only when we actually spoofed (voidshoot / wallbang); a normal shot keeps the usual muzzle.
-    if sent or HC.wallbang then _fhSpoofOrigin, _fhSpoofAt = origin, tick() else _fhSpoofOrigin = nil end
+    if sent or HC.wallbang or _tpsWallbang then _fhSpoofOrigin, _fhSpoofAt = origin, tick() else _fhSpoofOrigin = nil end
     local hitPos = part.Position
     local hits, targets = table.create(pellets), table.create(pellets)
     for i = 1, pellets do
@@ -809,7 +813,7 @@ end)
 
 -- main shoot loop (auto shoot + voidshoot)
 track(RunService.Heartbeat:Connect(function()
-    if _stomping or not (HC.autoShoot or HC.voidshoot) then return end
+    if _stomping or _tpsActive or not (HC.autoShoot or HC.voidshoot) then return end
     if tick() - _asLast < HC.autoShootCooldown then return end
     local plr = getTarget()
     if not plr then voidUnglue(); return end
@@ -937,6 +941,132 @@ RunService:BindToRenderStep("WH_HC_STOMP_RESTORE", Enum.RenderPriority.First.Val
         if lhrp then pcall(function() lhrp.CFrame = _stompSavedCF end) end
     end
 end)
+
+-- ============================================================
+--  TP SHOOT  (keybind: teleport to an advantage on the target, shoot, teleport back)
+--    Wallbang -- TP to cover the target can't shoot through; we still hit via the
+--                origin-spoof (wallbangOrigin), so "they can't hit me, I can hit him".
+--    Above    -- TP straight above the target.
+--    Below    -- TP straight below the target.
+--    Glue     -- glue 50 studs above the target: settle 0.2s, shoot, linger ~1s, return.
+--    Inside   -- like Glue but glued right inside the target.
+--  We actually move (the CFrame is re-asserted each Heartbeat so the server registers the
+--  pose) -> the shot origin == our real position and validates -> then we restore.
+-- ============================================================
+local TPS_GLUE_Y = 50
+local function tpsIgnoreList(targetModel)
+    local ig = {}
+    local lc = LocalPlayer.Character; if lc then ig[#ig + 1] = lc end
+    local x = Workspace:FindFirstChild("Ignored"); if x then ig[#ig + 1] = x end
+    if targetModel then ig[#ig + 1] = targetModel end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            local m = hcModel(p); if m and m ~= targetModel then ig[#ig + 1] = m end
+        end
+    end
+    return ig
+end
+-- a spot the target can't shoot us at but we can hit them from: just past the nearest wall,
+-- or under the floor beneath them (we punch the shot back out with wallbangOrigin).
+local function tpsCoverSpot(targetModel, thrp)
+    local tpos = thrp.Position
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = tpsIgnoreList(targetModel)
+    for a = 0, 315, 45 do                         -- ring out from the target, hide behind the first wall
+        local rad = math.rad(a)
+        local dir = Vector3.new(math.cos(rad), 0, math.sin(rad))
+        local res = Workspace:Raycast(tpos + Vector3.new(0, 1, 0), dir * 40, params)
+        if res and res.Distance > 4 then return CFrame.new(res.Position + dir * 3) end
+    end
+    local down = Workspace:Raycast(tpos, Vector3.new(0, -60, 0), params)   -- under the floor
+    if down then return CFrame.new(down.Position - Vector3.new(0, 6, 0)) end
+    return CFrame.new(tpos - Vector3.new(0, 15, 0))
+end
+-- fallback target: nearest player to the mouse (when nothing is locked)
+local function tpsNearestToMouse()
+    local cam = Workspace.CurrentCamera
+    local mouse = UIS:GetMouseLocation()
+    local best, bestD
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            local m = hcModel(p)
+            local hrp = m and m:FindFirstChild("HumanoidRootPart")
+            if hrp and not isDead(p) then
+                local sp, on = cam:WorldToViewportPoint(hrp.Position)
+                if on and sp.Z > 0 then
+                    local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+                    if not bestD or d < bestD then bestD, best = d, p end
+                end
+            end
+        end
+    end
+    return best
+end
+local function tpShoot()
+    if _tpsActive then return end
+    local plr = getTarget(false) or getTarget(true) or tpsNearestToMouse()
+    if not plr then return end
+    local tmodel = plr.Character or hcModel(plr)
+    local thrp = tmodel and tmodel:FindFirstChild("HumanoidRootPart")
+    if not thrp then return end
+    local lc = LocalPlayer.Character
+    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+    if not lhrp then return end
+
+    _tpsActive = true
+    local saved = lhrp.CFrame
+    local method = HC.tpShootMethod
+    local g = gv()
+    local function curHRP()
+        local c = LocalPlayer.Character
+        return c and c:FindFirstChild("HumanoidRootPart")
+    end
+    local function place(cf)
+        local h = curHRP(); if h then pcall(function() h.CFrame = cf end) end
+        if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(cf) end) end
+    end
+    local function fire()
+        local m = plr.Character or hcModel(plr)
+        local part = m and forceShotPart(m); if not part then return end
+        if HC.autoEquip and HC.autoEquipTool ~= "" then tryEquipNamed(HC.autoEquipTool) end
+        pcall(function() fireShootAt(part) end)
+    end
+
+    task.spawn(function()
+        pcall(function()
+            if method == "Glue" or method == "Inside" then
+                local yoff = (method == "Glue") and TPS_GLUE_Y or 0
+                local start, fired = tick(), false
+                while tick() - start < 1.2 do          -- settle 0.2s -> shoot -> linger ~1s
+                    local th = plr.Character or hcModel(plr)
+                    th = th and th:FindFirstChild("HumanoidRootPart")
+                    if not th then break end
+                    place(CFrame.new(th.Position + Vector3.new(0, yoff, 0)))
+                    if not fired and tick() - start >= 0.2 then fired = true; fire() end
+                    RunService.Heartbeat:Wait()
+                end
+            else
+                local cf
+                if method == "Above" then
+                    cf = CFrame.new(thrp.Position + Vector3.new(0, HC.tpShootDist, 0))
+                elseif method == "Below" then
+                    cf = CFrame.new(thrp.Position - Vector3.new(0, HC.tpShootDist, 0))
+                else                                    -- Wallbang
+                    cf = tpsCoverSpot(tmodel, thrp)
+                    _tpsWallbang = true
+                end
+                for _ = 1, 8 do place(cf); RunService.Heartbeat:Wait() end   -- settle so the server registers us
+                fire()
+                for _ = 1, 6 do place(cf); RunService.Heartbeat:Wait() end
+            end
+        end)
+        _tpsWallbang = false
+        local h = curHRP(); if h then pcall(function() h.CFrame = saved end) end
+        if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(saved) end) end
+        _tpsActive = false
+    end)
+end
 
 -- ---- Godmode (HC emote): play the hitbox-displacing emote, FREEZE it at its godmode
 --      frame (TimePosition 0.1265, speed 0) every Heartbeat, and re-assert it whenever the
@@ -1350,6 +1480,16 @@ do
         Callback = function(v) HC.autoEquip = v end })
     Sec2:Textbox({ Name = "Tool name", Flag = "HC_AutoEquipTool", Placeholder = "exact tool name",
         Callback = function(v) HC.autoEquipTool = v or "" end })
+
+    local Sec3 = RageSub:Section({ Name = "TP Shoot", Side = 2 })
+    Sec3:Dropdown({ Name = "Method", Flag = "HC_TpShootMethod", Default = "Wallbang", Multi = false,
+        Items = { "Wallbang", "Above", "Below", "Glue", "Inside" },
+        Callback = function(v) HC.tpShootMethod = (type(v) == "table" and v[1]) or v or "Wallbang" end })
+    Sec3:Slider({ Name = "Above/Below distance", Flag = "HC_TpShootDist", Min = 3, Max = 100, Default = 30, Decimals = 0, Suffix = " studs",
+        Callback = function(v) HC.tpShootDist = v end })
+    Sec3:Label({ Name = "TP shoot" }):Keybind({
+        Name = "TP shoot", Flag = "HC_TpShootKey", Mode = "Hold", Default = Enum.KeyCode.F,
+        Callback = function(state) if state then tpShoot() end end })
 end
 
 -- 3) Knife Bot
