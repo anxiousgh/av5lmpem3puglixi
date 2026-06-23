@@ -133,9 +133,16 @@ local function fireAt(gun, part)
     local origin = (handle.CFrame * CFrame.new(-1, 0.4, 0)).Position
     local hitPos = part.Position
     local normal = (origin - hitPos).Unit
-    local range  = gun.Range.Value
+    local range  = (S.checkRange and gun.Range.Value) or 100000   -- big range when range check is off
     local dmg    = gun:FindFirstChild("Damage") and gun.Damage.Value or 0
-    for _ = 1, pelletCount(gun) do
+    if gun:FindFirstChild("GunClientShotgun") then
+        -- shotgun: ONE ShootGun whose arg4 is a table of 5 pellets, all forced onto the target
+        local pellets = {}
+        for i = 1, 5 do
+            pellets[i] = { Result1 = hitPos, Result2 = part, Result3 = normal, AimPosition = hitPos }
+        end
+        MainGameEvent:FireServer("ShootGun", handle, origin, pellets, nil, nil, nil, range, dmg)
+    else
         MainGameEvent:FireServer("ShootGun", handle, origin, nil, hitPos, part, normal, range, dmg)
     end
 end
