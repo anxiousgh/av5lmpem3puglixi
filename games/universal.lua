@@ -1067,7 +1067,11 @@ do
 
     -- ---- heartbeat spoof + renderstep restore (non-freeze methods) ----
     track(RunService.Heartbeat:Connect(function()
-        if not Desync.enabled or Desync.method == "Freeze" or SHARED.pause then return end
+        -- clear realCF when we're not live-spoofing, so a stale value can't make TP-shoot
+        -- (or anything else) restore to an old position. Freeze doesn't move us, so its real
+        -- position is just the current CFrame -> leave realCF nil there too.
+        if not Desync.enabled or Desync.method == "Freeze" then SHARED.realCF = nil; return end
+        if SHARED.pause then return end
         local hrp = getHRP(); if not hrp then return end
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
         SHARED.realCF = realCF   -- expose our TRUE CFrame so TP-shoot can pause + restore cleanly

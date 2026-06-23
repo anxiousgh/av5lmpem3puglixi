@@ -1135,7 +1135,7 @@ local function tpShoot()
                 _tpsWallbang = true
             end
             local s = tick()
-            while tick() - s < 0.1 do place(cf); RunService.Heartbeat:Wait() end   -- wait 0.1s before shooting
+            while tick() - s < 0.2 do place(cf); RunService.Heartbeat:Wait() end   -- settle 0.2s so the server registers the teleport (avoids origin-mismatch kick)
             -- keep trying until the shot actually goes out -- the target may move or the
             -- spoof origin may need a fresh spot; for wallbang, re-pick cover on each miss
             local fired, ftry = false, tick()
@@ -1212,28 +1212,52 @@ track(LocalPlayer.CharacterAdded:Connect(function()
     if HC.godmode then godApply() end
 end))
 
--- ---- Force Allow Jump: the game caps you at 3 jumps by setting Humanoid.JumpPower = 0
---      (restored ~1.5s later). Remember the real JumpPower and re-assert it whenever the
---      game zeroes it, so jumping is never blocked. ----
-local _jpReal = 50
-local function _fjHum()
-    local c = LocalPlayer.Character
-    return c and c:FindFirstChildOfClass("Humanoid")
+-- ---- Force Allow Jump (witherhook method): the game caps you at 3 jumps by zeroing
+--      Humanoid.JumpPower. React the INSTANT it changes JumpPower (GetPropertyChangedSignal,
+--      no polling lag) and re-enable the Jumping state; on Space re-enforce + request a jump.
+--      hum.Jump only fires when grounded, so the cap is lifted without an infinite air-jump. ----
+local _fjConns, _fjReal = {}, 50
+local function _fjClear()
+    for _, c in ipairs(_fjConns) do pcall(function() c:Disconnect() end) end
+    _fjConns = {}
 end
-track(RunService.Heartbeat:Connect(function()
-    if not HC.forceJump then return end
-    local hum = _fjHum(); if not hum then return end
-    if hum.JumpPower > 0 then _jpReal = hum.JumpPower          -- learn the normal value
-    elseif _jpReal > 0 then pcall(function() hum.JumpPower = _jpReal end) end  -- game zeroed it -> restore
-    if not hum.UseJumpPower then pcall(function() hum.UseJumpPower = true end) end
-end))
--- restore JumpPower the instant a jump is REQUESTED, to win the race against the game's
--- zeroing. We do NOT force the jump state -- the normal mechanic only jumps when grounded,
--- so this just lifts the 3-jump cap; it never becomes an infinite air-jump / fly.
-track(UIS.JumpRequest:Connect(function()
-    if not HC.forceJump then return end
-    local hum = _fjHum()
-    if hum and hum.JumpPower < _jpReal and _jpReal > 0 then pcall(function() hum.JumpPower = _jpReal end) end
+local function _fjEnforce(hum)
+    if not hum then return end
+    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true) end)
+    pcall(function()
+        if hum.JumpPower > 0 then _fjReal = hum.JumpPower        -- learn the normal value
+        elseif hum.UseJumpPower then hum.JumpPower = _fjReal      -- game zeroed it -> restore now
+        elseif hum.JumpHeight <= 0 then hum.JumpHeight = 7.2 end
+    end)
+end
+local function _fjHookChar(char)
+    _fjClear()
+    local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
+    if not hum then return end
+    _fjEnforce(hum)
+    table.insert(_fjConns, hum:GetPropertyChangedSignal("JumpPower"):Connect(function()
+        if HC.forceJump then _fjEnforce(hum) end
+    end))
+end
+local _fjCharConn
+local function setForceJump(on)
+    HC.forceJump = on
+    if on then
+        if not _fjCharConn then
+            _fjCharConn = LocalPlayer.CharacterAdded:Connect(function(c) if HC.forceJump then _fjHookChar(c) end end)
+            track(_fjCharConn)
+        end
+        if LocalPlayer.Character then _fjHookChar(LocalPlayer.Character) end
+    else
+        _fjClear()
+    end
+end
+track(UIS.InputBegan:Connect(function(input, gp)
+    if gp or not HC.forceJump then return end
+    if input.KeyCode ~= Enum.KeyCode.Space then return end
+    local c = LocalPlayer.Character
+    local hum = c and c:FindFirstChildOfClass("Humanoid")
+    if hum then _fjEnforce(hum); pcall(function() hum.Jump = true end) end   -- grounded-only jump request
 end))
 
 -- ============================================================
@@ -1678,7 +1702,7 @@ do
     Sec2:Toggle({ Name = "Godmode", Flag = "HC_Godmode", Default = false,
         Callback = function(v) godSet(v) end })
     Sec2:Toggle({ Name = "Force Allow Jump", Flag = "HC_ForceJump", Default = false,
-        Callback = function(v) HC.forceJump = v end })
+        Callback = function(v) setForceJump(v) end })
 end
 
 -- 6) Util
