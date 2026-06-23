@@ -345,7 +345,9 @@ do
         line.BorderSizePixel = 0; line.AnchorPoint = Vector2.new(0.5, 0.5); line.Visible = false; line.Parent = gui
     end
     track(RunService.RenderStepped:Connect(function()
-        local part = combatPart()
+        local ch = combatChar()
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        local part = (hum and hum.Health > 0) and ch:FindFirstChild("HumanoidRootPart") or nil   -- line points at the HRP, not the head
         if Combat.line and part then
             ensureGui()
             local cam = Workspace.CurrentCamera
