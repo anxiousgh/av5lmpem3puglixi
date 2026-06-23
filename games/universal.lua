@@ -1479,6 +1479,7 @@ do
             end
         end
         if p:IsA("MeshPart") then pcall(function() p.TextureID = "" end) end   -- clear MeshPart texture
+        p.Name = "Part"   -- generic name: clone isn't identifiable as your character (no Head/Torso/HRP rig)
         p.Anchored = true; p.CanCollide = false; p.CanQuery = false
         p.CanTouch = false; p.Massless = true
     end
@@ -1489,14 +1490,9 @@ do
         if not char or not char:FindFirstChild("HumanoidRootPart") then return end
         local m = Instance.new("Model"); m.Name = "\0"
         for _, part in ipairs(char:GetChildren()) do
-            if part:IsA("BasePart") then               -- body part
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then   -- visible body part (skip the invisible root box)
                 local ok, p = pcall(function() return part:Clone() end)
-                if ok and p then
-                    prepPart(p)
-                    if p.Name == "HumanoidRootPart" then p.Name = "Root" end  -- a stray "HumanoidRootPart" gets nuked by anti-cheat; rename it
-                    p.Parent = m
-                    partMap[p] = part
-                end
+                if ok and p then prepPart(p); p.Parent = m; partMap[p] = part end
             elseif part:IsA("Accessory") then          -- hat / accessory: clone its Handle
                 local handle = part:FindFirstChild("Handle")
                 if handle and handle:IsA("BasePart") then
