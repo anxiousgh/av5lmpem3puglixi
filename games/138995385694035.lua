@@ -426,6 +426,8 @@ function canWallbangPlr(plr)
     return v
 end
 
+-- spoofed shot origin (wallbang / voidshoot) so the tracer FX can start from it, not the muzzle
+local _fhSpoofOrigin, _fhSpoofAt = nil, 0
 local function fireShootAt(part)
     if not part then return false end
     local me = getMainEvent(); if not me then return false end
@@ -443,6 +445,9 @@ local function fireShootAt(part)
         origin = wallbangOrigin(origin, part)
         if not origin then return false end   -- no clear origin within budget -> skip, no error
     end
+    -- remember the spoofed origin so the tracer FX draws from it (not the on-screen muzzle).
+    -- only when we actually spoofed (voidshoot / wallbang); a normal shot keeps the usual muzzle.
+    if sent or HC.wallbang then _fhSpoofOrigin, _fhSpoofAt = origin, tick() else _fhSpoofOrigin = nil end
     local hitPos = part.Position
     local hits, targets = table.create(pellets), table.create(pellets)
     for i = 1, pellets do
@@ -602,7 +607,10 @@ end
 local function fxShotFired(hitPos)
     _shotT = tick()
     if not HC.tracerEnabled or not hitPos then return end
-    local origin = muzzlePos(); if not origin then return end
+    -- start from the spoofed origin if we just wallbanged / voidshot, else the usual muzzle
+    local origin
+    if _fhSpoofOrigin and (tick() - _fhSpoofAt) < FX_WINDOW then origin = _fhSpoofOrigin else origin = muzzlePos() end
+    if not origin then return end
     spawnTracer(origin, hitPos)
 end
 
