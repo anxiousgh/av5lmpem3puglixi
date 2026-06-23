@@ -773,6 +773,7 @@ local function voidGlue(targetHrp)
     local onTop = CFrame.new(targetHrp.Position)
     pcall(function() lhrp.CFrame = onTop end)
     local g = gv(); if g then g._WH_HC_SENT = onTop end
+    if g and g.WH and g.WH.markServerCF then g.WH.markServerCF(onTop) end   -- Server Pos clone follows the voidshoot
 end
 local function voidUnglue()
     local lc = LocalPlayer.Character
@@ -865,7 +866,9 @@ local function stompGlue(hrp)
     pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
     if sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", hrp) end) end
     _stompSavedCF = lhrp.CFrame                       -- our real spot
-    pcall(function() lhrp.CFrame = CFrame.new(hrp.Position + Vector3.new(0, STOMP_Y, 0)) end)
+    local stompCF = CFrame.new(hrp.Position + Vector3.new(0, STOMP_Y, 0))
+    pcall(function() lhrp.CFrame = stompCF end)
+    local g = gv(); if g and g.WH and g.WH.markServerCF then g.WH.markServerCF(stompCF) end   -- Server Pos clone follows the stomp
 end
 local function stompUnglue()
     local lc = LocalPlayer.Character

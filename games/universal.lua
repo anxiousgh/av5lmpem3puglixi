@@ -30,6 +30,25 @@ local function getHRP()
     return c and c:FindFirstChild("HumanoidRootPart")
 end
 
+-- shared "server position" beacon. ANY desync feature -- here OR a future game module --
+-- calls getgenv().WH.markServerCF(cf) each frame it spoofs the root (Desync page, Fling
+-- orbit, HC stomp/knife, etc.), and the Server Pos visualizer renders the freshest mark.
+-- Works regardless of which mechanism the desync uses (CFrame, velocity, PhysicsRepRootPart)
+-- and regardless of connection/load order.
+local function markServerCF(cf)
+    local g = getgenv and getgenv(); if not g then return end
+    g.WH = g.WH or {}
+    g.WH._serverCF, g.WH._serverCFt = cf, os.clock()
+end
+do local g = getgenv and getgenv(); if g then g.WH = g.WH or {}; g.WH.markServerCF = markServerCF end end
+local function serverCFnow(realCF)   -- freshest marked server CF (within 0.2s), else your real CF
+    local g = getgenv and getgenv()
+    if g and g.WH and g.WH._serverCF and (os.clock() - (g.WH._serverCFt or 0)) < 0.2 then
+        return g.WH._serverCF
+    end
+    return realCF
+end
+
 -- shared combat helpers
 local function aliveChar(plr)
     local c = plr.Character
@@ -950,15 +969,18 @@ do
         local m = Desync.method
         if m == "Void" then
             hrp.CFrame = CFrame.new(randVoid())
+            markServerCF(hrp.CFrame)
         elseif m == "Spin" then
             spinAngle = (spinAngle + Desync.spinSpeed) % 360
             hrp.CFrame = hrp.CFrame * CFrame.Angles(
                 math.rad(spinAngle), math.rad(spinAngle * 2), math.rad(spinAngle * 0.5))
+            markServerCF(hrp.CFrame)
         elseif m == "Velocity" then
             hrp.AssemblyLinearVelocity = Vector3.one * Desync.velMag
         elseif m == "Custom" then
             local rot = hrp.CFrame - hrp.CFrame.Position
             hrp.CFrame = CFrame.new(Desync.customX, Desync.customY, Desync.customZ) * rot
+            markServerCF(hrp.CFrame)
         end
     end
 
@@ -1267,6 +1289,7 @@ do
             -- DON'T touch velocity here: zeroing it kills your walk speed + animations.
             _orbitReal = hrp.CFrame   -- our real home (RenderStep restored it last frame)
             pcall(function() hrp.CFrame = cf end)
+            markServerCF(cf)          -- report orbit pos so the Server Pos clone follows it
         else
             orbitRestoreReal()   -- in case desync was just turned off
             pcall(function()
@@ -1510,30 +1533,20 @@ do
     end
 
     -- buffer position + pose each frame, timestamped, so both replay delayed.
-    -- offsets (pose) are captured at Stepped, where the HRP sits at your REAL position, so
-    -- they're a consistent pose. base is captured at Heartbeat AFTER every desync feature has
-    -- spoofed the root that frame, so it's wherever your SERVER position actually is -- works
-    -- generically for the Desync page, Fling orbit, HC stomp/knife, anything that moves the root.
-    local pendingOffsets
+    -- offsets = pose relative to your REAL HRP (captured at Stepped where it's consistent).
+    -- base = the freshest server position reported by ANY desync (beacon), else your real HRP.
     track(RunService.Stepped:Connect(function()
-        if not cfg.on then pendingOffsets = nil; return end
-        local char = LocalPlayer.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not hrp then pendingOffsets = nil; return end
-        local invReal = hrp.CFrame:Inverse()
-        local offs = {}
-        for _, rp in pairs(partMap) do
-            if rp.Parent then offs[rp] = invReal * rp.CFrame end
-        end
-        pendingOffsets = offs
-    end))
-    track(RunService.Heartbeat:Connect(function()
-        if not cfg.on or not pendingOffsets then return end
+        if not cfg.on then return end
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not hrp then return end
         local now = os.clock()
-        history[#history + 1] = { t = now, base = hrp.CFrame, offsets = pendingOffsets }   -- base = spoofed root (any desync)
+        local invReal = hrp.CFrame:Inverse()
+        local offsets = {}
+        for _, rp in pairs(partMap) do
+            if rp.Parent then offsets[rp] = invReal * rp.CFrame end
+        end
+        history[#history + 1] = { t = now, base = serverCFnow(hrp.CFrame), offsets = offsets }
         while history[1] and now - history[1].t > 2 do table.remove(history, 1) end   -- keep ~2s of samples
     end))
     -- render the clone from the snapshot (ping + 0.11) seconds ago = the server's pos+pose NOW
