@@ -598,7 +598,28 @@ do
         pcall(function() espGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end)
     end
 
+    -- Lines (tracer / corners / skeleton) used to be thin rotated GUI Frames because
+    -- Drawing.Line flickered on some old executors. Where it's supported, Drawing.Line
+    -- is ~5x cheaper to update and far cheaper to render (no UI layout reflow), so use
+    -- it when available and fall back to the rotated GUI frame otherwise.
+    local USE_DRAW_LINES = false
+    if hasDrawing then
+        local ok, l = pcall(function() return Drawing.new("Line") end)
+        if ok and l then USE_DRAW_LINES = true; pcall(function() l:Remove() end) end
+    end
+    local function killLine(d)
+        if USE_DRAW_LINES then pcall(function() d:Remove() end)
+        else pcall(function() d:Destroy() end) end
+    end
     local function lineFrame()
+        if USE_DRAW_LINES then
+            local l = Drawing.new("Line")
+            l.Thickness = 1
+            l.Transparency = 1     -- Drawing: 1 == opaque
+            l.Color = Esp.color
+            l.Visible = false
+            return l
+        end
         local f = Instance.new("Frame")
         f.AnchorPoint = Vector2.new(0.5, 0.5)
         f.BorderSizePixel = 0
@@ -607,11 +628,17 @@ do
         f.Parent = espGui
         return f
     end
-    -- aim a thin frame from screen-point a to screen-point b (a rotated 1px bar).
-    -- Center it on a pixel (floor + 0.5) so the 1px bar renders crisp instead of
-    -- smearing across two rows -- a half-pixel-straddled line reads as a fat ~2px
-    -- blur, so snapping it makes the tracer look properly thin.
+    -- aim a line from screen-point a to screen-point b. Drawing.Line takes the two
+    -- endpoints directly; the GUI-frame fallback is a thin rotated bar centered on a
+    -- pixel (floor + 0.5) so a 1px line renders crisp instead of smearing to ~2px.
     local function setLine(f, a, b, color, thickness)
+        if USE_DRAW_LINES then
+            f.From, f.To = a, b
+            f.Color = color
+            f.Thickness = thickness or 1
+            f.Visible = true
+            return
+        end
         local d = b - a
         f.Size = UDim2.fromOffset(math.max(d.Magnitude, 1), thickness or 1)
         f.Position = UDim2.fromOffset(
@@ -638,9 +665,9 @@ do
         for _, k in ipairs({ "box", "solid", "name", "dist", "health" }) do
             if o[k] then pcall(function() o[k]:Remove() end) end   -- Drawing objects
         end
-        if o.tracer then pcall(function() o.tracer:Destroy() end) end
-        if o.corners then for _, d in ipairs(o.corners) do pcall(function() d:Destroy() end) end end
-        if o.skel then for _, d in ipairs(o.skel) do pcall(function() d:Destroy() end) end end
+        if o.tracer then killLine(o.tracer) end
+        if o.corners then for _, d in ipairs(o.corners) do killLine(d) end end
+        if o.skel then for _, d in ipairs(o.skel) do killLine(d) end end
         if o.chams then pcall(function() o.chams:Destroy() end) end
         if o.glow then pcall(function() o.glow:Destroy() end) end
         objs[plr] = nil
