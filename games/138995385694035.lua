@@ -990,7 +990,6 @@ end)
 --  We actually move (the CFrame is re-asserted each Heartbeat so the server registers the
 --  pose) -> the shot origin == our real position and validates -> then we restore.
 -- ============================================================
-local TPS_GLUE_Y = 50
 local function tpsIgnoreList(targetModel)
     local ig = {}
     local lc = LocalPlayer.Character; if lc then ig[#ig + 1] = lc end
@@ -1119,54 +1118,39 @@ local function tpShoot()
         if lh0 then pcall(function() lh0.Anchored = true end) end   -- stop physics ejecting us out of the floor (the "peek")
         if SHARED and lh0 then pcall(function() lh0.CFrame = saved end) end   -- snap to real if desync had us spoofed
         pcall(function()
-            if method == "Glue" or method == "Inside" then
-                local yoff = (method == "Glue") and TPS_GLUE_Y or 0
-                local start, firedAt = tick(), nil
-                while true do
-                    local th = plr.Character or hcModel(plr)
-                    th = th and th:FindFirstChild("HumanoidRootPart")
-                    if not th then break end
-                    place(CFrame.new(th.Position + Vector3.new(0, yoff, 0)))
-                    if not firedAt and tick() - start >= 0.2 and fire() then firedAt = tick() end   -- retry until it lands
-                    if firedAt and tick() - firedAt >= 0.5 then break end     -- stay 0.5s after the shot
-                    if not firedAt and tick() - start >= 1.2 then break end   -- safety if it can't fire
-                    RunService.Heartbeat:Wait()
-                end
-            else
-                local cf
-                if method == "Above" then
-                    cf = CFrame.new(thrp.Position + Vector3.new(0, HC.tpShootDist, 0))
-                elseif method == "Below" then
-                    cf = CFrame.new(thrp.Position - Vector3.new(0, HC.tpShootDist, 0))
-                else                                    -- Wallbang
-                    for _ = 1, 3 do RunService.Heartbeat:Wait() end   -- let the gun finish equipping
-                    local th = plr.Character or hcModel(plr)
-                    th = th and th:FindFirstChild("HumanoidRootPart")
-                    if not th then return end
-                    local part = forceShotPart(plr.Character or hcModel(plr))
-                    -- a validated cover spot, else fall back to just under the street
-                    cf = (part and tpsCoverSpot(tmodel, th, part)) or tpsBelowStreet(tmodel, th)
-                    _tpsWallbang = true
-                end
-                local s = tick()
-                while tick() - s < 0.1 do place(cf); RunService.Heartbeat:Wait() end   -- settle so the server registers us
-                -- keep trying until the shot actually goes out -- the target may move or the
-                -- spoof origin may need a fresh spot; for wallbang, re-pick cover on each miss
-                local fired, ftry = false, tick()
-                while not fired and tick() - ftry < 0.4 do
-                    fired = fire()
-                    if not fired and _tpsWallbang then
-                        local th2 = plr.Character or hcModel(plr)
-                        th2 = th2 and th2:FindFirstChild("HumanoidRootPart")
-                        local part2 = forceShotPart(plr.Character or hcModel(plr))
-                        local ncf = (th2 and part2) and (tpsCoverSpot(tmodel, th2, part2) or tpsBelowStreet(tmodel, th2))
-                        if ncf then cf = ncf end
-                    end
-                    place(cf); RunService.Heartbeat:Wait()
-                end
-                local ls = tick()
-                while tick() - ls < 0.15 do place(cf); RunService.Heartbeat:Wait() end   -- stay 0.15s before returning
+            local cf
+            if method == "Above" then
+                cf = CFrame.new(thrp.Position + Vector3.new(0, HC.tpShootDist, 0))
+            elseif method == "Below" then
+                cf = CFrame.new(thrp.Position - Vector3.new(0, HC.tpShootDist, 0))
+            else                                    -- Wallbang
+                for _ = 1, 3 do RunService.Heartbeat:Wait() end   -- let the gun finish equipping
+                local th = plr.Character or hcModel(plr)
+                th = th and th:FindFirstChild("HumanoidRootPart")
+                if not th then return end
+                local part = forceShotPart(plr.Character or hcModel(plr))
+                -- a validated cover spot, else fall back to just under the street
+                cf = (part and tpsCoverSpot(tmodel, th, part)) or tpsBelowStreet(tmodel, th)
+                _tpsWallbang = true
             end
+            local s = tick()
+            while tick() - s < 0.1 do place(cf); RunService.Heartbeat:Wait() end   -- wait 0.1s before shooting
+            -- keep trying until the shot actually goes out -- the target may move or the
+            -- spoof origin may need a fresh spot; for wallbang, re-pick cover on each miss
+            local fired, ftry = false, tick()
+            while not fired and tick() - ftry < 0.4 do
+                fired = fire()
+                if not fired and _tpsWallbang then
+                    local th2 = plr.Character or hcModel(plr)
+                    th2 = th2 and th2:FindFirstChild("HumanoidRootPart")
+                    local part2 = forceShotPart(plr.Character or hcModel(plr))
+                    local ncf = (th2 and part2) and (tpsCoverSpot(tmodel, th2, part2) or tpsBelowStreet(tmodel, th2))
+                    if ncf then cf = ncf end
+                end
+                place(cf); RunService.Heartbeat:Wait()
+            end
+            local ls = tick()
+            while tick() - ls < 0.15 do place(cf); RunService.Heartbeat:Wait() end   -- stay 0.15s before returning
         end)
         _tpsWallbang = false
         HC.wallbangOffset = savedWbOffset
@@ -1610,7 +1594,7 @@ do
 
     local Sec3 = RageSub:Section({ Name = "TP Shoot", Side = 2 })
     Sec3:Dropdown({ Name = "Method", Flag = "HC_TpShootMethod", Default = "Wallbang", Multi = false,
-        Items = { "Wallbang", "Above", "Below", "Glue", "Inside" },
+        Items = { "Wallbang", "Above", "Below" },
         Callback = function(v) HC.tpShootMethod = (type(v) == "table" and v[1]) or v or "Wallbang" end })
     Sec3:Slider({ Name = "Above/Below distance", Flag = "HC_TpShootDist", Min = 3, Max = 100, Default = 30, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.tpShootDist = v end })
