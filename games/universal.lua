@@ -948,15 +948,19 @@ do
         local m = Desync.method
         if m == "Void" then
             hrp.CFrame = CFrame.new(randVoid())
+            Desync.serverCF = hrp.CFrame          -- expose spoof pos (Server Pos visualizer reads this)
         elseif m == "Spin" then
             spinAngle = (spinAngle + Desync.spinSpeed) % 360
             hrp.CFrame = hrp.CFrame * CFrame.Angles(
                 math.rad(spinAngle), math.rad(spinAngle * 2), math.rad(spinAngle * 0.5))
+            Desync.serverCF = hrp.CFrame
         elseif m == "Velocity" then
             hrp.AssemblyLinearVelocity = Vector3.one * Desync.velMag
+            Desync.serverCF = nil                 -- velocity-based: no CFrame position spoof
         elseif m == "Custom" then
             local rot = hrp.CFrame - hrp.CFrame.Position
             hrp.CFrame = CFrame.new(Desync.customX, Desync.customY, Desync.customZ) * rot
+            Desync.serverCF = hrp.CFrame
         end
     end
 
@@ -988,7 +992,7 @@ do
 
     -- ---- heartbeat spoof + renderstep restore (non-freeze methods) ----
     track(RunService.Heartbeat:Connect(function()
-        if not Desync.enabled or Desync.method == "Freeze" then return end
+        if not Desync.enabled or Desync.method == "Freeze" then Desync.serverCF = nil; return end
         local hrp = getHRP(); if not hrp then return end
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
         pcall(applySpoof, hrp)
@@ -1507,19 +1511,25 @@ do
         applyStyle()
     end
 
-    -- buffer the FULL pose (every tracked part's world CFrame, pre-physics), timestamped,
-    -- so both position AND animation can be replayed delayed
+    -- buffer position + pose each frame, timestamped, so both replay delayed.
+    -- base = the desync's spoofed server position when desyncing, else your real HRP;
+    -- offsets = each tracked part's pose relative to the HRP (position-independent).
     track(RunService.Stepped:Connect(function()
         if not cfg.on then return end
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
         local now = os.clock()
-        local snap = {}
+        local base = (Desync.enabled and Desync.serverCF) or hrp.CFrame
+        local invReal = hrp.CFrame:Inverse()
+        local offsets = {}
         for _, rp in pairs(partMap) do
-            if rp.Parent then snap[rp] = rp.CFrame end
+            if rp.Parent then offsets[rp] = invReal * rp.CFrame end
         end
-        history[#history + 1] = { t = now, poses = snap }
+        history[#history + 1] = { t = now, base = base, offsets = offsets }
         while history[1] and now - history[1].t > 2 do table.remove(history, 1) end   -- keep ~2s of samples
     end))
-    -- render the clone from the snapshot (ping + 0.11) seconds ago = the server's pose+pos NOW
+    -- render the clone from the snapshot (ping + 0.11) seconds ago = the server's pos+pose NOW
     track(RunService.RenderStepped:Connect(function()
         if not (cfg.on and clone) or #history == 0 then return end
         local ping = 0; pcall(function() ping = LocalPlayer:GetNetworkPing() end)   -- seconds
@@ -1530,8 +1540,8 @@ do
         end
         if not sample then return end
         for cp, rp in pairs(partMap) do       -- body parts + accessory handles
-            local cf = sample.poses[rp]
-            if cf and cp.Parent then cp.CFrame = cf end
+            local off = sample.offsets[rp]
+            if off and cp.Parent then cp.CFrame = sample.base * off end
         end
     end))
     track(LocalPlayer.CharacterAdded:Connect(function()
