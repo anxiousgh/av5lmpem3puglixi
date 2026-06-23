@@ -450,16 +450,20 @@ local function fireShootAt(part)
     -- It MUST equal our replicated position or the server throws "origin mismatch".
     local g = gv()
     local sent = g and g._WH_HC_SENT
-    local origin = (sent and sent.Position) or root.Position
+    local realOrigin = (sent and sent.Position) or root.Position
+    local origin = realOrigin
+    local spoofed = (sent ~= nil)   -- voidshoot is always a real displacement
     -- Wallbang: spoof the origin just enough to clear the wall (within the server's
     -- ~10-stud tolerance). Skipped while voidshooting (origin is already on the target).
     if (HC.wallbang or _tpsWallbang) and not sent then
         origin = wallbangOrigin(origin, part)
         if not origin then return false end   -- no clear origin within budget -> skip, no error
+        if (origin - realOrigin).Magnitude > 0.5 then spoofed = true end   -- only if actually moved
     end
-    -- remember the spoofed origin so the tracer FX draws from it (not the on-screen muzzle).
-    -- only when we actually spoofed (voidshoot / wallbang); a normal shot keeps the usual muzzle.
-    if sent or HC.wallbang or _tpsWallbang then _fhSpoofOrigin, _fhSpoofAt = origin, tick() else _fhSpoofOrigin = nil end
+    -- remember the spoofed origin so the tracer FX draws from it. ONLY when the origin was
+    -- actually displaced (voidshoot / a real wallbang). A clear-LoS wallbang returns our root
+    -- position, which would otherwise make the tracer start from the body instead of the muzzle.
+    if spoofed then _fhSpoofOrigin, _fhSpoofAt = origin, tick() else _fhSpoofOrigin = nil end
     local hitPos = part.Position
     local hits, targets = table.create(pellets), table.create(pellets)
     for i = 1, pellets do
@@ -478,22 +482,34 @@ end
 -- ============================================================
 local _activeTracers, MAX_TRACERS = 0, 10
 local _lastTracerAt, MIN_TRACER_GAP = 0, 0.05
--- the gun's muzzle (barrel tip), not the handle centre (which sits in the hand, near the
--- body). The barrel runs along the handle's longest local axis; the muzzle is the end of
--- that axis facing the target, so the tracer leaves the gun instead of the chest.
-local function muzzlePos(aimAt)
+-- the gun's muzzle (barrel tip), not the handle centre (which sits in the hand by the chest).
+-- The muzzle is a FIXED point on the gun, independent of where we shoot: it's the gun's own
+-- attachment furthest from our body (the barrel sticks out front). Picking by shoot direction
+-- was wrong -- it flipped to the rear of the gun when the target was behind us. Falls back to
+-- the front of the handle's longest axis, then the head.
+local function muzzlePos()
     local c = LocalPlayer.Character
     local tool = c and c:FindFirstChildOfClass("Tool")
-    local handle = tool and (tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart"))
+    if not tool then local h = c and c:FindFirstChild("Head"); return h and h.Position end
+    local hrp = c:FindFirstChild("HumanoidRootPart")
+    local ref = (hrp and hrp.Position) or (c:FindFirstChild("Head") and c.Head.Position)
+    if ref then
+        local best, bestD
+        for _, d in ipairs(tool:GetDescendants()) do
+            if d:IsA("Attachment") then
+                local dd = (d.WorldPosition - ref).Magnitude
+                if not bestD or dd > bestD then bestD, best = dd, d.WorldPosition end   -- furthest = barrel tip
+            end
+        end
+        if best then return best end
+    end
+    local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
     if handle then
-        local sz, axis, half = handle.Size, Vector3.new(0, 0, 1), 0
-        if sz.Z >= sz.X and sz.Z >= sz.Y then axis, half = Vector3.new(0, 0, 1), sz.Z / 2
-        elseif sz.X >= sz.Y then axis, half = Vector3.new(1, 0, 0), sz.X / 2
-        else axis, half = Vector3.new(0, 1, 0), sz.Y / 2 end
-        local a = (handle.CFrame * CFrame.new(axis * half)).Position
-        local b = (handle.CFrame * CFrame.new(axis * -half)).Position
-        if aimAt then return ((aimAt - a).Magnitude <= (aimAt - b).Magnitude) and a or b end
-        return a
+        -- front along the handle's longest axis (the barrel), in the handle's own orientation
+        local sz = handle.Size
+        local axis = (sz.Z >= sz.X and sz.Z >= sz.Y) and Vector3.new(0, 0, -1)
+            or (sz.X >= sz.Y) and Vector3.new(-1, 0, 0) or Vector3.new(0, -1, 0)
+        return (handle.CFrame * CFrame.new(axis * (math.max(sz.X, sz.Y, sz.Z) / 2))).Position
     end
     local h = c and c:FindFirstChild("Head")
     return h and h.Position
@@ -633,7 +649,7 @@ local function fxShotFired(hitPos)
     if not HC.tracerEnabled or not hitPos then return end
     -- start from the spoofed origin if we just wallbanged / voidshot, else the usual muzzle
     local origin
-    if _fhSpoofOrigin and (tick() - _fhSpoofAt) < FX_WINDOW then origin = _fhSpoofOrigin else origin = muzzlePos(hitPos) end
+    if _fhSpoofOrigin and (tick() - _fhSpoofAt) < FX_WINDOW then origin = _fhSpoofOrigin else origin = muzzlePos() end
     if not origin then return end
     spawnTracer(origin, hitPos)
 end
@@ -1075,6 +1091,9 @@ local function tpShoot()
     end
 
     task.spawn(function()
+        local lh0 = curHRP()
+        local wasAnchored = (lh0 and lh0.Anchored) or false
+        if lh0 then pcall(function() lh0.Anchored = true end) end   -- stop physics ejecting us out of the floor (the "peek")
         pcall(function()
             if method == "Glue" or method == "Inside" then
                 local yoff = (method == "Glue") and TPS_GLUE_Y or 0
@@ -1112,7 +1131,8 @@ local function tpShoot()
         end)
         _tpsWallbang = false
         HC.wallbangOffset = savedWbOffset
-        local h = curHRP(); if h then pcall(function() h.CFrame = saved end) end
+        local h = curHRP()
+        if h then pcall(function() h.CFrame = saved end); pcall(function() h.Anchored = wasAnchored end) end
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(saved) end) end
         _tpsActive = false
     end)
