@@ -884,8 +884,10 @@ local function stompGlue(hrp)
     if not (lhrp and hrp) then return end
     local stompCF = CFrame.new(hrp.Position + Vector3.new(0, STOMP_Y, 0))
     if HC.stompTeleport then
-        -- TELEPORT mode: actually move on top of the victim (no desync, no local restore)
-        _stompSavedCF = nil
+        -- TELEPORT mode: actually move on top of the victim (no desync). Capture our
+        -- origin ONCE so we teleport back to it when we're done (the RenderStep restore
+        -- is disabled in this mode so it doesn't yank us off the victim mid-stomp).
+        if not _stompSavedCF then _stompSavedCF = lhrp.CFrame end
         pcall(function() lhrp.CFrame = stompCF end)
     else
         -- SPOOF mode: desync our physics-rep root onto the victim, keep our real pose locally
@@ -942,7 +944,7 @@ end))
 -- restore our real pose each render frame so the desync stays put locally
 pcall(function() RunService:UnbindFromRenderStep("WH_HC_STOMP_RESTORE") end)
 RunService:BindToRenderStep("WH_HC_STOMP_RESTORE", Enum.RenderPriority.First.Value, function()
-    if _stomping and _stompSavedCF then
+    if _stomping and _stompSavedCF and not HC.stompTeleport then
         local lc = LocalPlayer.Character
         local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
         if lhrp then pcall(function() lhrp.CFrame = _stompSavedCF end) end
@@ -992,7 +994,7 @@ local function tpsCoverSpot(targetModel, thrp)
 end
 local function tpShoot()
     if _tpsActive then return end
-    local plr = getTarget(false)          -- locked targets only, with all Checks applied
+    local plr = getTarget(canEngageNoVis) -- locked targets, all Checks EXCEPT the visible check
     if not plr then return end
     local tmodel = plr.Character or hcModel(plr)
     local thrp = tmodel and tmodel:FindFirstChild("HumanoidRootPart")
