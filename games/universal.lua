@@ -338,7 +338,7 @@ do
     local function ensureGui()
         if gui and gui.Parent then return end
         gui = Instance.new("ScreenGui")
-        gui.Name = "_wh_target"; gui.ResetOnSpawn = false; gui.IgnoreGuiInset = false
+        gui.Name = "_wh_target"; gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true   -- match WorldToViewportPoint (false drops the line below the target)
         pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
         if not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
         line = Instance.new("Frame")
@@ -355,7 +355,7 @@ do
                 local o, a = Combat.lineOrigin
                 if o == "Top" then a = Vector2.new(vs.X * 0.5, 0)
                 elseif o == "Center" then a = Vector2.new(vs.X * 0.5, vs.Y * 0.5)
-                elseif o == "Mouse" then a = UserInputService:GetMouseLocation() - game:GetService("GuiService"):GetGuiInset()
+                elseif o == "Mouse" then a = UserInputService:GetMouseLocation()   -- raw, matches the IgnoreGuiInset=true gui
                 else a = Vector2.new(vs.X * 0.5, vs.Y) end   -- Bottom (default)
                 local b = Vector2.new(sp.X, sp.Y)
                 local mid, d = (a + b) / 2, (b - a)
@@ -948,19 +948,15 @@ do
         local m = Desync.method
         if m == "Void" then
             hrp.CFrame = CFrame.new(randVoid())
-            Desync.serverCF = hrp.CFrame          -- expose spoof pos (Server Pos visualizer reads this)
         elseif m == "Spin" then
             spinAngle = (spinAngle + Desync.spinSpeed) % 360
             hrp.CFrame = hrp.CFrame * CFrame.Angles(
                 math.rad(spinAngle), math.rad(spinAngle * 2), math.rad(spinAngle * 0.5))
-            Desync.serverCF = hrp.CFrame
         elseif m == "Velocity" then
             hrp.AssemblyLinearVelocity = Vector3.one * Desync.velMag
-            Desync.serverCF = nil                 -- velocity-based: no CFrame position spoof
         elseif m == "Custom" then
             local rot = hrp.CFrame - hrp.CFrame.Position
             hrp.CFrame = CFrame.new(Desync.customX, Desync.customY, Desync.customZ) * rot
-            Desync.serverCF = hrp.CFrame
         end
     end
 
@@ -992,7 +988,7 @@ do
 
     -- ---- heartbeat spoof + renderstep restore (non-freeze methods) ----
     track(RunService.Heartbeat:Connect(function()
-        if not Desync.enabled or Desync.method == "Freeze" then Desync.serverCF = nil; return end
+        if not Desync.enabled or Desync.method == "Freeze" then return end
         local hrp = getHRP(); if not hrp then return end
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
         pcall(applySpoof, hrp)
@@ -1512,21 +1508,30 @@ do
     end
 
     -- buffer position + pose each frame, timestamped, so both replay delayed.
-    -- base = the desync's spoofed server position when desyncing, else your real HRP;
-    -- offsets = each tracked part's pose relative to the HRP (position-independent).
+    -- offsets (pose) are captured at Stepped, where the HRP sits at your REAL position, so
+    -- they're a consistent pose. base is captured at Heartbeat AFTER every desync feature has
+    -- spoofed the root that frame, so it's wherever your SERVER position actually is -- works
+    -- generically for the Desync page, Fling orbit, HC stomp/knife, anything that moves the root.
+    local pendingOffsets
     track(RunService.Stepped:Connect(function()
-        if not cfg.on then return end
+        if not cfg.on then pendingOffsets = nil; return end
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then pendingOffsets = nil; return end
+        local invReal = hrp.CFrame:Inverse()
+        local offs = {}
+        for _, rp in pairs(partMap) do
+            if rp.Parent then offs[rp] = invReal * rp.CFrame end
+        end
+        pendingOffsets = offs
+    end))
+    track(RunService.Heartbeat:Connect(function()
+        if not cfg.on or not pendingOffsets then return end
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not hrp then return end
         local now = os.clock()
-        local base = (Desync.enabled and Desync.serverCF) or hrp.CFrame
-        local invReal = hrp.CFrame:Inverse()
-        local offsets = {}
-        for _, rp in pairs(partMap) do
-            if rp.Parent then offsets[rp] = invReal * rp.CFrame end
-        end
-        history[#history + 1] = { t = now, base = base, offsets = offsets }
+        history[#history + 1] = { t = now, base = hrp.CFrame, offsets = pendingOffsets }   -- base = spoofed root (any desync)
         while history[1] and now - history[1].t > 2 do table.remove(history, 1) end   -- keep ~2s of samples
     end))
     -- render the clone from the snapshot (ping + 0.11) seconds ago = the server's pos+pose NOW
