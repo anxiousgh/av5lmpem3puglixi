@@ -478,11 +478,23 @@ end
 -- ============================================================
 local _activeTracers, MAX_TRACERS = 0, 10
 local _lastTracerAt, MIN_TRACER_GAP = 0, 0.05
-local function muzzlePos()
+-- the gun's muzzle (barrel tip), not the handle centre (which sits in the hand, near the
+-- body). The barrel runs along the handle's longest local axis; the muzzle is the end of
+-- that axis facing the target, so the tracer leaves the gun instead of the chest.
+local function muzzlePos(aimAt)
     local c = LocalPlayer.Character
     local tool = c and c:FindFirstChildOfClass("Tool")
     local handle = tool and (tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart"))
-    if handle then return handle.Position end
+    if handle then
+        local sz, axis, half = handle.Size, Vector3.new(0, 0, 1), 0
+        if sz.Z >= sz.X and sz.Z >= sz.Y then axis, half = Vector3.new(0, 0, 1), sz.Z / 2
+        elseif sz.X >= sz.Y then axis, half = Vector3.new(1, 0, 0), sz.X / 2
+        else axis, half = Vector3.new(0, 1, 0), sz.Y / 2 end
+        local a = (handle.CFrame * CFrame.new(axis * half)).Position
+        local b = (handle.CFrame * CFrame.new(axis * -half)).Position
+        if aimAt then return ((aimAt - a).Magnitude <= (aimAt - b).Magnitude) and a or b end
+        return a
+    end
     local h = c and c:FindFirstChild("Head")
     return h and h.Position
 end
@@ -621,7 +633,7 @@ local function fxShotFired(hitPos)
     if not HC.tracerEnabled or not hitPos then return end
     -- start from the spoofed origin if we just wallbanged / voidshot, else the usual muzzle
     local origin
-    if _fhSpoofOrigin and (tick() - _fhSpoofAt) < FX_WINDOW then origin = _fhSpoofOrigin else origin = muzzlePos() end
+    if _fhSpoofOrigin and (tick() - _fhSpoofAt) < FX_WINDOW then origin = _fhSpoofOrigin else origin = muzzlePos(hitPos) end
     if not origin then return end
     spawnTracer(origin, hitPos)
 end
