@@ -1,14 +1,18 @@
 -- ============================================================
 --  games/103839367350287.lua  --  Zee  (Da Hood-style combat RP)
 --
---  Target-lock auto-shoot + target visualizer. Fires the gun's own shoot remote
---    GameRemotes.MainGameEvent:FireServer("ShootGun", Handle, origin, nil,
---        hitPos, hitPart, normal, Range, Damage)
---  at locked targets inside the gun's Range, paced by the gun's ShootingCooldown.
+--  Force Hit  : forces YOUR shots onto the locked target nearest your crosshair
+--               (replaces require(RS.Modules.GunHandler).Shoot -> returns the
+--               target part; the game's own shot then carries it, incl. every
+--               shotgun pellet). No __namecall hook (the game kicks for that).
+--  Auto shoot : auto-fires ShootGun at the best hittable locked target. The checks
+--               (knocked / range / visible) decide what counts as "hittable".
+--  No Slowdown: deletes anything added to BodyEffects.Movement and forces
+--               BodyEffects.Reload back off (kills move/reload slowdowns).
+--  Auto reload: fires the Reload remote when the equipped gun is out of ammo.
+--  Shotguns ([Double-Barrel SG] / [TacticalShotgun]) fire 5 pellets, never more.
 --
---  NO __namecall hook anywhere (the game kicks for "namecallInstance detector") --
---  only normal FireServer calls + GUI/Highlights. Combat is server-validated and the
---  game has active human mods, so this is VISIBLE -- burner only.
+--  !! Server-validated combat + human mods. Very visible -> burner only.
 -- ============================================================
 local ctx     = ({ ... })[1]
 local Library = ctx.Library
@@ -27,8 +31,9 @@ local conns = {}
 local function track(c) conns[#conns + 1] = c; return c end
 
 local S = {
-    auto = false, aura = false, hitPart = "Head", visibleOnly = true,
-    fastFire = false, fastFireCD = 0.06,
+    forceHit = false, autoShoot = false, aura = false, hitPart = "Head",
+    checkKnocked = true, checkRange = true, checkVisible = true,
+    fastFire = false, fastFireCD = 0.06, autoReload = true, noSlowdown = false,
     outline = true, outlineColor = Color3.fromRGB(255, 60, 60),
     tracer = false, tracerColor = Color3.fromRGB(255, 60, 60), tracerOrigin = "Bottom",
 }
@@ -46,12 +51,24 @@ local function aliveChar(p)
     if dead and dead.Value == true then return nil end
     return c:FindFirstChild("HumanoidRootPart") and c or nil
 end
+local function isKnocked(p)   -- HC-style: BodyEffects["K.O"].Value
+    local c = charOf(p); local be = c and c:FindFirstChild("BodyEffects")
+    local ko = be and be:FindFirstChild("K.O")
+    return ko ~= nil and ko.Value == true
+end
 local function partOf(c) return c:FindFirstChild(S.hitPart) or c:FindFirstChild("Head") or c:FindFirstChild("HumanoidRootPart") end
 local function equippedGun()
     local char = myChar(); if not char then return nil end
     for _, t in ipairs(char:GetChildren()) do
         if t:IsA("Tool") and t:FindFirstChild("Range") and t:FindFirstChild("Handle") then return t end
     end
+end
+local function pelletCount(gun) return gun:FindFirstChild("GunClientShotgun") and 5 or 1 end   -- shotguns = 5
+local function visibleTo(muzzle, part)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { myChar(), part.Parent }
+    return workspace:Raycast(muzzle, part.Position - muzzle, params) == nil
 end
 local function nearestMousePlayer()
     local mouse = UIS:GetMouseLocation()
@@ -71,53 +88,117 @@ local function nearestMousePlayer()
     end
     return best
 end
-local function visibleTo(muzzle, part)
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { myChar(), part.Parent }
-    return workspace:Raycast(muzzle, part.Position - muzzle, params) == nil
+local function activePool() return S.aura and Players:GetPlayers() or nil end   -- nil => iterate `locked`
+Players.PlayerRemoving:Connect(function(p) locked[p] = nil end)
+
+-- ---- Force Hit: aim-target cache (nearest crosshair among the active set) ----
+local aimCache = { part = nil, pos = nil }
+track(RunService.RenderStepped:Connect(function()
+    if not S.forceHit then aimCache.part, aimCache.pos = nil, nil; return end
+    local mouse = UIS:GetMouseLocation()
+    local bestPart, bestD
+    local function tryP(p)
+        if p == LP then return end
+        local c = aliveChar(p); local part = c and partOf(c); if not part then return end
+        local sp, on = Camera:WorldToViewportPoint(part.Position)
+        if on and sp.Z > 0 then
+            local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+            if not bestD or d < bestD then bestD, bestPart = d, part end
+        end
+    end
+    local pool = activePool()
+    if pool then for _, p in ipairs(pool) do tryP(p) end else for p in pairs(locked) do tryP(p) end end
+    aimCache.part = bestPart
+    aimCache.pos  = bestPart and bestPart.Position or nil
+end))
+
+-- Force Hit: replace GunHandler.Shoot so your manual shots (every pellet) land on the target
+local okGH, GH = pcall(function() return require(RS.Modules.GunHandler) end)
+if okGH and type(GH) == "table" and type(GH.Shoot) == "function" then
+    local oldShoot = GH.Shoot
+    GH.Shoot = function(params, ...)
+        if S.forceHit and aimCache.part and aimCache.pos then
+            local origin = (type(params) == "table" and params.ForcedOrigin) or aimCache.pos
+            return aimCache.pos, aimCache.part, (origin - aimCache.pos).Unit   -- hitPos, hitPart, normal
+        end
+        return oldShoot(params, ...)
+    end
+else
+    warn("[zee] Force Hit unavailable: couldn't hook GunHandler.Shoot")
 end
+
+-- ---- Auto shoot (+ auto reload) ----
 local function fireAt(gun, part)
     local handle = gun:FindFirstChild("Handle"); if not handle then return end
     local origin = (handle.CFrame * CFrame.new(-1, 0.4, 0)).Position
     local hitPos = part.Position
-    MainGameEvent:FireServer("ShootGun", handle, origin, nil, hitPos, part, (origin - hitPos).Unit,
-        gun.Range.Value, gun:FindFirstChild("Damage") and gun.Damage.Value or 0)
+    local normal = (origin - hitPos).Unit
+    local range  = gun.Range.Value
+    local dmg    = gun:FindFirstChild("Damage") and gun.Damage.Value or 0
+    for _ = 1, pelletCount(gun) do
+        MainGameEvent:FireServer("ShootGun", handle, origin, nil, hitPos, part, normal, range, dmg)
+    end
 end
-Players.PlayerRemoving:Connect(function(p) locked[p] = nil end)
-
--- ---- auto shoot ----
-local lastShot = 0
+local lastShot, lastReload = 0, 0
 track(RunService.Heartbeat:Connect(function()
-    if not (S.auto) then return end
-    local gun = equippedGun(); if not gun then return end
+    local gun = equippedGun()
+    if S.autoReload and gun and gun:FindFirstChild("Ammo") and gun.Ammo.Value < 1 and tick() - lastReload > 1.5 then
+        lastReload = tick()
+        pcall(function() MainGameEvent:FireServer("Reload", gun) end)
+    end
+    if not S.autoShoot or not gun then return end
     if S.fastFire and gun:FindFirstChild("ShootingCooldown") then pcall(function() gun.ShootingCooldown.Value = S.fastFireCD end) end
     local cd = (gun:FindFirstChild("ShootingCooldown") and gun.ShootingCooldown.Value) or 0.2
     if tick() - lastShot < cd then return end
     if gun:FindFirstChild("Ammo") and gun.Ammo.Value < 1 then return end
     local mc = myChar(); local myHRP = mc and mc:FindFirstChild("HumanoidRootPart"); if not myHRP then return end
     local muzzle = (gun.Handle.CFrame * CFrame.new(-1, 0.4, 0)).Position
-    local function consider(p)
+    local function hittable(p)
         if p == LP then return end
-        local c = aliveChar(p); local part = c and partOf(c); if not part then return end
+        local c = aliveChar(p); if not c then return end
+        if S.checkKnocked and isKnocked(p) then return end
+        local part = partOf(c); if not part then return end
         local dist = (part.Position - myHRP.Position).Magnitude
-        if dist > gun.Range.Value then return end
-        if S.visibleOnly and not visibleTo(muzzle, part) then return end
+        if S.checkRange and dist > gun.Range.Value then return end
+        if S.checkVisible and not visibleTo(muzzle, part) then return end
         return part, dist
     end
     local bestPart, bestD
-    local pool = S.aura and Players:GetPlayers() or nil
-    if pool then
-        for _, p in ipairs(pool) do local part, dist = consider(p); if part and (not bestD or dist < bestD) then bestPart, bestD = part, dist end end
-    else
-        for p in pairs(locked) do local part, dist = consider(p); if part and (not bestD or dist < bestD) then bestPart, bestD = part, dist end end
-    end
+    local pool = activePool()
+    if pool then for _, p in ipairs(pool) do local pt, d = hittable(p); if pt and (not bestD or d < bestD) then bestPart, bestD = pt, d end end
+    else for p in pairs(locked) do local pt, d = hittable(p); if pt and (not bestD or d < bestD) then bestPart, bestD = pt, d end end end
     if bestPart then lastShot = tick(); fireAt(gun, bestPart) end
 end))
 
+-- ---- No Slowdown ----
+do
+    local nsConns = {}
+    local function clearNS() for _, c in ipairs(nsConns) do pcall(function() c:Disconnect() end) end; nsConns = {} end
+    local function setupNS()
+        clearNS()
+        if not S.noSlowdown then return end
+        local be = myChar() and myChar():FindFirstChild("BodyEffects"); if not be then return end
+        local mv = be:FindFirstChild("Movement")
+        if mv then
+            for _, c in ipairs(mv:GetChildren()) do pcall(function() c:Destroy() end) end
+            nsConns[#nsConns + 1] = mv.ChildAdded:Connect(function(ch) pcall(function() ch:Destroy() end) end)
+        end
+        local rl = be:FindFirstChild("Reload")
+        if rl then
+            if rl.Value == true then pcall(function() rl.Value = false end) end
+            nsConns[#nsConns + 1] = rl:GetPropertyChangedSignal("Value"):Connect(function()
+                if rl.Value == true then pcall(function() rl.Value = false end) end
+            end)
+        end
+    end
+    S._setupNS = setupNS
+    S._clearNS = clearNS
+    track(LP.CharacterAdded:Connect(function() if S.noSlowdown then task.wait(0.6); setupNS() end end))
+end
+
 -- ---- target visualizer (outline + tracer on locked players) ----
 do
-    local gui, vis = nil, {}   -- vis[player] = { hl, line }
+    local gui, vis = nil, {}
     local function ensureGui()
         if gui and gui.Parent then return end
         gui = Instance.new("ScreenGui"); gui.Name = "\0"; gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true
@@ -169,39 +250,19 @@ do
             end
         end
     end))
-    -- expose a teardown for cleanup
     S._clearVis = function() for p in pairs(vis) do clear(p) end; if gui then pcall(function() gui:Destroy() end); gui = nil end end
 end
 
 -- ============================================================
---  UI
+--  UI  (Target subpage first)
 -- ============================================================
 do
-    local Sub = MainPage:SubPage({ Name = "Auto Shoot" })
-    local Sec = Sub:Section({ Name = "Auto shoot", Side = 1 })
-    local autoToggle = Sec:Toggle({ Name = "Auto shoot", Flag = "ZeeAuto", Default = false,
-        Callback = function(v) S.auto = v end })
-    Sec:Label({ Name = "Toggle key" }):Keybind({ Name = "Auto shoot", Flag = "ZeeAutoKey", Mode = "Toggle", Default = Enum.KeyCode.RightShift,
-        Callback = function(state) autoToggle:Set(state and true or false) end })
-    Sec:Toggle({ Name = "Aura (shoot anyone in range)", Flag = "ZeeAura", Default = false,
-        Callback = function(v) S.aura = v end })
-    Sec:Toggle({ Name = "Visible only", Flag = "ZeeVis", Default = true,
-        Callback = function(v) S.visibleOnly = v end })
-    Sec:Dropdown({ Name = "Hit part", Flag = "ZeeHitPart", Default = "Head", Multi = false,
-        Items = { "Head", "Torso", "HumanoidRootPart" },
-        Callback = function(v) S.hitPart = (type(v) == "table" and v[1]) or v or "Head" end })
-    local Sec2 = Sub:Section({ Name = "Fire rate", Side = 2 })
-    Sec2:Toggle({ Name = "Fast fire (override cooldown)", Flag = "ZeeFast", Default = false,
-        Callback = function(v) S.fastFire = v end })
-    Sec2:Slider({ Name = "Fast fire cooldown", Flag = "ZeeFastCD", Min = 0.02, Max = 0.5, Default = 0.06, Decimals = 2, Suffix = "s",
-        Callback = function(v) S.fastFireCD = v end })
-
     local TSub = MainPage:SubPage({ Name = "Target" })
     local TSec = TSub:Section({ Name = "Targeting", Side = 1 })
     TSec:Label({ Name = "Target player (nearest mouse)" }):Keybind({ Name = "Target", Flag = "ZeeTargetKey", Mode = "Hold", Default = Enum.KeyCode.E,
         Callback = function(state) if state then local p = nearestMousePlayer(); if p then locked[p] = true end end end })
-    TSec:Label({ Name = "Untarget player (nearest mouse)" }):Keybind({ Name = "Untarget", Flag = "ZeeUntargetKey", Mode = "Hold", Default = Enum.KeyCode.T,
-        Callback = function(state) if state then local p = nearestMousePlayer(); if p then locked[p] = nil end end end })
+    TSec:Label({ Name = "Untarget all" }):Keybind({ Name = "Untarget", Flag = "ZeeUntargetKey", Mode = "Hold", Default = Enum.KeyCode.T,
+        Callback = function(state) if state then for p in pairs(locked) do locked[p] = nil end end end })
     TSec:Button({ Name = "Clear all targets", Callback = function() for p in pairs(locked) do locked[p] = nil end end })
     local lockLbl = TSec:Label({ Name = "Locked: 0" })
     track(RunService.Heartbeat:Connect(function()
@@ -210,17 +271,40 @@ do
     end))
 
     local VSec = TSub:Section({ Name = "Visualizer", Side = 2 })
-    VSec:Toggle({ Name = "Outline", Flag = "ZeeOutline", Default = true,
-        Callback = function(v) S.outline = v end })
-    VSec:Label({ Name = "Outline color" }):Colorpicker({ Flag = "ZeeOutlineColor", Default = S.outlineColor,
-        Callback = function(c) S.outlineColor = c end })
-    VSec:Toggle({ Name = "Tracer", Flag = "ZeeTracer", Default = false,
-        Callback = function(v) S.tracer = v end })
-    VSec:Dropdown({ Name = "Tracer origin", Flag = "ZeeTracerOrigin", Default = "Bottom", Multi = false,
-        Items = { "Bottom", "Top", "Mouse" },
+    VSec:Toggle({ Name = "Outline", Flag = "ZeeOutline", Default = true, Callback = function(v) S.outline = v end })
+    VSec:Label({ Name = "Outline color" }):Colorpicker({ Flag = "ZeeOutlineColor", Default = S.outlineColor, Callback = function(c) S.outlineColor = c end })
+    VSec:Toggle({ Name = "Tracer", Flag = "ZeeTracer", Default = false, Callback = function(v) S.tracer = v end })
+    VSec:Dropdown({ Name = "Tracer origin", Flag = "ZeeTracerOrigin", Default = "Bottom", Multi = false, Items = { "Bottom", "Top", "Mouse" },
         Callback = function(v) S.tracerOrigin = (type(v) == "table" and v[1]) or v or "Bottom" end })
-    VSec:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "ZeeTracerColor", Default = S.tracerColor,
-        Callback = function(c) S.tracerColor = c end })
+    VSec:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "ZeeTracerColor", Default = S.tracerColor, Callback = function(c) S.tracerColor = c end })
+
+    -- Force Hit
+    local FSub = MainPage:SubPage({ Name = "Force Hit" })
+    local FSec = FSub:Section({ Name = "Force Hit", Side = 1 })
+    local fhToggle = FSec:Toggle({ Name = "Force Hit", Flag = "ZeeForceHit", Default = false, Callback = function(v) S.forceHit = v end })
+    FSec:Label({ Name = "Force Hit key" }):Keybind({ Name = "Force Hit", Flag = "ZeeForceHitKey", Mode = "Toggle",
+        Callback = function(state) fhToggle:Set(state and true or false) end })
+    local asToggle = FSec:Toggle({ Name = "Auto shoot", Flag = "ZeeAuto", Default = false, Callback = function(v) S.autoShoot = v end })
+    FSec:Label({ Name = "Auto shoot key" }):Keybind({ Name = "Auto shoot", Flag = "ZeeAutoKey", Mode = "Toggle",
+        Callback = function(state) asToggle:Set(state and true or false) end })
+    FSec:Toggle({ Name = "Aura (any player, not just locked)", Flag = "ZeeAura", Default = false, Callback = function(v) S.aura = v end })
+    FSec:Dropdown({ Name = "Hit part", Flag = "ZeeHitPart", Default = "Head", Multi = false, Items = { "Head", "Torso", "HumanoidRootPart" },
+        Callback = function(v) S.hitPart = (type(v) == "table" and v[1]) or v or "Head" end })
+    FSec:Toggle({ Name = "Fast fire (override cooldown)", Flag = "ZeeFast", Default = false, Callback = function(v) S.fastFire = v end })
+    FSec:Slider({ Name = "Fast fire cooldown", Flag = "ZeeFastCD", Min = 0.02, Max = 0.5, Default = 0.06, Decimals = 2, Suffix = "s",
+        Callback = function(v) S.fastFireCD = v end })
+
+    local CSec = FSub:Section({ Name = "Auto shoot checks", Side = 2 })
+    CSec:Toggle({ Name = "Knocked check", Flag = "ZeeChkKnock", Default = true, Callback = function(v) S.checkKnocked = v end })
+    CSec:Toggle({ Name = "Range check", Flag = "ZeeChkRange", Default = true, Callback = function(v) S.checkRange = v end })
+    CSec:Toggle({ Name = "Visible check", Flag = "ZeeChkVis", Default = true, Callback = function(v) S.checkVisible = v end })
+
+    -- Misc
+    local MSub = MainPage:SubPage({ Name = "Misc" })
+    local MSec = MSub:Section({ Name = "Utility", Side = 1 })
+    MSec:Toggle({ Name = "No Slowdown", Flag = "ZeeNoSlow", Default = false,
+        Callback = function(v) S.noSlowdown = v; if v then S._setupNS() else S._clearNS() end end })
+    MSec:Toggle({ Name = "Auto reload", Flag = "ZeeAutoReload", Default = true, Callback = function(v) S.autoReload = v end })
 end
 
 -- universal pages after Main
@@ -228,8 +312,9 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 
 -- teardown
 local function cleanup()
-    S.auto = false
+    S.forceHit, S.autoShoot, S.noSlowdown = false, false, false
     if S._clearVis then pcall(S._clearVis) end
+    if S._clearNS then pcall(S._clearNS) end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 end
 do
