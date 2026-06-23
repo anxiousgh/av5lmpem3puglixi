@@ -1052,7 +1052,7 @@ do
         local r = findRaknet()
         if not r or not r.add_send_hook then return false end
         SHARED.hookFn = function(packet)
-            if not SHARED.freeze then return end
+            if not SHARED.freeze or SHARED.pause then return end   -- pause lets TP-shoot replicate the teleport
             local id; pcall(function() id = packet.PacketId end)
             if id == 0x1B then     -- outbound physics replication
                 pcall(function() packet:SetCanBeSent(false) end)
@@ -1067,14 +1067,15 @@ do
 
     -- ---- heartbeat spoof + renderstep restore (non-freeze methods) ----
     track(RunService.Heartbeat:Connect(function()
-        if not Desync.enabled or Desync.method == "Freeze" then return end
+        if not Desync.enabled or Desync.method == "Freeze" or SHARED.pause then return end
         local hrp = getHRP(); if not hrp then return end
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
+        SHARED.realCF = realCF   -- expose our TRUE CFrame so TP-shoot can pause + restore cleanly
         pcall(applySpoof, hrp)
     end))
 
     RunService:BindToRenderStep(RESTORE, Enum.RenderPriority.First.Value, function()
-        if not Desync.enabled or Desync.method == "Freeze" then return end
+        if not Desync.enabled or Desync.method == "Freeze" or SHARED.pause then return end
         local hrp = getHRP(); if not hrp or not realCF then return end
         pcall(function()
             if Desync.method ~= "Velocity" then hrp.CFrame = realCF end

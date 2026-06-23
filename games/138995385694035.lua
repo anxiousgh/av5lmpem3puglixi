@@ -1070,9 +1070,14 @@ local function tpShoot()
     if not lc:FindFirstChildOfClass("Tool") then tryEquipNamed("[DoubleBarrel]") end
 
     _tpsActive = true
-    local saved = lhrp.CFrame
     local method = HC.tpShootMethod
     local g = gv()
+    -- pause desync for the burst so it can't spoof our root into the sky mid-teleport
+    -- (which flings / kills the real character). Use the desync's captured real CFrame
+    -- as our return point, since right now our root may be at the spoofed position.
+    local SHARED = g and g._WH_DESYNC
+    if SHARED then SHARED.pause = true end
+    local saved = (SHARED and SHARED.realCF) or lhrp.CFrame
     local savedWbOffset = HC.wallbangOffset
     if method == "Wallbang" then HC.wallbangOffset = 11 end   -- use the full origin-spoof budget
     local function curHRP()
@@ -1096,11 +1101,12 @@ local function tpShoot()
         local lh0 = curHRP()
         local wasAnchored = (lh0 and lh0.Anchored) or false
         if lh0 then pcall(function() lh0.Anchored = true end) end   -- stop physics ejecting us out of the floor (the "peek")
+        if SHARED and lh0 then pcall(function() lh0.CFrame = saved end) end   -- snap to real if desync had us spoofed
         pcall(function()
             if method == "Glue" or method == "Inside" then
                 local yoff = (method == "Glue") and TPS_GLUE_Y or 0
                 local start, fired = tick(), false
-                while tick() - start < 1.2 do          -- settle 0.2s -> shoot -> linger ~1s
+                while tick() - start < 1.6 do          -- settle 0.2s -> shoot -> linger ~1.4s
                     local th = plr.Character or hcModel(plr)
                     th = th and th:FindFirstChild("HumanoidRootPart")
                     if not th then break end
@@ -1110,6 +1116,7 @@ local function tpShoot()
                 end
             else
                 local cf
+                local bstart = tick()
                 if method == "Above" then
                     cf = CFrame.new(thrp.Position + Vector3.new(0, HC.tpShootDist, 0))
                 elseif method == "Below" then
@@ -1140,8 +1147,7 @@ local function tpShoot()
                     end
                     place(cf); RunService.Heartbeat:Wait()
                 end
-                s = tick()
-                while tick() - s < 0.12 do place(cf); RunService.Heartbeat:Wait() end   -- linger before returning
+                while tick() - bstart < 1.6 do place(cf); RunService.Heartbeat:Wait() end   -- stay ~1.6s before returning
             end
         end)
         _tpsWallbang = false
@@ -1149,6 +1155,7 @@ local function tpShoot()
         local h = curHRP()
         if h then pcall(function() h.CFrame = saved end); pcall(function() h.Anchored = wasAnchored end) end
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(saved) end) end
+        if SHARED then SHARED.pause = false end   -- resume desync from our restored real position
         _tpsActive = false
     end)
 end
