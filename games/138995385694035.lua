@@ -199,6 +199,14 @@ local function isVisible(plr)
     local ignore = {}
     local lc = LocalPlayer.Character; if lc then ignore[#ignore + 1] = lc end
     local ig = Workspace:FindFirstChild("Ignored"); if ig then ignore[#ignore + 1] = ig end
+    -- ignore OTHER players' bodies so someone standing between us doesn't block the
+    -- LoS check (keep the target m, so "first hit is the target = visible" still holds).
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            local pm = hcModel(p)
+            if pm and pm ~= m then ignore[#ignore + 1] = pm end
+        end
+    end
     params.FilterDescendantsInstances = ignore
     local res = Workspace:Raycast(origin, aim.Position - origin, params)
     if not res then return true end          -- nothing in the way
