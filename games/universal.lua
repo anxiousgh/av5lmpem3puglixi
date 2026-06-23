@@ -1199,7 +1199,7 @@ do
 
     -- ---------- Orbit ----------
     local orbit = { on = false, dist = 4, speed = 400, minH = 0, maxH = 0, heightOn = false,
-        lookAt = true, fakePos = false, desync = false, pattern = "Orbit" }
+        lookAt = true, fakePos = true, desync = false, pattern = "Orbit" }
     local _attached, _angle, _orbitReal = false, 0, nil
     local _hCur, _hTarget, _hTimer = 0, 0, 0   -- smooth random height (advanced in the loop by dt)
     -- offset around the target for the chosen pattern. _hCur is a smooth random height between
@@ -1310,7 +1310,7 @@ do
     pcall(function() maxHSlider:SetVisibility(false) end)
     OSec:Toggle({ Name = "Lookat target", Flag = "FlingOrbitLook", Default = true,
         Callback = function(v) orbit.lookAt = v end })
-    OSec:Toggle({ Name = "Fake Pos", Flag = "FlingOrbitFakePos", Default = false,
+    OSec:Toggle({ Name = "Fake Pos", Flag = "FlingOrbitFakePos", Default = true,
         Callback = function(v) orbit.fakePos = v end })
     OSec:Toggle({ Name = "Desync", Flag = "FlingOrbitDesync", Default = false,
         Callback = function(v) orbit.desync = v end })
