@@ -1286,6 +1286,7 @@ do
     local _hCur, _hTarget, _hTimer = 0, 0, 0   -- smooth random height (advanced in the loop by dt)
     local _randOff, _randTimer = Vector3.zero, 0                              -- Random: re-rolled spot
     local _planA, _planB, _planAt, _planBt, _planTimer = 0.5, 0.3, 0.5, 0.3, 0  -- Planetary: drifting tilt
+    local _planC, _planCt = 0, 0                                             -- Planetary: drifting radius wobble
     -- offset around the target for the chosen pattern. _hCur is a smooth random height between
     -- Min/Max (independent of orbit speed), applied only when the Height toggle is on.
     -- a random point on the sphere of radius `dist` around the target (+ random height)
@@ -1303,9 +1304,10 @@ do
         local p = orbit.pattern
         if p == "Random" then              -- teleport to re-rolled random spots around the target
             return _randOff
-        elseif p == "Planetary" then       -- flat ring tilted by a slowly-DRIFTING amount, so the
-                                           -- path precesses instead of tracing the same ring/height
-            return Vector3.new(math.cos(rad) * d, (math.cos(rad) * _planA + math.sin(rad) * _planB) * d + bob, math.sin(rad) * d)
+        elseif p == "Planetary" then       -- a ring whose tilt AND radius drift randomly, so the
+                                           -- path + height wander and never repeat
+            local rw = d * (1 + _planC)
+            return Vector3.new(math.cos(rad) * rw, (math.cos(rad) * _planA + math.sin(rad) * _planB) * d + bob, math.sin(rad) * rw)
         elseif p == "Vertical" then        -- vertical loop straight over the top
             return Vector3.new(0, math.sin(rad) * d + bob, math.cos(rad) * d)
         elseif p == "Spiral" then          -- flat ring with a slow continuous vertical wind
@@ -1349,16 +1351,19 @@ do
             _randTimer = _randTimer - dt
             if _randTimer <= 0 then
                 _randOff = randomOrbitOffset()
-                _randTimer = 0.06 + math.random() * 0.12        -- a new random spot every ~0.06-0.18s
+                local iv = math.clamp(50 / math.max(orbit.speed, 1), 0.012, 2)   -- higher Speed -> jump more often
+                _randTimer = iv * (0.8 + math.random() * 0.4)
             end
         elseif _p == "Planetary" then
             _planTimer = _planTimer - dt
-            if _planTimer <= 0 then                             -- drift the tilt toward new random targets
-                _planAt, _planBt = (math.random() - 0.5) * 2, (math.random() - 0.5) * 2
-                _planTimer = 0.8 + math.random() * 1.5
+            if _planTimer <= 0 then                             -- drift tilt + radius toward new random targets
+                _planAt, _planBt = (math.random() - 0.5) * 3, (math.random() - 0.5) * 3   -- wider tilt range
+                _planCt = (math.random() - 0.5) * 0.8                                       -- radius wobble
+                _planTimer = 0.4 + math.random() * 0.8                                      -- drift more often
             end
-            _planA = _planA + (_planAt - _planA) * math.clamp(dt * 1.5, 0, 1)
-            _planB = _planB + (_planBt - _planB) * math.clamp(dt * 1.5, 0, 1)
+            _planA = _planA + (_planAt - _planA) * math.clamp(dt * 2, 0, 1)
+            _planB = _planB + (_planBt - _planB) * math.clamp(dt * 2, 0, 1)
+            _planC = _planC + (_planCt - _planC) * math.clamp(dt * 2, 0, 1)
         end
         local pos = tHrp.Position + orbitOffset()
         local cf = orbit.lookAt and CFrame.new(pos, tHrp.Position) or CFrame.new(pos)
