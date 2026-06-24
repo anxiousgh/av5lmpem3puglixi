@@ -1115,8 +1115,10 @@ local function tpShoot()
 
     task.spawn(function()
         local lh0 = curHRP()
-        local wasAnchored = (lh0 and lh0.Anchored) or false
-        if lh0 then pcall(function() lh0.Anchored = true end) end   -- stop physics ejecting us out of the floor (the "peek")
+        -- NOTE: do NOT anchor the HRP here. Anchoring stops the character's movement
+        -- replication, so the server never sees the teleport and every shot's origin
+        -- mismatches our last replicated position -> "too many origin mismatches" kick.
+        -- We set the CFrame on the UNANCHORED root (like void/stomp) so it replicates.
         if SHARED and lh0 then pcall(function() lh0.CFrame = saved end) end   -- snap to real if desync had us spoofed
         pcall(function()
             local cf
@@ -1156,7 +1158,7 @@ local function tpShoot()
         _tpsWallbang = false
         HC.wallbangOffset = savedWbOffset
         local h = curHRP()
-        if h then pcall(function() h.CFrame = saved end); pcall(function() h.Anchored = wasAnchored end) end
+        if h then pcall(function() h.CFrame = saved end) end
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(saved) end) end
         if SHARED then SHARED.pause = false end   -- resume desync from our restored real position
         _tpsActive = false
