@@ -1102,7 +1102,10 @@ local function tpShoot()
         return c and c:FindFirstChild("HumanoidRootPart")
     end
     local function place(cf)
-        local h = curHRP(); if h then pcall(function() h.CFrame = cf end) end
+        local h = curHRP()
+        -- zero velocity each frame so gluing inside / above a colliding target doesn't build
+        -- up momentum that flings us back toward them the instant we restore our real CFrame
+        if h then pcall(function() h.CFrame = cf; h.AssemblyLinearVelocity = Vector3.zero end) end
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(cf) end) end
     end
     local function fire()
@@ -1133,7 +1136,7 @@ local function tpShoot()
                     if not th then break end
                     place(CFrame.new(th.Position + Vector3.new(0, yoff, 0)))
                     if not firedAt and tick() - start >= 0.06 and fire() then firedAt = tick() end   -- retry until it lands
-                    if firedAt and tick() - firedAt >= 0.5 then break end     -- stay 0.5s after the shot
+                    if firedAt and tick() - firedAt >= 0.2 then break end      -- stay 0.2s after the shot
                     if not firedAt and tick() - start >= 1.2 then break end   -- safety if it can't fire
                     RunService.Heartbeat:Wait()
                 end
@@ -1176,7 +1179,11 @@ local function tpShoot()
         _tpsWallbang = false
         HC.wallbangOffset = savedWbOffset
         local h = curHRP()
-        if h then pcall(function() h.CFrame = saved end) end
+        if h then pcall(function()
+            h.CFrame = saved
+            h.AssemblyLinearVelocity = Vector3.zero    -- kill glue momentum so we stay at our real spot
+            h.AssemblyAngularVelocity = Vector3.zero
+        end) end
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(saved) end) end
         if SHARED then SHARED.pause = false end   -- resume desync from our restored real position
         _tpsActive = false
