@@ -991,6 +991,7 @@ end)
 --  We actually move (the CFrame is re-asserted each Heartbeat so the server registers the
 --  pose) -> the shot origin == our real position and validates -> then we restore.
 -- ============================================================
+local TPS_GLUE_Y = 50
 local function tpsIgnoreList(targetModel)
     local ig = {}
     local lc = LocalPlayer.Character; if lc then ig[#ig + 1] = lc end
@@ -1121,6 +1122,23 @@ local function tpShoot()
         -- We set the CFrame on the UNANCHORED root (like void/stomp) so it replicates.
         if SHARED and lh0 then pcall(function() lh0.CFrame = saved end) end   -- snap to real if desync had us spoofed
         pcall(function()
+            if method == "Glue" or method == "Inside" then
+                -- follow the target (glued 50 above, or right inside it), settle briefly,
+                -- shoot, then stay for ~0.5s
+                local yoff = (method == "Glue") and TPS_GLUE_Y or 0
+                local start, firedAt = tick(), nil
+                while true do
+                    local th = plr.Character or hcModel(plr)
+                    th = th and th:FindFirstChild("HumanoidRootPart")
+                    if not th then break end
+                    place(CFrame.new(th.Position + Vector3.new(0, yoff, 0)))
+                    if not firedAt and tick() - start >= 0.06 and fire() then firedAt = tick() end   -- retry until it lands
+                    if firedAt and tick() - firedAt >= 0.5 then break end     -- stay 0.5s after the shot
+                    if not firedAt and tick() - start >= 1.2 then break end   -- safety if it can't fire
+                    RunService.Heartbeat:Wait()
+                end
+                return
+            end
             local cf
             if method == "Above" then
                 cf = CFrame.new(thrp.Position + Vector3.new(0, HC.tpShootDist, 0))
@@ -1631,7 +1649,7 @@ do
 
     local Sec3 = RageSub:Section({ Name = "TP Shoot", Side = 2 })
     Sec3:Dropdown({ Name = "Method", Flag = "HC_TpShootMethod", Default = "Wallbang", Multi = false,
-        Items = { "Wallbang", "Above", "Below" },
+        Items = { "Wallbang", "Above", "Below", "Glue", "Inside" },
         Callback = function(v) HC.tpShootMethod = (type(v) == "table" and v[1]) or v or "Wallbang" end })
     Sec3:Slider({ Name = "Above/Below distance", Flag = "HC_TpShootDist", Min = 3, Max = 100, Default = 30, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.tpShootDist = v end })
