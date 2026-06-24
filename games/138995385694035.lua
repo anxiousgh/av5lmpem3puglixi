@@ -1135,7 +1135,7 @@ local function tpShoot()
                 _tpsWallbang = true
             end
             local s = tick()
-            while tick() - s < 0.15 do place(cf); RunService.Heartbeat:Wait() end   -- settle so the server registers the teleport before we shoot
+            while tick() - s < 0.23 do place(cf); RunService.Heartbeat:Wait() end   -- settle so the server registers the teleport before we shoot
             -- keep trying until the shot actually goes out -- the target may move or the
             -- spoof origin may need a fresh spot; for wallbang, re-pick cover on each miss
             local fired, ftry = false, tick()
