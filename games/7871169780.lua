@@ -245,7 +245,7 @@ local function ensureSurface(tile)
     local sg = _surfaces[tile]
     if sg and sg.Parent then return sg end
     sg = Instance.new("SurfaceGui")
-    sg.Name, sg.Face, sg.AlwaysOnTop, sg.LightInfluence = "_MS_ESP", Enum.NormalId.Top, true, 0
+    sg.Name, sg.Face, sg.AlwaysOnTop, sg.LightInfluence = "_MS_ESP", Enum.NormalId.Top, false, 0
     sg.Adornee, sg.Parent = tile, tile
     local fr = Instance.new("Frame")
     fr.Name, fr.Size, fr.BorderSizePixel = "Fill", UDim2.fromScale(1, 1), 0
@@ -267,6 +267,16 @@ end
 local function clearSurfaces()
     for _, sg in pairs(_surfaces) do pcall(function() sg:Destroy() end) end
     _surfaces = {}
+end
+-- wipe any ESP surfaces left over from a previous load (so reloads don't stack)
+do
+    local parts = getParts()
+    if parts then
+        for _, t in ipairs(parts:GetChildren()) do
+            local sg = t:FindFirstChild("_MS_ESP")
+            if sg then pcall(function() sg:Destroy() end) end
+        end
+    end
 end
 
 local _statLbl
