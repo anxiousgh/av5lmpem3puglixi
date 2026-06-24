@@ -12,6 +12,7 @@
 local ctx     = ({ ... })[1]
 local Library = ctx.Library
 local Window  = ctx.Window
+local Watermark = ctx.Watermark
 
 -- ---------- services / helpers ----------
 local Players          = game:GetService("Players")
@@ -1544,6 +1545,20 @@ do
         lastAssert = tick()
         forceOn()
     end))
+end
+
+-- ---- UI: hide the watermark / notifications ----
+do
+    local Sec = MiscSub:Section({ Name = "UI", Side = 2 })
+    Sec:Toggle({ Name = "Hide watermark", Flag = "HideWatermark", Default = false,
+        Callback = function(v) pcall(function() Watermark:SetVisibility(not v) end) end })
+    -- suppress notifications by swapping Library:Notification for a no-op while on
+    local origNotif = Library.Notification
+    Sec:Toggle({ Name = "Hide notifications", Flag = "HideNotifs", Default = false,
+        Callback = function(v)
+            if v then Library.Notification = function() end
+            else Library.Notification = origNotif end
+        end })
 end
 
 -- ============================================================
