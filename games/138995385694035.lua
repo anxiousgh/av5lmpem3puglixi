@@ -992,6 +992,7 @@ end)
 --  pose) -> the shot origin == our real position and validates -> then we restore.
 -- ============================================================
 local TPS_GLUE_Y = 50
+local TPS_WALL_RANGE = 90   -- wallbang: max distance to look for cover (prefer nearby buildings)
 local function tpsIgnoreList(targetModel)
     local ig = {}
     local lc = LocalPlayer.Character; if lc then ig[#ig + 1] = lc end
@@ -1004,11 +1005,10 @@ local function tpsIgnoreList(targetModel)
     end
     return ig
 end
--- a spot the target can't shoot us from, but from which a VALID <=11-stud origin-spoof
--- still reaches them. We validate every candidate with wallbangOrigin itself, so we only
--- teleport somewhere the shot will actually land (no "wallbang"/origin-mismatch errors,
--- no silently-skipped shots). Under-the-floor spots are listed first -- the spoof there is
--- a short, reliable straight-up peek (the classic "the ground" cover).
+-- a WALL/building cover spot the target can't shoot us from, but from which a VALID <=11-stud
+-- origin-spoof still reaches them. Every candidate is validated with wallbangOrigin itself, so
+-- we only teleport somewhere the shot will actually land. Returns nil if no nearby wall works
+-- (the caller then tries under-the-street, then inside the target).
 local function tpsCoverSpot(targetModel, thrp, part)
     local tpos = thrp.Position
     local ignore = tpsIgnoreList(targetModel)
@@ -1028,22 +1028,22 @@ local function tpsCoverSpot(targetModel, thrp, part)
         return Workspace:Raycast(pos, tpos - pos, params) ~= nil
     end
 
-    local cands = {}
-    for _, d in ipairs({ 4, 5, 6, 7, 9 }) do cands[#cands + 1] = tpos - Vector3.new(0, d, 0) end  -- under the floor
-    for a = 0, 330, 30 do                       -- behind walls: just past the first wall, near its edge
+    -- ring out from the target; hide just behind the first wall in each direction. Prefer the
+    -- CLOSEST wall (small nearby buildings) within TPS_WALL_RANGE -- never teleport miles away.
+    local walls = {}
+    for a = 0, 345, 15 do
         local rad = math.rad(a)
         local dir = Vector3.new(math.cos(rad), 0, math.sin(rad))
-        local res = Workspace:Raycast(tpos + Vector3.new(0, 1, 0), dir * 50, params)
-        if res then cands[#cands + 1] = res.Position + dir * 2 + Vector3.new(0, 0.5, 0) end
+        local res = Workspace:Raycast(tpos + Vector3.new(0, 1, 0), dir * TPS_WALL_RANGE, params)
+        if res and res.Distance > 3 then
+            walls[#walls + 1] = { pos = res.Position + dir * 2.5 + Vector3.new(0, 0.5, 0), d = res.Distance }
+        end
     end
-
-    for _, pos in ipairs(cands) do              -- best: in air, covered, AND a valid spoof exists
-        if inAir(pos) and hasCover(pos) and wallbangOrigin(pos, part) then return CFrame.new(pos) end
+    table.sort(walls, function(a, b) return a.d < b.d end)   -- nearest small walls first
+    for _, w in ipairs(walls) do
+        if inAir(w.pos) and hasCover(w.pos) and wallbangOrigin(w.pos, part) then return CFrame.new(w.pos) end
     end
-    for _, pos in ipairs(cands) do              -- relax cover before giving up (still needs a spoof)
-        if inAir(pos) and wallbangOrigin(pos, part) then return CFrame.new(pos) end
-    end
-    return nil
+    return nil   -- no wall cover -> caller falls back to under-street, then inside
 end
 -- guaranteed fallback: drop just under the street/ground beneath the target. The road is
 -- the cover (they can't shoot down through it); the origin-spoof peeks straight up through
@@ -1055,7 +1055,7 @@ local function tpsBelowStreet(targetModel, thrp)
     params.FilterDescendantsInstances = tpsIgnoreList(targetModel)
     local down = Workspace:Raycast(thrp.Position + Vector3.new(0, 2, 0), Vector3.new(0, -200, 0), params)
     local top = (down and down.Position) or (thrp.Position - Vector3.new(0, 3, 0))
-    return CFrame.new(top - Vector3.new(0, 3, 0))
+    return CFrame.new(top - Vector3.new(0, 4.5, 0))   -- fully under the road so we're never visible (velocity is zeroed so we don't float up)
 end
 -- closest LOCKED target that passes the checks (minus visible). Ranked by world distance,
 -- NOT the crosshair -- so TP-shoot works on a locked target without looking at them.
@@ -1153,9 +1153,16 @@ local function tpShoot()
                 th = th and th:FindFirstChild("HumanoidRootPart")
                 if not th then return end
                 local part = forceShotPart(plr.Character or hcModel(plr))
-                -- a validated cover spot, else fall back to just under the street
-                cf = (part and tpsCoverSpot(tmodel, th, part)) or tpsBelowStreet(tmodel, th)
-                _tpsWallbang = true
+                -- 1) nearby wall / building cover
+                cf = part and tpsCoverSpot(tmodel, th, part)
+                _tpsWallbang = cf ~= nil
+                -- 2) fallback: under the street (only if a valid up-spoof actually reaches them)
+                if not cf and part then
+                    local us = tpsBelowStreet(tmodel, th)
+                    if us and wallbangOrigin(us.Position, part) then cf, _tpsWallbang = us, true end
+                end
+                -- 3) last resort: inside the target -- point-blank, clear LoS, so no origin spoof
+                if not cf then cf, _tpsWallbang = CFrame.new(th.Position), false end
             end
             local s = tick()
             while tick() - s < 0.06 do place(cf); RunService.Heartbeat:Wait() end   -- brief settle before shooting
