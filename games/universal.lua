@@ -1284,15 +1284,28 @@ do
         lookAt = true, fakePos = true, desync = false, pattern = "Orbit" }
     local _attached, _angle, _orbitReal = false, 0, nil
     local _hCur, _hTarget, _hTimer = 0, 0, 0   -- smooth random height (advanced in the loop by dt)
+    local _randOff, _randTimer = Vector3.zero, 0                              -- Random: re-rolled spot
+    local _planA, _planB, _planAt, _planBt, _planTimer = 0.5, 0.3, 0.5, 0.3, 0  -- Planetary: drifting tilt
     -- offset around the target for the chosen pattern. _hCur is a smooth random height between
     -- Min/Max (independent of orbit speed), applied only when the Height toggle is on.
+    -- a random point on the sphere of radius `dist` around the target (+ random height)
+    local function randomOrbitOffset()
+        local theta = math.random() * math.pi * 2
+        local phi = (math.random() - 0.5) * math.pi
+        local d = orbit.dist
+        local h = orbit.heightOn and (orbit.minH + math.random() * (orbit.maxH - orbit.minH)) or 0
+        return Vector3.new(math.cos(phi) * math.cos(theta) * d, math.sin(phi) * d + h, math.cos(phi) * math.sin(theta) * d)
+    end
     local function orbitOffset()
         local rad = math.rad(_angle)
         local d = orbit.dist
         local bob = orbit.heightOn and _hCur or 0
         local p = orbit.pattern
-        if p == "Planetary" then           -- tilted ring (rises over + dips under the target)
-            return Vector3.new(math.cos(rad) * d, math.sin(rad) * d * 0.7 + bob, math.sin(rad) * d * 0.5)
+        if p == "Random" then              -- teleport to re-rolled random spots around the target
+            return _randOff
+        elseif p == "Planetary" then       -- flat ring tilted by a slowly-DRIFTING amount, so the
+                                           -- path precesses instead of tracing the same ring/height
+            return Vector3.new(math.cos(rad) * d, (math.cos(rad) * _planA + math.sin(rad) * _planB) * d + bob, math.sin(rad) * d)
         elseif p == "Vertical" then        -- vertical loop straight over the top
             return Vector3.new(0, math.sin(rad) * d + bob, math.cos(rad) * d)
         elseif p == "Spiral" then          -- flat ring with a slow continuous vertical wind
@@ -1329,6 +1342,23 @@ do
             _hCur = _hCur + (_hTarget - _hCur) * math.clamp(dt * 3, 0, 1)
         else
             _hCur = 0
+        end
+        -- pattern-specific randomisation, advanced by dt
+        local _p = orbit.pattern
+        if _p == "Random" then
+            _randTimer = _randTimer - dt
+            if _randTimer <= 0 then
+                _randOff = randomOrbitOffset()
+                _randTimer = 0.06 + math.random() * 0.12        -- a new random spot every ~0.06-0.18s
+            end
+        elseif _p == "Planetary" then
+            _planTimer = _planTimer - dt
+            if _planTimer <= 0 then                             -- drift the tilt toward new random targets
+                _planAt, _planBt = (math.random() - 0.5) * 2, (math.random() - 0.5) * 2
+                _planTimer = 0.8 + math.random() * 1.5
+            end
+            _planA = _planA + (_planAt - _planA) * math.clamp(dt * 1.5, 0, 1)
+            _planB = _planB + (_planBt - _planB) * math.clamp(dt * 1.5, 0, 1)
         end
         local pos = tHrp.Position + orbitOffset()
         local cf = orbit.lookAt and CFrame.new(pos, tHrp.Position) or CFrame.new(pos)
@@ -1372,7 +1402,7 @@ do
     OSec:Label({ Name = "Toggle key" }):Keybind({ Name = "Orbit", Flag = "FlingOrbitKey", Mode = "Toggle",
         Callback = function(state) orbitToggle:Set(state and true or false) end })
     OSec:Dropdown({ Name = "Orbit directions", Flag = "FlingOrbitPattern", Default = "Orbit", Multi = false,
-        Items = { "Orbit", "Planetary", "Vertical", "Spiral" },
+        Items = { "Orbit", "Planetary", "Random", "Vertical", "Spiral" },
         Callback = function(v) orbit.pattern = (type(v) == "table" and v[1]) or v or "Orbit" end })
     OSec:Slider({ Name = "Distance", Flag = "FlingOrbitDist", Min = 0.05, Max = 30, Default = 4, Decimals = 2, Suffix = " studs",
         Callback = function(v) orbit.dist = v end })
