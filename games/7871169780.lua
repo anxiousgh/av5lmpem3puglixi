@@ -3,17 +3,17 @@
 --  Mine ESP + solver. Reads every revealed tile's NumberGui, runs a
 --  minesweeper constraint solver (basic rules + subset reduction +
 --  brute-force "tank" for the hard patterns), and colours covered tiles
---  red (mine) / green (safe). 100% client-side (SurfaceGui per tile).
+--  red (mine) / green (safe) via per-tile SurfaceGuis (client-side).
+--
+--  PERF: the grid + neighbour graph is cached and only rebuilt when tiles
+--  are added/removed; the solver only RUNS when the board actually changes
+--  (a NumberGui / flag Model appears), so idle frames cost nothing. The
+--  brute-force tank is capped + budgeted so a big component can't hitch.
 --  Builds its "Minesweeper" tab first, then loads the universal shell.
 -- ============================================================
 local ctx     = ({ ... })[1]
 local Library = ctx.Library
 local Window  = ctx.Window
-
-local Players     = game:GetService("Players")
-local RunService  = game:GetService("RunService")
-local Workspace   = workspace
-local LocalPlayer = Players.LocalPlayer
 
 local MS = {
     espOn = false, showMines = true, showSafe = true,
@@ -24,71 +24,92 @@ local MS = {
 
 -- ---------- board reading ----------
 local function getParts()
-    local flag = Workspace:FindFirstChild("Flag")
+    local flag = workspace:FindFirstChild("Flag")
     return flag and flag:FindFirstChild("Parts")
 end
--- flagged = has a Model child (the flag); revealed = has a NumberGui; else covered
+-- flagged = has a Model child (the flag); revealed = has a NumberGui; else covered.
+-- FindFirstChild* (no GetChildren) so this allocates nothing per call.
 local function tileState(tile)
-    for _, ch in ipairs(tile:GetChildren()) do
-        if ch:IsA("Model") then return "flagged" end
-        if ch.Name == "NumberGui" then return "revealed" end
-    end
+    if tile:FindFirstChildOfClass("Model") then return "flagged" end
+    if tile:FindFirstChild("NumberGui") then return "revealed" end
     return "covered"
 end
 local function tileNumber(tile)
     local g = tile:FindFirstChild("NumberGui")
     if not g then return 0 end
     local lbl = g:FindFirstChildWhichIsA("TextLabel", true)
-    return (lbl and tonumber(lbl.Text)) or 0   -- blank label = 0 (no adjacent mines)
+    return (lbl and tonumber(lbl.Text)) or 0   -- blank label = a 0-tile
 end
 
--- ---------- grid + neighbours (board is a flat 5-stud grid, so this is exact) ----------
-local function buildGrid(parts)
+-- ---------- cached grid + neighbour graph + dirty flags ----------
+-- The board is a flat 5-stud grid so neighbours are exact. We cache the grid
+-- and precomputed neighbour lists, rebuilding only when tiles are added/removed.
+local _grid, _coord, _neighbors, _tileList
+local _gridDirty, _boardDirty = true, true
+local _watchedFolder
+local function watchParts(parts)
+    if _watchedFolder == parts then return end
+    _watchedFolder = parts                       -- folder changed (new round) -> rewire
+    _gridDirty, _boardDirty = true, true
+    parts.ChildAdded:Connect(function() _gridDirty = true; _boardDirty = true end)
+    parts.ChildRemoved:Connect(function() _gridDirty = true; _boardDirty = true end)
+    -- a reveal adds a NumberGui; a flag adds a Model -> only those mark the board dirty
+    -- (our own "_MS_ESP" SurfaceGui is neither, so painting never re-triggers a solve)
+    parts.DescendantAdded:Connect(function(d)
+        if d.Name == "NumberGui" or d:IsA("Model") then _boardDirty = true end
+    end)
+    parts.DescendantRemoving:Connect(function(d)
+        if d.Name == "NumberGui" or d:IsA("Model") then _boardDirty = true end
+    end)
+end
+local function ensureGrid(parts)
+    watchParts(parts)
+    if _grid and not _gridDirty then return end
+    _gridDirty = false
     local tiles = parts:GetChildren()
     local size
     for _, t in ipairs(tiles) do if t:IsA("BasePart") then size = t.Size.X; break end end
-    if not size then return nil end
-    local grid, coord = {}, {}
+    if not size then _grid = nil; _tileList = nil; return end
+    local grid, coord, list = {}, {}, {}
     for _, t in ipairs(tiles) do
         if t:IsA("BasePart") then
             local gx = math.floor(t.Position.X / size + 0.5)
             local gz = math.floor(t.Position.Z / size + 0.5)
             grid[gx .. "_" .. gz] = t
             coord[t] = { gx, gz }
+            list[#list + 1] = t
         end
     end
-    return grid, coord, tiles
-end
-local function neighborsOf(tile, grid, coord)
-    local c = coord[tile]; if not c then return {} end
-    local out = {}
-    for dx = -1, 1 do
-        for dz = -1, 1 do
+    local neighbors = {}
+    for _, t in ipairs(list) do
+        local c, o = coord[t], {}
+        for dx = -1, 1 do for dz = -1, 1 do
             if not (dx == 0 and dz == 0) then
                 local n = grid[(c[1] + dx) .. "_" .. (c[2] + dz)]
-                if n then out[#out + 1] = n end
+                if n then o[#o + 1] = n end
             end
-        end
+        end end
+        neighbors[t] = o
     end
-    return out
+    _grid, _coord, _neighbors, _tileList = grid, coord, neighbors, list
 end
 
 -- ---------- solver ----------
--- A revealed number N over its covered neighbours U is the constraint
--- "exactly (N - known mines around) of U are mines". We apply: all-mines /
--- all-safe basics, subset reduction, then brute-force small components.
-local function buildConstraints(tiles, grid, coord, state, number, mines, safes)
+local function buildConstraints(tiles, neighbors, state, number, mines, safes)
     local cons = {}
     for _, t in ipairs(tiles) do
         if state[t] == "revealed" then
             local n = number[t]
             if n and n > 0 then
                 local minesIn, set, list = 0, {}, {}
-                for _, nb in ipairs(neighborsOf(t, grid, coord)) do
-                    if mines[nb] then minesIn = minesIn + 1
-                    elseif safes[nb] then                                 -- known safe -> drop
-                    elseif state[nb] == "covered" or state[nb] == "flagged" then
-                        if not set[nb] then set[nb] = true; list[#list + 1] = nb end  -- don't trust user flags
+                local nbrs = neighbors[t]
+                if nbrs then
+                    for _, nb in ipairs(nbrs) do
+                        if mines[nb] then minesIn = minesIn + 1
+                        elseif safes[nb] then                                  -- known safe -> drop
+                        elseif state[nb] == "covered" or state[nb] == "flagged" then
+                            if not set[nb] then set[nb] = true; list[#list + 1] = nb end  -- don't trust user flags
+                        end
                     end
                 end
                 if #list > 0 then cons[#cons + 1] = { set = set, list = list, rem = n - minesIn, count = #list } end
@@ -108,8 +129,6 @@ local function basicPass(cons, mines, safes)
     end
     return changed
 end
--- subset reduction: if A.set is a strict subset of B.set, the extras B\A hold
--- exactly (B.rem - A.rem) mines -> all mines or all safe at the extremes.
 local function subsetPass(cons, mines, safes)
     if #cons < 2 then return false end
     local changed = false
@@ -146,11 +165,10 @@ local function subsetPass(cons, mines, safes)
     end
     return changed
 end
--- tank: split constraints into connected components, brute-force the small ones,
--- mark any tile that's a mine (or safe) in EVERY valid assignment. probs[] gets the
--- mine-probability for the rest (used for 50/50 awareness later).
-local TANK_MAX = 16
-local function tankPass(cons, mines, safes, probs)
+-- brute-force connected components. Capped at TANK_MAX unknowns and a per-call
+-- enumeration budget so a big blob can never freeze the frame.
+local TANK_MAX, TANK_BUDGET = 14, 300000
+local function tankPass(cons, mines, safes)
     if #cons == 0 then return false end
     local parent = {}
     local function find(x) while parent[x] ~= x do x = parent[x] end return x end
@@ -166,10 +184,12 @@ local function tankPass(cons, mines, safes, probs)
         local a; for u in pairs(c.set) do a = u; break end
         if a then local r = find(a); gCons[r] = gCons[r] or {}; table.insert(gCons[r], c) end
     end
-    local changed = false
+    local changed, budget = false, TANK_BUDGET
     for root, unknowns in pairs(gUnk) do
         local n = #unknowns
-        if n > 0 and n <= TANK_MAX then
+        local twoN = 2 ^ n
+        if n > 0 and n <= TANK_MAX and twoN <= budget then
+            budget = budget - twoN
             local gcs = gCons[root] or {}
             local idx = {}; for i = 1, n do idx[unknowns[i]] = i end
             local cIdx, cRem = {}, {}
@@ -177,10 +197,9 @@ local function tankPass(cons, mines, safes, probs)
                 local l = {}; for u in pairs(c.set) do l[#l + 1] = idx[u] end
                 cIdx[ci] = l; cRem[ci] = c.rem
             end
-            local yes, no, total = {}, {}, 0
+            local yes, no, total, assign = {}, {}, 0, {}
             for i = 1, n do yes[i] = 0; no[i] = 0 end
-            local assign = {}
-            for mask = 0, (2 ^ n) - 1 do
+            for mask = 0, twoN - 1 do
                 local m = mask
                 for i = 1, n do local b = m % 2; assign[i] = b; m = (m - b) / 2 end
                 local valid = true
@@ -198,25 +217,26 @@ local function tankPass(cons, mines, safes, probs)
                 for i = 1, n do
                     local u = unknowns[i]
                     if yes[i] == total and not mines[u] then mines[u] = true; changed = true
-                    elseif no[i] == total and not safes[u] then safes[u] = true; changed = true
-                    elseif probs then probs[u] = yes[i] / total end
+                    elseif no[i] == total and not safes[u] then safes[u] = true; changed = true end
                 end
             end
         end
     end
     return changed
 end
-local function deduce(tiles, grid, coord, state, number)
-    local mines, safes, probs = {}, {}, {}
-    for _ = 1, 15 do
-        local cons = buildConstraints(tiles, grid, coord, state, number, mines, safes)
-        local c1 = basicPass(cons, mines, safes)
-        local c2 = subsetPass(cons, mines, safes)
-        local c3 = tankPass(cons, mines, safes, probs)
-        if not (c1 or c2 or c3) then break end
+local function deduce(tiles, neighbors, state, number)
+    local mines, safes = {}, {}
+    for _ = 1, 6 do                       -- basic+subset to fixed point, then ONE tank, repeat
+        while true do
+            local cons = buildConstraints(tiles, neighbors, state, number, mines, safes)
+            local c1 = basicPass(cons, mines, safes)
+            local c2 = subsetPass(cons, mines, safes)
+            if not (c1 or c2) then break end
+        end
+        local cons = buildConstraints(tiles, neighbors, state, number, mines, safes)
+        if not tankPass(cons, mines, safes) then break end
     end
-    for t in pairs(probs) do if mines[t] or safes[t] then probs[t] = nil end end
-    return mines, safes, probs
+    return mines, safes
 end
 
 -- ---------- ESP (SurfaceGui per tile, no Highlight cap) ----------
@@ -245,22 +265,23 @@ local function paint(tile, color)
     sg.Enabled = true
 end
 local function clearSurfaces()
-    for t, sg in pairs(_surfaces) do pcall(function() sg:Destroy() end) end
+    for _, sg in pairs(_surfaces) do pcall(function() sg:Destroy() end) end
     _surfaces = {}
 end
 
 local _statLbl
-local function espTick()
+local function solveAndRender()
     local parts = getParts(); if not parts then return end
-    local grid, coord, tiles = buildGrid(parts); if not grid then return end
+    ensureGrid(parts)
+    if not _tileList then return end
     local state, number = {}, {}
-    for _, t in ipairs(tiles) do
-        if t:IsA("BasePart") then
+    for _, t in ipairs(_tileList) do
+        if t.Parent then
             local s = tileState(t); state[t] = s
             if s == "revealed" then number[t] = tileNumber(t) end
         end
     end
-    local mines, safes = deduce(tiles, grid, coord, state, number)
+    local mines, safes = deduce(_tileList, _neighbors, state, number)
     local seen, nm, ns = {}, 0, 0
     if MS.showMines then for t in pairs(mines) do seen[t] = true; nm = nm + 1; paint(t, MS.mineColor) end end
     if MS.showSafe then for t in pairs(safes) do if not seen[t] then seen[t] = true; ns = ns + 1; paint(t, MS.safeColor) end end end
@@ -270,11 +291,19 @@ local function espTick()
     end
     if _statLbl then pcall(function() _statLbl:SetText(("Mines: %d  |  Safe: %d"):format(nm, ns)) end) end
 end
+
 local _espThread
 local function espStart()
     if _espThread then return end
+    _boardDirty = true               -- force a first solve
     _espThread = task.spawn(function()
-        while MS.espOn do pcall(espTick); task.wait(MS.rate) end
+        while MS.espOn do
+            if _boardDirty then       -- only do real work when the board actually changed
+                _boardDirty = false
+                pcall(solveAndRender)
+            end
+            task.wait(MS.rate)
+        end
         _espThread = nil
     end)
 end
@@ -292,19 +321,19 @@ do
     Sec:Toggle({ Name = "Enabled", Flag = "MS_Esp", Default = false,
         Callback = function(v) MS.espOn = v; if v then espStart() else espStop() end end })
     Sec:Toggle({ Name = "Show mines", Flag = "MS_Mines", Default = true,
-        Callback = function(v) MS.showMines = v end })
+        Callback = function(v) MS.showMines = v; _boardDirty = true end })
     Sec:Toggle({ Name = "Show safe tiles", Flag = "MS_Safe", Default = true,
-        Callback = function(v) MS.showSafe = v end })
+        Callback = function(v) MS.showSafe = v; _boardDirty = true end })
     Sec:Slider({ Name = "Update rate", Flag = "MS_Rate", Min = 50, Max = 1000, Default = 150, Decimals = 0, Suffix = " ms",
         Callback = function(v) MS.rate = v / 1000 end })
     Sec:Slider({ Name = "Fill transparency", Flag = "MS_Fill", Min = 0, Max = 100, Default = 45, Decimals = 0, Suffix = "%",
-        Callback = function(v) MS.fill = v / 100 end })
+        Callback = function(v) MS.fill = v / 100; _boardDirty = true end })
 
     local Sec2 = Sub:Section({ Name = "Colors", Side = 2 })
     Sec2:Label({ Name = "Mine color" }):Colorpicker({ Flag = "MS_MineCol", Default = MS.mineColor,
-        Callback = function(c) MS.mineColor = c end })
+        Callback = function(c) MS.mineColor = c; _boardDirty = true end })
     Sec2:Label({ Name = "Safe color" }):Colorpicker({ Flag = "MS_SafeCol", Default = MS.safeColor,
-        Callback = function(c) MS.safeColor = c end })
+        Callback = function(c) MS.safeColor = c; _boardDirty = true end })
 
     local Sec3 = Sub:Section({ Name = "Stats", Side = 2 })
     _statLbl = Sec3:Label({ Name = "Mines: 0  |  Safe: 0" })
