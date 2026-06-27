@@ -9,9 +9,9 @@
 --    Auto Push  -- "push" tool exposes Tool.Hit RemoteEvent; FireServer("Hit",part)
 --                  applies server-side knockback. Server range-gates it, so we only
 --                  fire when an enemy is genuinely close (defensive auto-bump).
---    Gear Aimbot-- Slingshot/RocketLauncher/Trowel/Superball ask the client for its
---                  aim via MouseLoc:InvokeClient(); we override OnClientInvoke to
---                  return the nearest enemy's position -> projectiles home in.
+--    Gun Aimbot -- bullet system reports its own hits client-side; redirect the Fire
+--                  direction + the matching Hit (keyed by Id) onto the target so the
+--                  reported hit sits on the server's known trajectory and validates.
 --    Sword Aura -- ClassicSword damage is server-side Handle.Touched. We firetouchinterest
 --                  the real Handle onto nearby enemies, after deleting the local
 --                  SwordClient honeypot (it BreakJoints-es you on >15-stud touches).
@@ -40,9 +40,9 @@ local S = (gv() and gv()._CMG_S) or {
     push = false, pushRange = 5, pushCD = 0.35,
     pushEquip = false, pushEnemyOnly = false,
     showRange = false, rangeColor = Color3.fromRGB(255, 80, 80),
-    aim = false,
     sword = false, swordRange = 14, swordCD = 0.2, swordEnemyOnly = false,
     swordLunge = true, swordLungeCD = 0.6,
+    swordShowRange = false, swordRangeColor = Color3.fromRGB(120, 170, 255),
     gunSilent = false, gunFov = 200, gunHitPart = "Head", gunPriority = "Crosshair",
     gunMagic = false, gunTeamCheck = false, gunWallCheck = true, gunShowFov = true, gunFovColor = Color3.fromRGB(255, 255, 255),
     phys = false, sendRate = 240,
@@ -64,14 +64,8 @@ if S.gunFovColor == nil then S.gunFovColor = Color3.fromRGB(255, 255, 255) end
 if S.swordLunge == nil then S.swordLunge = true end
 if S.swordLungeCD == nil then S.swordLungeCD = 0.6 end
 if S.swordEnemyOnly == nil then S.swordEnemyOnly = false end
--- per-gear ballistics for the aimbot; each gear remembers its own tuning.
--- speed = studs/s, drop = gravity fraction (0 = flies straight, like a rocket)
-S.gear = S.gear or {
-    ClassicSlingshot = { speed = 120, drop = 1 },
-    RocketLauncher   = { speed = 80,  drop = 0 },
-    ClassicSuperball = { speed = 90,  drop = 1 },
-    ClassicTrowel    = { speed = 100, drop = 1 },
-}
+if S.swordShowRange == nil then S.swordShowRange = false end
+if S.swordRangeColor == nil then S.swordRangeColor = Color3.fromRGB(120, 170, 255) end
 if gv() then gv()._CMG_S = S end
 
 -- ---- shared target helpers ----
@@ -79,23 +73,41 @@ local function myHRP()
     local char = LocalPlayer.Character
     return char and char:FindFirstChild("HumanoidRootPart")
 end
-local function aimPart(char)
-    return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
-end
-local function nearestEnemyPart()
-    local hrp = myHRP(); if not hrp then return nil end
-    local best, bestD
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character then
-            local hum  = p.Character:FindFirstChildOfClass("Humanoid")
-            local part = aimPart(p.Character)
-            if hum and hum.Health > 0 and part then
-                local d = (part.Position - hrp.Position).Magnitude
-                if not bestD or d < bestD then best, bestD = part, d end
-            end
+-- range visualizer: a transparent disc at your feet drawn by a Highlight outline.
+-- Only renders while `on`; when off the highlight is disabled so nothing shows.
+local function makeRangeViz()
+    local self, disc, hl = {}, nil, nil
+    function self.update(on, radius, color)
+        if not on then
+            if hl then hl.Enabled = false end
+            return
         end
+        local hrp = myHRP(); if not hrp then return end
+        if not (disc and disc.Parent) then
+            disc = Instance.new("Part")
+            disc.Shape = Enum.PartType.Cylinder
+            disc.Anchored, disc.CanCollide, disc.CanQuery, disc.CanTouch, disc.Massless = true, false, false, false, true
+            disc.Transparency = 1            -- invisible part; the Highlight does the drawing
+            disc.Name = "\0"
+            pcall(function() disc.Parent = workspace end)
+            hl = Instance.new("Highlight")
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.FillTransparency = 0.8
+            hl.Adornee = disc
+            pcall(function() hl.Parent = disc end)
+        end
+        local dia = radius * 2
+        disc.Size = Vector3.new(0.2, dia, dia)
+        -- lay the cylinder flat (axis up) so the circular face sits on the ground at your feet
+        disc.CFrame = CFrame.new(hrp.Position - Vector3.new(0, 2.6, 0)) * CFrame.Angles(0, 0, math.rad(90))
+        local c = color or Color3.fromRGB(255, 80, 80)
+        hl.FillColor, hl.OutlineColor, hl.Enabled = c, c, true
     end
-    return best
+    function self.destroy()
+        if hl then pcall(function() hl:Destroy() end); hl = nil end
+        if disc then pcall(function() disc:Destroy() end); disc = nil end
+    end
+    return self
 end
 -- iterate every living enemy body part within `range` studs, respecting a
 -- per-target cooldown table; calls fn(part) for each one that is due to fire.
@@ -169,95 +181,12 @@ do
     end))
 end
 
--- ---- range visualizer: a flat translucent disc at your feet, radius = pushRange.
---      doubles as a debug aid -- if it shows, the render loop is alive. ----
+-- ---- Auto Push range visualizer ----
 do
-    local disc
+    local viz = makeRangeViz()
+    S._discDestroy = viz.destroy
     track(RunService.RenderStepped:Connect(function()
-        if not S.showRange then
-            if disc then disc.Transparency = 1 end
-            return
-        end
-        local hrp = myHRP()
-        if not hrp then return end
-        if not (disc and disc.Parent) then
-            disc = Instance.new("Part")
-            disc.Shape = Enum.PartType.Cylinder
-            disc.Anchored, disc.CanCollide, disc.CanQuery = true, false, false
-            disc.CanTouch, disc.Massless = false, true
-            disc.Material = Enum.Material.ForceField
-            disc.Name = "\0"
-            pcall(function() disc.Parent = workspace end)
-            S._discDestroy = function() if disc then pcall(function() disc:Destroy() end); disc = nil end end
-        end
-        local dia = S.pushRange * 2
-        disc.Size = Vector3.new(0.2, dia, dia)
-        disc.Color = S.rangeColor or Color3.fromRGB(255, 80, 80)
-        disc.Transparency = 0.6
-        -- lay the cylinder flat (axis up) so the circular face sits on the ground at your feet
-        disc.CFrame = CFrame.new(hrp.Position - Vector3.new(0, 2.6, 0)) * CFrame.Angles(0, 0, math.rad(90))
-    end))
-end
-
--- ============================================================
---  GEAR AIMBOT  -- override MouseLoc.OnClientInvoke to return the nearest enemy.
---  Hooked once per gear; behaviour is gated by S.aim so toggling never un-hooks.
--- ============================================================
--- which loadout gear (if any) is currently equipped -- picks its ballistics preset
-local function activeGearName()
-    local char = LocalPlayer.Character
-    if not char then return nil end
-    for _, t in ipairs(char:GetChildren()) do
-        if t:IsA("Tool") and S.gear[t.Name] then return t.Name end
-    end
-    return nil
-end
-do
-    local mouse  = LocalPlayer:GetMouse()
-    local hooked = setmetatable({}, { __mode = "k" })
-    local lastScan = 0
-    -- solve for the aim point that lands a slow, arcing projectile on a moving target:
-    -- iterate flight time t = dist/speed, lead by the target's velocity, then raise the
-    -- point by the gravity drop over t so the arc passes through the lead position.
-    local function predictedAim(part)
-        local origin = myHRP()
-        origin = (origin and origin.Position) or part.Position
-        local cfg = S.gear[activeGearName() or ""] or { speed = 100, drop = 1 }
-        local speed = math.max(cfg.speed, 1)
-        local hrpT  = part.Parent and (part.Parent:FindFirstChild("HumanoidRootPart") or part)
-        local tv    = (hrpT and hrpT.AssemblyLinearVelocity) or Vector3.new()
-        local pos   = part.Position
-        local t = (pos - origin).Magnitude / speed
-        for _ = 1, 4 do t = ((pos + tv * t) - origin).Magnitude / speed end
-        local aim = pos + tv * t
-        if cfg.drop > 0 then
-            aim = aim + Vector3.new(0, 0.5 * (workspace.Gravity * cfg.drop) * t * t, 0)
-        end
-        return aim
-    end
-    local function aimQuery()
-        if S.aim then
-            local part = nearestEnemyPart()
-            if part then return predictedAim(part) end
-        end
-        return mouse.Hit.p   -- off (or no target) -> behave exactly like the real gear
-    end
-    track(RunService.Heartbeat:Connect(function()
-        if os.clock() - lastScan < 0.4 then return end
-        lastScan = os.clock()
-        for _, c in ipairs({ LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack") }) do
-            if c then
-                for _, t in ipairs(c:GetChildren()) do
-                    if t:IsA("Tool") then
-                        local ml = t:FindFirstChild("MouseLoc")
-                        if ml and ml:IsA("RemoteFunction") and not hooked[ml] then
-                            hooked[ml] = true
-                            ml.OnClientInvoke = aimQuery
-                        end
-                    end
-                end
-            end
-        end
+        viz.update(S.showRange, S.pushRange, S.rangeColor)
     end))
 end
 
@@ -489,6 +418,15 @@ do
     end))
 end
 
+-- ---- Sword Aura range visualizer ----
+do
+    local viz = makeRangeViz()
+    S._swordDiscDestroy = viz.destroy
+    track(RunService.RenderStepped:Connect(function()
+        viz.update(S.swordShowRange, S.swordRange, S.swordRangeColor)
+    end))
+end
+
 -- ============================================================
 --  PHYSICS / SEND-RATE BOOST  -- tighten how often you replicate to the server.
 -- ============================================================
@@ -531,19 +469,6 @@ do
     Sec:Toggle({ Name = "Enemies only (team)", Flag = "CMG_PushEnemyOnly", Default = false,
         Callback = function(v) S.pushEnemyOnly = v end })
 
-    local Sec2 = Combat:Section({ Name = "Gear Aimbot", Side = 2 })
-    Sec2:Label({ Name = "Slingshot / Rocket / Trowel / Superball" })
-    local aimTog = Sec2:Toggle({ Name = "Enabled", Flag = "CMG_Aim", Default = false,
-        Callback = function(v) S.aim = v end })
-    Sec2:Label({ Name = "Toggle key" }):Keybind({ Name = "Aimbot", Flag = "CMG_AimKey", Mode = "Toggle",
-        Callback = function(state) aimTog:Set(state and true or false) end })
-    -- ballistics tuning -- adjusts the gear you're CURRENTLY holding; each remembers its own
-    Sec2:Label({ Name = "Tune while holding the gear:" })
-    Sec2:Slider({ Name = "Projectile speed", Flag = "CMG_GearSpeed", Min = 20, Max = 400, Default = 120, Decimals = 0, Suffix = " st/s",
-        Callback = function(v) local n = activeGearName(); if n then S.gear[n].speed = v end end })
-    Sec2:Slider({ Name = "Bullet drop", Flag = "CMG_GearDrop", Min = 0, Max = 200, Default = 100, Decimals = 0, Suffix = " %",
-        Callback = function(v) local n = activeGearName(); if n then S.gear[n].drop = v / 100 end end })
-
     local Sec4 = Combat:Section({ Name = "Gun Silent Aim", Side = 2 })
     local gunTog = Sec4:Toggle({ Name = "Silent aim", Flag = "CMG_GunSilent", Default = false,
         Callback = function(v) S.gunSilent = v end })
@@ -580,6 +505,10 @@ do
         Callback = function(v) S.swordLungeCD = v / 1000 end })
     Sec3:Toggle({ Name = "Enemies only (team)", Flag = "CMG_SwordEnemyOnly", Default = false,
         Callback = function(v) S.swordEnemyOnly = v end })
+    Sec3:Toggle({ Name = "Show range", Flag = "CMG_SwordViz", Default = false,
+        Callback = function(v) S.swordShowRange = v end })
+    Sec3:Label({ Name = "Range color" }):Colorpicker({ Flag = "CMG_SwordVizColor", Default = Color3.fromRGB(120, 170, 255),
+        Callback = function(c) S.swordRangeColor = c end })
     Sec3:Label({ Name = "Toggle key" }):Keybind({ Name = "SwordAura", Flag = "CMG_SwordKey", Mode = "Toggle",
         Callback = function(state) swordTog:Set(state and true or false) end })
 end
@@ -602,8 +531,9 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 --  Teardown
 -- ============================================================
 local function cleanup()
-    S.push, S.aim, S.sword, S.showRange, S.gunSilent = false, false, false, false, false
+    S.push, S.sword, S.showRange, S.swordShowRange, S.gunSilent = false, false, false, false, false
     if S._discDestroy then pcall(S._discDestroy) end
+    if S._swordDiscDestroy then pcall(S._swordDiscDestroy) end
     if S._gunFovDestroy then pcall(S._gunFovDestroy) end
     if S.phys then pcall(function() applyPhys(false) end); S.phys = false end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
