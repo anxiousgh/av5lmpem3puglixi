@@ -294,6 +294,7 @@ do
     -- FOV ring
     local fovGui = Instance.new("ScreenGui")
     fovGui.Name = "\0"; fovGui.ResetOnSpawn = false
+    fovGui.IgnoreGuiInset = true   -- align with GetMouseLocation (no topbar offset)
     if not pcall(function() fovGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end) or not fovGui.Parent then
         fovGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
     end
