@@ -39,11 +39,14 @@ local S = (gv() and gv()._CMG_S) or {
     showRange = false, rangeColor = Color3.fromRGB(255, 80, 80),
     aim = false,
     sword = false, swordRange = 14, swordCD = 0.2,
+    swordLunge = true, swordLungeCD = 0.6,
     phys = false, sendRate = 240,
 }
 -- backfill fields added in later versions onto a persisted (re-exec'd) table
 if S.showRange == nil then S.showRange = false end
 if S.rangeColor == nil then S.rangeColor = Color3.fromRGB(255, 80, 80) end
+if S.swordLunge == nil then S.swordLunge = true end
+if S.swordLungeCD == nil then S.swordLungeCD = 0.6 end
 if gv() then gv()._CMG_S = S end
 
 -- ---- shared target helpers ----
@@ -182,7 +185,26 @@ end
 --  First delete the SwordClient honeypot (local-only, no server channel).
 -- ============================================================
 do
-    local lastSword, lastSwing = {}, 0
+    local lastSword, lastSlash, lastLunge = {}, 0, 0
+    local lunging = false
+    local function targetInRange()
+        local hrp = myHRP(); if not hrp then return false end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                local hum  = p.Character:FindFirstChildOfClass("Humanoid")
+                local part = p.Character:FindFirstChild("Torso") or p.Character:FindFirstChild("HumanoidRootPart")
+                if hum and hum.Health > 0 and part and (part.Position - hrp.Position).Magnitude <= S.swordRange then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+    local function touchAll(handle)
+        forEnemiesInRange(S.swordRange, lastSword, 0, function(part)
+            firetouchinterest(handle, part, 0); firetouchinterest(handle, part, 1)
+        end)
+    end
     track(RunService.Heartbeat:Connect(function()
         if not S.sword or not firetouchinterest then return end
         local char  = LocalPlayer.Character
@@ -193,15 +215,37 @@ do
         local main = sword:FindFirstChild("SwordMain")
         local trap = main and main:FindFirstChild("SwordClient")
         if trap then pcall(function() trap:Destroy() end) end
-        -- open the server damage window (throttled so we don't spam swing anims)
-        if os.clock() - lastSwing > 0.25 then
-            lastSwing = os.clock()
-            pcall(function() sword:Activate() end)
+        if not targetInRange() then return end
+
+        if S.swordLunge then
+            -- triggerbot: when an enemy is in range, double-Activate within the lunge
+            -- window so the server swaps in lunge (super) damage, then spray touches
+            -- across the lunge damage window so the hits land as the super attack.
+            if not lunging and os.clock() - lastLunge >= S.swordLungeCD then
+                lunging = true; lastLunge = os.clock()
+                task.spawn(function()
+                    pcall(function() sword.Enabled = true end); pcall(function() sword:Activate() end)
+                    task.wait(0.12)
+                    pcall(function() sword.Enabled = true end); pcall(function() sword:Activate() end)
+                    for _ = 1, 10 do
+                        if not S.sword then break end
+                        touchAll(handle)
+                        task.wait(0.03)
+                    end
+                    lunging = false
+                end)
+            end
+        else
+            -- normal slash aura
+            if os.clock() - lastSlash > 0.25 then
+                lastSlash = os.clock()
+                pcall(function() sword:Activate() end)
+            end
+            forEnemiesInRange(S.swordRange, lastSword, S.swordCD, function(part)
+                firetouchinterest(handle, part, 0)
+                firetouchinterest(handle, part, 1)
+            end)
         end
-        forEnemiesInRange(S.swordRange, lastSword, S.swordCD, function(part)
-            firetouchinterest(handle, part, 0)
-            firetouchinterest(handle, part, 1)
-        end)
     end))
 end
 
@@ -256,6 +300,10 @@ do
         Callback = function(v) S.sword = v end })
     Sec3:Slider({ Name = "Range", Flag = "CMG_SwordRange", Min = 5, Max = 30, Default = 14, Decimals = 0, Suffix = " studs",
         Callback = function(v) S.swordRange = v end })
+    Sec3:Toggle({ Name = "Lunge (super) damage", Flag = "CMG_SwordLunge", Default = true,
+        Callback = function(v) S.swordLunge = v end })
+    Sec3:Slider({ Name = "Lunge cooldown", Flag = "CMG_SwordLungeCD", Min = 200, Max = 1500, Default = 600, Decimals = 0, Suffix = " ms",
+        Callback = function(v) S.swordLungeCD = v / 1000 end })
     Sec3:Label({ Name = "Toggle key" }):Keybind({ Name = "SwordAura", Flag = "CMG_SwordKey", Mode = "Toggle",
         Callback = function(state) swordTog:Set(state and true or false) end })
 end
