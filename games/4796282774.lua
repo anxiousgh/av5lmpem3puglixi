@@ -330,25 +330,48 @@ do
         end
     end))
 
-    -- one-time __namecall hook (survives re-exec). Body does NO namecalls.
+    -- one-time __namecall hook (survives re-exec). Body does NO instance namecalls
+    -- (self is always an Instance here; .Name is a property read, safe).
+    -- The client sends the bullet Id + origin + direction in Fire:FireServer, so the
+    -- server validates Hit against that ray. We redirect the FIRE direction onto the
+    -- target AND the matching Hit (keyed by Id) onto them, so the reported hit lies on
+    -- the server's known trajectory and validates. Bullet speed is derived from the
+    -- real shot's own pos/travelTime so the timing matches too.
     local gnm = getnamecallmethod
     if gv() and not gv()._CMG_GUNHOOK and hookmetamethod and gnm then
         gv()._CMG_GUNHOOK = true
+        local pending = {}      -- Id -> { part, pos, partCF, origin }
+        local pendN = 0
         local old
         old = hookmetamethod(game, "__namecall", function(self, ...)
             local st = gv() and gv()._CMG_S
-            if st and st.gunSilent and self == (gv() and gv()._CMG_HitRemote) then
-                if gnm() == "FireServer" then
-                    local tgt = st.gunTarget
-                    if tgt and tgt.Parent and st.gunTargetPos then
-                        local a = table.pack(...)
-                        a[2] = tgt                       -- hitPart -> target
-                        a[3] = st.gunTargetPos           -- hit position
-                        if st.gunTargetCF then           -- object-space offset (CFrame math, safe in hook)
-                            a[4] = st.gunTargetCF:ToObjectSpace(CFrame.new(st.gunTargetPos))
-                        end
+            if st and st.gunSilent and gnm() == "FireServer" then
+                local a = table.pack(...)
+                -- Fire:(origin V3, dir V3, Id string, t num)  -> aim the bullet at the target
+                if self.Name == "Fire" and typeof(a[1]) == "Vector3"
+                   and typeof(a[2]) == "Vector3" and typeof(a[3]) == "string" then
+                    local tgt, tpos, tcf = st.gunTarget, st.gunTargetPos, st.gunTargetCF
+                    if tgt and tpos then
+                        local origin = a[1]
+                        local d = tpos - origin
+                        a[2] = (d.Magnitude > 0 and d.Unit) or a[2]
+                        if pendN > 64 then table.clear(pending); pendN = 0 end
+                        pending[a[3]] = { part = tgt, pos = tpos, partCF = tcf, origin = origin }
+                        pendN = pendN + 1
                         return old(self, table.unpack(a, 1, a.n))
                     end
+                -- Hit:(Id string, part, pos V3, objCF CFrame, normal, t0, tFlight) -> land it on the target
+                elseif typeof(a[1]) == "string" and pending[a[1]] then
+                    local pe = pending[a[1]]; pending[a[1]] = nil; pendN = pendN - 1
+                    local origPos, origT = a[3], a[7]
+                    a[2] = pe.part
+                    a[3] = pe.pos
+                    if pe.partCF then a[4] = pe.partCF:ToObjectSpace(CFrame.new(pe.pos)) end
+                    if typeof(origPos) == "Vector3" and typeof(origT) == "number" and origT > 0 then
+                        local speed = (origPos - pe.origin).Magnitude / origT
+                        if speed > 0 then a[7] = (pe.pos - pe.origin).Magnitude / speed end
+                    end
+                    return old(self, table.unpack(a, 1, a.n))
                 end
             end
             return old(self, ...)
