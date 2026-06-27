@@ -73,43 +73,43 @@ local function myHRP()
     local char = LocalPlayer.Character
     return char and char:FindFirstChild("HumanoidRootPart")
 end
--- range visualizer: a transparent disc at your feet drawn by a Highlight outline.
--- Only renders while `on`; when off the highlight is disabled so nothing shows.
+-- range visualizer: a thin outline ring at your feet built from neon segments
+-- (Highlight outlines on flat discs were too thin/invisible here). Only exists while
+-- `on`; rebuilt when radius/colour change and pivoted to your feet each frame.
 local function makeRangeViz()
-    local self, disc, hl = {}, nil, nil
+    local self = {}
+    local model, builtR, builtC = nil, nil, nil
+    local SEG, THICK = 56, 0.15      -- segment count, segment thickness (studs)
+    local function build(radius, color)
+        if model then model:Destroy() end
+        model = Instance.new("Model"); model.Name = "\0"
+        local segLen = (2 * math.pi * radius) / SEG * 1.3   -- slight overlap -> continuous ring
+        for i = 1, SEG do
+            local ang = (i - 1) / SEG * (2 * math.pi)
+            local p = Instance.new("Part")
+            p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.Massless = true, false, false, false, true
+            p.Material = Enum.Material.Neon
+            p.Color = color
+            p.Size = Vector3.new(THICK, THICK, segLen)
+            p.CFrame = CFrame.new(math.cos(ang) * radius, 0, math.sin(ang) * radius) * CFrame.Angles(0, -ang, 0)
+            p.Parent = model
+        end
+        model.WorldPivot = CFrame.new()      -- pivot at the ring centre (origin)
+        model.Parent = workspace
+        builtR, builtC = radius, color
+    end
     function self.update(on, radius, color)
         if not on then
-            if hl then hl.Enabled = false end
+            if model then model:Destroy(); model = nil; builtR = nil end
             return
         end
         local hrp = myHRP(); if not hrp then return end
-        if not (disc and disc.Parent) then
-            disc = Instance.new("Part")
-            disc.Shape = Enum.PartType.Cylinder
-            disc.Anchored, disc.CanCollide, disc.CanQuery, disc.CanTouch, disc.Massless = true, false, false, false, true
-            -- 0.9999 (NOT 1): a part at exactly Transparency 1 isn't rendered, so its
-            -- Highlight outline has no geometry to draw. 0.9999 still renders invisibly
-            -- so the outline shows. (Same trick as HC's knife reach visualizer.)
-            disc.Transparency = 0.9999
-            disc.Name = "\0"
-            pcall(function() disc.Parent = workspace end)
-            hl = Instance.new("Highlight")
-            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            hl.FillTransparency = 1          -- outline only, no fill
-            hl.OutlineTransparency = 0
-            hl.Adornee = disc
-            pcall(function() hl.Parent = disc end)
-        end
-        local dia = radius * 2
-        disc.Size = Vector3.new(0.2, dia, dia)
-        -- lay the cylinder flat (axis up) so the circular face sits on the ground at your feet
-        disc.CFrame = CFrame.new(hrp.Position - Vector3.new(0, 2.6, 0)) * CFrame.Angles(0, 0, math.rad(90))
-        local c = color or Color3.fromRGB(255, 80, 80)
-        hl.FillColor, hl.OutlineColor, hl.Enabled = c, c, true
+        color = color or Color3.fromRGB(255, 80, 80)
+        if (not model) or builtR ~= radius or builtC ~= color then build(radius, color) end
+        model:PivotTo(CFrame.new(hrp.Position - Vector3.new(0, 2.6, 0)))   -- flat at your feet
     end
     function self.destroy()
-        if hl then pcall(function() hl:Destroy() end); hl = nil end
-        if disc then pcall(function() disc:Destroy() end); disc = nil end
+        if model then pcall(function() model:Destroy() end); model = nil end
     end
     return self
 end
