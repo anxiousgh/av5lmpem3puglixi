@@ -23,9 +23,11 @@ local ctx = ({ ... })[1]
 local Library = ctx.Library
 local Window  = ctx.Window
 
-local Players     = game:GetService("Players")
-local RunService  = game:GetService("RunService")
-local LocalPlayer = Players.LocalPlayer
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UIS              = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer      = Players.LocalPlayer
 local function gv() return (getgenv and getgenv()) or nil end
 
 local MainPage = Window:Page({ Name = "Main" })
@@ -41,6 +43,8 @@ local S = (gv() and gv()._CMG_S) or {
     aim = false,
     sword = false, swordRange = 14, swordCD = 0.2,
     swordLunge = true, swordLungeCD = 0.6,
+    gunSilent = false, gunFov = 200, gunHitPart = "Head", gunPriority = "Crosshair",
+    gunMagic = false, gunTeamCheck = false, gunShowFov = true, gunFovColor = Color3.fromRGB(255, 255, 255),
     phys = false, sendRate = 240,
 }
 -- backfill fields added in later versions onto a persisted (re-exec'd) table
@@ -48,6 +52,14 @@ if S.showRange == nil then S.showRange = false end
 if S.rangeColor == nil then S.rangeColor = Color3.fromRGB(255, 80, 80) end
 if S.pushEquip == nil then S.pushEquip = false end
 if S.pushEnemyOnly == nil then S.pushEnemyOnly = false end
+if S.gunSilent == nil then S.gunSilent = false end
+if S.gunFov == nil then S.gunFov = 200 end
+if S.gunHitPart == nil then S.gunHitPart = "Head" end
+if S.gunPriority == nil then S.gunPriority = "Crosshair" end
+if S.gunMagic == nil then S.gunMagic = false end
+if S.gunTeamCheck == nil then S.gunTeamCheck = false end
+if S.gunShowFov == nil then S.gunShowFov = true end
+if S.gunFovColor == nil then S.gunFovColor = Color3.fromRGB(255, 255, 255) end
 if S.swordLunge == nil then S.swordLunge = true end
 if S.swordLungeCD == nil then S.swordLungeCD = 0.6 end
 -- per-gear ballistics for the aimbot; each gear remembers its own tuning.
@@ -236,6 +248,113 @@ do
 end
 
 -- ============================================================
+--  GUN SILENT AIM  -- the bullet system reports its own hits via
+--  Remotes.Bullet.Hit:FireServer(Id, hitPart, pos, objCF, normal, t0, tFlight).
+--  We hook that report and swap the hit target onto the chosen enemy, so any
+--  shot landing on ANY surface is redirected onto them. Hook installed once.
+-- ============================================================
+do
+    local function aimPartOf(char)
+        return char:FindFirstChild(S.gunHitPart) or char:FindFirstChild("Head")
+            or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+            or char:FindFirstChild("HumanoidRootPart")
+    end
+    local function pickGunAim()
+        local cam = workspace.CurrentCamera
+        local origin = cam.CFrame.Position
+        local mouse = UIS:GetMouseLocation()
+        local best, bestScore
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character
+               and not (S.gunTeamCheck and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
+                local hum  = p.Character:FindFirstChildOfClass("Humanoid")
+                local part = aimPartOf(p.Character)
+                if hum and hum.Health > 0 and part then
+                    local pass = S.gunMagic
+                    if not pass then
+                        local sp, on = cam:WorldToViewportPoint(part.Position)
+                        if on and (mouse - Vector2.new(sp.X, sp.Y)).Magnitude <= S.gunFov then pass = true end
+                    end
+                    if pass then
+                        local score
+                        if S.gunPriority == "Lowest HP" then score = hum.Health
+                        elseif S.gunPriority == "Closest" then score = (part.Position - origin).Magnitude
+                        else
+                            local sp = cam:WorldToViewportPoint(part.Position)
+                            score = (mouse - Vector2.new(sp.X, sp.Y)).Magnitude
+                        end
+                        if not bestScore or score < bestScore then bestScore = score; best = part end
+                    end
+                end
+            end
+        end
+        return best
+    end
+    -- FOV ring
+    local fovGui = Instance.new("ScreenGui")
+    fovGui.Name = "\0"; fovGui.ResetOnSpawn = false
+    if not pcall(function() fovGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end) or not fovGui.Parent then
+        fovGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+    local ring = Instance.new("Frame")
+    ring.AnchorPoint = Vector2.new(0.5, 0.5); ring.BackgroundTransparency = 1
+    ring.BorderSizePixel = 0; ring.Visible = false; ring.Parent = fovGui
+    Instance.new("UICorner", ring).CornerRadius = UDim.new(1, 0)
+    local stroke = Instance.new("UIStroke", ring); stroke.Thickness = 1.5; stroke.Transparency = 0.3
+    S._gunFovDestroy = function() pcall(function() fovGui:Destroy() end) end
+
+    -- pick target + refresh the hit-remote ref each frame (the hook reads these caches;
+    -- it must do NO instance namecalls of its own, so we stage everything here)
+    track(RunService.RenderStepped:Connect(function()
+        local rem = ReplicatedStorage:FindFirstChild("Remotes")
+        local b = rem and rem:FindFirstChild("Bullet")
+        if gv() then gv()._CMG_HitRemote = b and b:FindFirstChild("Hit") end
+        if S.gunSilent then
+            local part = pickGunAim()
+            S.gunTarget = part
+            S.gunTargetPos = part and part.Position or nil
+            S.gunTargetCF  = part and part.CFrame or nil
+        else
+            S.gunTarget = nil
+        end
+        if S.gunSilent and S.gunShowFov then
+            local m = UIS:GetMouseLocation()
+            ring.Position = UDim2.fromOffset(m.X, m.Y)
+            ring.Size = UDim2.fromOffset(S.gunFov * 2, S.gunFov * 2)
+            stroke.Color = S.gunFovColor
+            ring.Visible = true
+        else
+            ring.Visible = false
+        end
+    end))
+
+    -- one-time __namecall hook (survives re-exec). Body does NO namecalls.
+    local gnm = getnamecallmethod
+    if gv() and not gv()._CMG_GUNHOOK and hookmetamethod and gnm then
+        gv()._CMG_GUNHOOK = true
+        local old
+        old = hookmetamethod(game, "__namecall", function(self, ...)
+            local st = gv() and gv()._CMG_S
+            if st and st.gunSilent and self == (gv() and gv()._CMG_HitRemote) then
+                if gnm() == "FireServer" then
+                    local tgt = st.gunTarget
+                    if tgt and tgt.Parent and st.gunTargetPos then
+                        local a = table.pack(...)
+                        a[2] = tgt                       -- hitPart -> target
+                        a[3] = st.gunTargetPos           -- hit position
+                        if st.gunTargetCF then           -- object-space offset (CFrame math, safe in hook)
+                            a[4] = st.gunTargetCF:ToObjectSpace(CFrame.new(st.gunTargetPos))
+                        end
+                        return old(self, table.unpack(a, 1, a.n))
+                    end
+                end
+            end
+            return old(self, ...)
+        end)
+    end
+end
+
+-- ============================================================
 --  SWORD AURA  -- firetouchinterest the real Handle onto nearby enemies.
 --  First delete the SwordClient honeypot (local-only, no server channel).
 -- ============================================================
@@ -359,6 +478,28 @@ do
     Sec2:Slider({ Name = "Bullet drop", Flag = "CMG_GearDrop", Min = 0, Max = 200, Default = 100, Decimals = 0, Suffix = " %",
         Callback = function(v) local n = activeGearName(); if n then S.gear[n].drop = v / 100 end end })
 
+    local Sec4 = Combat:Section({ Name = "Gun Silent Aim", Side = 2 })
+    local gunTog = Sec4:Toggle({ Name = "Silent aim", Flag = "CMG_GunSilent", Default = false,
+        Callback = function(v) S.gunSilent = v end })
+    Sec4:Label({ Name = "Toggle key" }):Keybind({ Name = "GunSilent", Flag = "CMG_GunKey", Mode = "Toggle",
+        Callback = function(state) gunTog:Set(state and true or false) end })
+    Sec4:Slider({ Name = "FOV", Flag = "CMG_GunFov", Min = 20, Max = 1000, Default = 200, Decimals = 0, Suffix = " px",
+        Callback = function(v) S.gunFov = v end })
+    Sec4:Dropdown({ Name = "Hit part", Flag = "CMG_GunHitPart", Default = "Head", Multi = false,
+        Items = { "Head", "UpperTorso", "Torso", "HumanoidRootPart" },
+        Callback = function(v) S.gunHitPart = (type(v) == "table" and v[1]) or v or "Head" end })
+    Sec4:Dropdown({ Name = "Priority", Flag = "CMG_GunPriority", Default = "Crosshair", Multi = false,
+        Items = { "Crosshair", "Closest", "Lowest HP" },
+        Callback = function(v) S.gunPriority = (type(v) == "table" and v[1]) or v or "Crosshair" end })
+    Sec4:Toggle({ Name = "Magic (ignore FOV)", Flag = "CMG_GunMagic", Default = false,
+        Callback = function(v) S.gunMagic = v end })
+    Sec4:Toggle({ Name = "Team check", Flag = "CMG_GunTeam", Default = false,
+        Callback = function(v) S.gunTeamCheck = v end })
+    Sec4:Toggle({ Name = "Show FOV", Flag = "CMG_GunShowFov", Default = true,
+        Callback = function(v) S.gunShowFov = v end })
+    Sec4:Label({ Name = "FOV color" }):Colorpicker({ Flag = "CMG_GunFovColor", Default = Color3.fromRGB(255, 255, 255),
+        Callback = function(c) S.gunFovColor = c end })
+
     local Sec3 = Combat:Section({ Name = "Sword Aura", Side = 1 })
     Sec3:Label({ Name = "ClassicSword -- experimental" })
     local swordTog = Sec3:Toggle({ Name = "Enabled", Flag = "CMG_Sword", Default = false,
@@ -391,8 +532,9 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 --  Teardown
 -- ============================================================
 local function cleanup()
-    S.push, S.aim, S.sword, S.showRange = false, false, false, false
+    S.push, S.aim, S.sword, S.showRange, S.gunSilent = false, false, false, false, false
     if S._discDestroy then pcall(S._discDestroy) end
+    if S._gunFovDestroy then pcall(S._gunFovDestroy) end
     if S.phys then pcall(function() applyPhys(false) end); S.phys = false end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 end
