@@ -841,12 +841,20 @@ do
             Library.MouseStateBeforeOpen = {
                 MouseBehavior = UserInputService.MouseBehavior,
                 MouseIconEnabled = UserInputService.MouseIconEnabled,
+                MouseDeltaSensitivity = UserInputService.MouseDeltaSensitivity,
             }
             UserInputService.MouseBehavior = Enum.MouseBehavior.Default
             UserInputService.MouseIconEnabled = false
+            -- [wh] Freeze camera drag while open. If the menu is opened mid-RMB-hold the
+            -- game camera still thinks RMB is down and pans with the freed cursor; zeroing
+            -- the delta starves its rotation (cursor stays free -- it's absolute in Default).
+            UserInputService.MouseDeltaSensitivity = 0
         elseif Library.MouseStateBeforeOpen then
             UserInputService.MouseBehavior = Library.MouseStateBeforeOpen.MouseBehavior or Enum.MouseBehavior.Default
             UserInputService.MouseIconEnabled = Library.MouseStateBeforeOpen.MouseIconEnabled ~= false
+            if Library.MouseStateBeforeOpen.MouseDeltaSensitivity then
+                UserInputService.MouseDeltaSensitivity = Library.MouseStateBeforeOpen.MouseDeltaSensitivity
+            end
             Library.MouseStateBeforeOpen = nil
         else
             UserInputService.MouseIconEnabled = true
@@ -874,8 +882,14 @@ do
     -- otherwise traps the cursor in the screen centre. SetWindowVisibilityState
     -- only sets Default once on open, so re-assert it each frame here.
     Library:Connect(RunService.RenderStepped, function()
-        if Library.WindowOpenState and UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
-            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        if Library.WindowOpenState then
+            if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
+                UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+            end
+            -- [wh] keep the camera starved of delta while open (game re-asserts it)
+            if UserInputService.MouseDeltaSensitivity ~= 0 then
+                UserInputService.MouseDeltaSensitivity = 0
+            end
         end
     end)
 
