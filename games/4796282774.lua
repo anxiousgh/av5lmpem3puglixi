@@ -36,10 +36,14 @@ local function track(c) conns[#conns + 1] = c; return c end
 -- settings live in getgenv so state + the (one-time) gear hooks survive a re-exec
 local S = (gv() and gv()._CMG_S) or {
     push = false, pushRange = 5, pushCD = 0.35,
+    showRange = false, rangeColor = Color3.fromRGB(255, 80, 80),
     aim = false,
     sword = false, swordRange = 14, swordCD = 0.2,
     phys = false, sendRate = 240,
 }
+-- backfill fields added in later versions onto a persisted (re-exec'd) table
+if S.showRange == nil then S.showRange = false end
+if S.rangeColor == nil then S.rangeColor = Color3.fromRGB(255, 80, 80) end
 if gv() then gv()._CMG_S = S end
 
 -- ---- shared target helpers ----
@@ -106,6 +110,36 @@ do
         forEnemiesInRange(S.pushRange, lastPush, S.pushCD, function(part)
             hit:FireServer("Hit", part)
         end)
+    end))
+end
+
+-- ---- range visualizer: a flat translucent disc at your feet, radius = pushRange.
+--      doubles as a debug aid -- if it shows, the render loop is alive. ----
+do
+    local disc
+    track(RunService.RenderStepped:Connect(function()
+        if not S.showRange then
+            if disc then disc.Transparency = 1 end
+            return
+        end
+        local hrp = myHRP()
+        if not hrp then return end
+        if not (disc and disc.Parent) then
+            disc = Instance.new("Part")
+            disc.Shape = Enum.PartType.Cylinder
+            disc.Anchored, disc.CanCollide, disc.CanQuery = true, false, false
+            disc.CanTouch, disc.Massless = false, true
+            disc.Material = Enum.Material.ForceField
+            disc.Name = "\0"
+            pcall(function() disc.Parent = workspace end)
+            S._discDestroy = function() if disc then pcall(function() disc:Destroy() end); disc = nil end end
+        end
+        local dia = S.pushRange * 2
+        disc.Size = Vector3.new(0.2, dia, dia)
+        disc.Color = S.rangeColor or Color3.fromRGB(255, 80, 80)
+        disc.Transparency = 0.6
+        -- lay the cylinder flat (axis up) so the circular face sits on the ground at your feet
+        disc.CFrame = CFrame.new(hrp.Position - Vector3.new(0, 2.6, 0)) * CFrame.Angles(0, 0, math.rad(90))
     end))
 end
 
@@ -204,6 +238,10 @@ do
         Callback = function(v) S.pushCD = v / 1000 end })
     Sec:Label({ Name = "Toggle key" }):Keybind({ Name = "AutoPush", Flag = "CMG_PushKey", Mode = "Toggle",
         Callback = function(state) pushTog:Set(state and true or false) end })
+    Sec:Toggle({ Name = "Show range", Flag = "CMG_PushViz", Default = false,
+        Callback = function(v) S.showRange = v end })
+    Sec:Label({ Name = "Range color" }):Colorpicker({ Flag = "CMG_PushVizColor", Default = Color3.fromRGB(255, 80, 80),
+        Callback = function(c) S.rangeColor = c end })
 
     local Sec2 = Combat:Section({ Name = "Gear Aimbot", Side = 2 })
     Sec2:Label({ Name = "Slingshot / Rocket / Trowel / Superball" })
@@ -240,7 +278,8 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 --  Teardown
 -- ============================================================
 local function cleanup()
-    S.push, S.aim, S.sword = false, false, false
+    S.push, S.aim, S.sword, S.showRange = false, false, false, false
+    if S._discDestroy then pcall(S._discDestroy) end
     if S.phys then pcall(function() applyPhys(false) end); S.phys = false end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 end
