@@ -41,7 +41,7 @@ local S = (gv() and gv()._CMG_S) or {
     pushEquip = false, pushEnemyOnly = false,
     showRange = false, rangeColor = Color3.fromRGB(255, 80, 80),
     aim = false,
-    sword = false, swordRange = 14, swordCD = 0.2,
+    sword = false, swordRange = 14, swordCD = 0.2, swordEnemyOnly = false,
     swordLunge = true, swordLungeCD = 0.6,
     gunSilent = false, gunFov = 200, gunHitPart = "Head", gunPriority = "Crosshair",
     gunMagic = false, gunTeamCheck = false, gunShowFov = true, gunFovColor = Color3.fromRGB(255, 255, 255),
@@ -62,6 +62,7 @@ if S.gunShowFov == nil then S.gunShowFov = true end
 if S.gunFovColor == nil then S.gunFovColor = Color3.fromRGB(255, 255, 255) end
 if S.swordLunge == nil then S.swordLunge = true end
 if S.swordLungeCD == nil then S.swordLungeCD = 0.6 end
+if S.swordEnemyOnly == nil then S.swordEnemyOnly = false end
 -- per-gear ballistics for the aimbot; each gear remembers its own tuning.
 -- speed = studs/s, drop = gravity fraction (0 = flies straight, like a rocket)
 S.gear = S.gear or {
@@ -364,7 +365,8 @@ do
     local function targetInRange()
         local hrp = myHRP(); if not hrp then return false end
         for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LocalPlayer and p.Character then
+            if p ~= LocalPlayer and p.Character
+               and not (S.swordEnemyOnly and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
                 local hum  = p.Character:FindFirstChildOfClass("Humanoid")
                 local part = p.Character:FindFirstChild("Torso") or p.Character:FindFirstChild("HumanoidRootPart")
                 if hum and hum.Health > 0 and part and (part.Position - hrp.Position).Magnitude <= S.swordRange then
@@ -377,7 +379,7 @@ do
     local function touchAll(handle)
         forEnemiesInRange(S.swordRange, lastSword, 0, function(part)
             firetouchinterest(handle, part, 0); firetouchinterest(handle, part, 1)
-        end)
+        end, S.swordEnemyOnly)
     end
     track(RunService.Heartbeat:Connect(function()
         if not S.sword or not firetouchinterest then return end
@@ -418,7 +420,7 @@ do
             forEnemiesInRange(S.swordRange, lastSword, S.swordCD, function(part)
                 firetouchinterest(handle, part, 0)
                 firetouchinterest(handle, part, 1)
-            end)
+            end, S.swordEnemyOnly)
         end
     end))
 end
@@ -510,6 +512,8 @@ do
         Callback = function(v) S.swordLunge = v end })
     Sec3:Slider({ Name = "Lunge cooldown", Flag = "CMG_SwordLungeCD", Min = 0, Max = 1500, Default = 600, Decimals = 0, Suffix = " ms",
         Callback = function(v) S.swordLungeCD = v / 1000 end })
+    Sec3:Toggle({ Name = "Enemies only (team)", Flag = "CMG_SwordEnemyOnly", Default = false,
+        Callback = function(v) S.swordEnemyOnly = v end })
     Sec3:Label({ Name = "Toggle key" }):Keybind({ Name = "SwordAura", Flag = "CMG_SwordKey", Mode = "Toggle",
         Callback = function(state) swordTog:Set(state and true or false) end })
 end
