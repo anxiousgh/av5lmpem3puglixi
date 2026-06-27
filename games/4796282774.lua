@@ -39,8 +39,10 @@ local function track(c) conns[#conns + 1] = c; return c end
 local S = (gv() and gv()._CMG_S) or {
     push = false, pushRange = 5, pushCD = 0.35,
     pushEquip = false, pushEnemyOnly = false,
-    pushManip = "Off", pushReduce = 0.5,
+    pushManip = "Off", pushReduce = 0.5, antiPushRange = 0,
+    antiPushShowRange = false, antiPushRangeColor = Color3.fromRGB(255, 180, 80),
     showRange = false, rangeColor = Color3.fromRGB(255, 80, 80),
+    vizMode = "Circle", vizMaterial = "Neon", vizOrigin = "Ground",
     sword = false, swordRange = 14, swordCD = 0.2, swordEnemyOnly = false,
     swordLunge = true, swordLungeCD = 0.6,
     swordShowRange = false, swordRangeColor = Color3.fromRGB(120, 170, 255),
@@ -55,6 +57,12 @@ if S.pushEquip == nil then S.pushEquip = false end
 if S.pushEnemyOnly == nil then S.pushEnemyOnly = false end
 if S.pushManip == nil then S.pushManip = "Off" end
 if S.pushReduce == nil then S.pushReduce = 0.5 end
+if S.antiPushRange == nil then S.antiPushRange = 0 end
+if S.antiPushShowRange == nil then S.antiPushShowRange = false end
+if S.antiPushRangeColor == nil then S.antiPushRangeColor = Color3.fromRGB(255, 180, 80) end
+if S.vizMode == nil then S.vizMode = "Circle" end
+if S.vizMaterial == nil then S.vizMaterial = "Neon" end
+if S.vizOrigin == nil then S.vizOrigin = "Ground" end
 if S.gunSilent == nil then S.gunSilent = false end
 if S.gunFov == nil then S.gunFov = 200 end
 if S.gunHitPart == nil then S.gunHitPart = "Head" end
@@ -76,47 +84,81 @@ local function myHRP()
     local char = LocalPlayer.Character
     return char and char:FindFirstChild("HumanoidRootPart")
 end
--- range visualizer: a thin outline ring at your feet built from neon segments
--- (Highlight outlines on flat discs were too thin/invisible here). Only exists while
--- `on`; rebuilt when radius/colour change and pivoted to your feet each frame.
+-- range visualizer. Style (mode/material/origin) is global via S.vizMode / S.vizMaterial /
+-- S.vizOrigin so every ring shares one look. Only exists while `on`; rebuilt when the
+-- radius/colour/mode/material change, then positioned per the origin option each frame.
+--   mode: "Circle" (neon segment ring), "Full" (translucent filled disc), "Highlight" (outline)
+--   origin: "Ground" (raycast down), "Feet", "HRP", "Head"
 local function makeRangeViz()
     local self = {}
-    local model, builtR, builtC = nil, nil, nil
-    local SEG, THICK = 56, 0.15      -- segment count, segment thickness (studs)
-    local function build(radius, color)
+    local model, builtKey = nil, nil
+    local function build(radius, color, mode, material)
         if model then model:Destroy() end
         model = Instance.new("Model"); model.Name = "\0"
-        local segLen = (2 * math.pi * radius) / SEG * 1.3   -- slight overlap -> continuous ring
-        for i = 1, SEG do
-            local ang = (i - 1) / SEG * (2 * math.pi)
-            local p = Instance.new("Part")
-            p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.Massless = true, false, false, false, true
-            p.Material = Enum.Material.Neon
-            p.Color = color
-            p.Size = Vector3.new(THICK, THICK, segLen)
-            p.CFrame = CFrame.new(math.cos(ang) * radius, 0, math.sin(ang) * radius) * CFrame.Angles(0, -ang, 0)
-            p.Parent = model
+        local mat = Enum.Material[material] or Enum.Material.Neon
+        if mode == "Circle" then
+            local SEG, THICK = 56, 0.15
+            local segLen = (2 * math.pi * radius) / SEG * 1.3
+            for i = 1, SEG do
+                local ang = (i - 1) / SEG * (2 * math.pi)
+                local p = Instance.new("Part")
+                p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.Massless = true, false, false, false, true
+                p.Material, p.Color = mat, color
+                p.Size = Vector3.new(THICK, THICK, segLen)
+                p.CFrame = CFrame.new(math.cos(ang) * radius, 0, math.sin(ang) * radius) * CFrame.Angles(0, -ang, 0)
+                p.Parent = model
+            end
+        else  -- "Full" or "Highlight": a flat cylinder disc
+            local disc = Instance.new("Part")
+            disc.Shape = Enum.PartType.Cylinder
+            disc.Anchored, disc.CanCollide, disc.CanQuery, disc.CanTouch, disc.Massless = true, false, false, false, true
+            disc.Size = Vector3.new(0.2, radius * 2, radius * 2)
+            disc.CFrame = CFrame.Angles(0, 0, math.rad(90))   -- lay flat; pivot positions it
+            disc.Material = mat
+            if mode == "Highlight" then
+                disc.Transparency = 0.9999    -- not 1, so the Highlight outline renders
+                local hl = Instance.new("Highlight")
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                hl.FillTransparency, hl.OutlineTransparency = 1, 0
+                hl.FillColor, hl.OutlineColor = color, color
+                hl.Adornee = disc; hl.Parent = disc
+            else  -- Full
+                disc.Transparency, disc.Color = 0.5, color
+            end
+            disc.Parent = model
         end
-        model.WorldPivot = CFrame.new()      -- pivot at the ring centre (origin)
+        model.WorldPivot = CFrame.new()
         model.Parent = workspace
-        builtR, builtC = radius, color
     end
     function self.update(on, radius, color)
         if not on then
-            if model then model:Destroy(); model = nil; builtR = nil end
+            if model then model:Destroy(); model = nil; builtKey = nil end
             return
         end
         local hrp = myHRP(); if not hrp then return end
         color = color or Color3.fromRGB(255, 80, 80)
-        if (not model) or builtR ~= radius or builtC ~= color then build(radius, color) end
-        -- raycast straight down to the real ground so the ring sits on it, never floats
-        local groundY = hrp.Position.Y - 3
-        local rp = RaycastParams.new()
-        rp.FilterType = Enum.RaycastFilterType.Exclude
-        rp.FilterDescendantsInstances = { LocalPlayer.Character, model }
-        local res = workspace:Raycast(hrp.Position, Vector3.new(0, -60, 0), rp)
-        if res then groundY = res.Position.Y end
-        model:PivotTo(CFrame.new(hrp.Position.X, groundY + 0.05, hrp.Position.Z))   -- flat on the ground
+        local mode, material, originOpt = S.vizMode or "Circle", S.vizMaterial or "Neon", S.vizOrigin or "Ground"
+        local key = string.format("%0.2f|%s|%s|%s", radius, tostring(color), mode, material)
+        if (not model) or builtKey ~= key then build(radius, color, mode, material); builtKey = key end
+        local char = LocalPlayer.Character
+        local pos
+        if originOpt == "Feet" then
+            pos = hrp.Position - Vector3.new(0, 2.6, 0)
+        elseif originOpt == "Head" then
+            local head = char and char:FindFirstChild("Head")
+            pos = (head and head.Position) or (hrp.Position + Vector3.new(0, 1.5, 0))
+        elseif originOpt == "HRP" then
+            pos = hrp.Position
+        else  -- Ground: raycast straight down
+            local groundY = hrp.Position.Y - 3
+            local rp = RaycastParams.new()
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            rp.FilterDescendantsInstances = { char, model }
+            local res = workspace:Raycast(hrp.Position, Vector3.new(0, -60, 0), rp)
+            if res then groundY = res.Position.Y end
+            pos = Vector3.new(hrp.Position.X, groundY + 0.05, hrp.Position.Z)
+        end
+        model:PivotTo(CFrame.new(pos))
     end
     function self.destroy()
         if model then pcall(function() model:Destroy() end); model = nil end
@@ -242,6 +284,15 @@ do
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not hrp then return end
+        -- Anti Push ignore-range: if anyone is within antiPushRange, let the push through
+        if mode == "Anti Push" and (S.antiPushRange or 0) > 0 then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer and p.Character then
+                    local part = p.Character:FindFirstChild("HumanoidRootPart") or p.Character:FindFirstChild("Torso")
+                    if part and (part.Position - hrp.Position).Magnitude <= S.antiPushRange then return end
+                end
+            end
+        end
         local hum = char:FindFirstChildOfClass("Humanoid")
         local thresh = math.max((hum and hum.WalkSpeed or 16) * 2 + 16, 48)  -- a push exceeds normal movement
         local v = hrp.AssemblyLinearVelocity
@@ -253,6 +304,13 @@ do
                 hrp.AssemblyLinearVelocity = Vector3.new(v.X * keep, v.Y, v.Z * keep)
             end
         end
+    end))
+    -- anti-push ignore-range visualizer
+    local viz = makeRangeViz()
+    S._antiPushDiscDestroy = viz.destroy
+    track(RunService.RenderStepped:Connect(function()
+        local show = S.antiPushShowRange and S.pushManip == "Anti Push" and (S.antiPushRange or 0) > 0
+        viz.update(show, S.antiPushRange or 0, S.antiPushRangeColor)
     end))
 end
 
@@ -573,19 +631,32 @@ do
 
     local SecPM = Combat:Section({ Name = "Push Manipulation", Side = 2 })
     local pmLast = "Anti Push"   -- last non-off mode, restored by the keybind
+    local reduceSlider, antiRangeSlider, antiVizToggle
+    local function pmRefresh(m)   -- show only the controls relevant to the chosen mode
+        if reduceSlider then reduceSlider:SetVisibility(m == "Reduce Push") end
+        if antiRangeSlider then antiRangeSlider:SetVisibility(m == "Anti Push") end
+        if antiVizToggle then antiVizToggle:SetVisibility(m == "Anti Push") end
+    end
     local pmDrop = SecPM:Dropdown({ Name = "Mode", Flag = "CMG_PushManip", Default = "Off", Multi = false,
         Items = { "Off", "Anti Push", "Reduce Push" },
         Callback = function(v)
             S.pushManip = (type(v) == "table" and v[1]) or v or "Off"
             if S.pushManip ~= "Off" then pmLast = S.pushManip end
+            pmRefresh(S.pushManip)
         end })
-    SecPM:Slider({ Name = "Reduction (Reduce Push)", Flag = "CMG_PushReduce", Min = 0, Max = 100, Default = 50, Decimals = 0, Suffix = " %",
+    reduceSlider = SecPM:Slider({ Name = "Reduction", Flag = "CMG_PushReduce", Min = 0, Max = 100, Default = 50, Decimals = 0, Suffix = " %",
         Callback = function(v) S.pushReduce = v / 100 end })
+    antiRangeSlider = SecPM:Slider({ Name = "Ignore range", Flag = "CMG_AntiPushRange", Min = 0, Max = 10, Default = 0, Decimals = 0, Suffix = " studs",
+        Callback = function(v) S.antiPushRange = v end })   -- 0 = always anti-fling; within this range it lets the push through
+    antiVizToggle = SecPM:Toggle({ Name = "Show range", Flag = "CMG_AntiPushViz", Default = false,
+        Callback = function(v) S.antiPushShowRange = v end })
     SecPM:Label({ Name = "Toggle key" }):Keybind({ Name = "PushManip", Flag = "CMG_PushManipKey", Mode = "Toggle",
         Callback = function()
-            S.pushManip = (S.pushManip == "Off") and pmLast or "Off"   -- flip on <-> last mode
-            pcall(function() pmDrop:Set(S.pushManip) end)              -- sync the dropdown display
+            S.pushManip = (S.pushManip == "Off") and pmLast or "Off"
+            pcall(function() pmDrop:Set(S.pushManip) end)
+            pmRefresh(S.pushManip)
         end })
+    pmRefresh(S.pushManip)   -- initial visibility
 
     local Sec4 = Combat:Section({ Name = "Gun Silent Aim", Side = 2 })
     local gunTog = Sec4:Toggle({ Name = "Silent aim", Flag = "CMG_GunSilent", Default = false,
@@ -629,6 +700,18 @@ do
         Callback = function(c) S.swordRangeColor = c end })
     Sec3:Label({ Name = "Toggle key" }):Keybind({ Name = "SwordAura", Flag = "CMG_SwordKey", Mode = "Toggle",
         Callback = function(state) swordTog:Set(state and true or false) end })
+
+    local SecViz = Combat:Section({ Name = "Visualizers", Side = 1 })
+    SecViz:Label({ Name = "Applies to every range ring" })
+    SecViz:Dropdown({ Name = "Mode", Flag = "CMG_VizMode", Default = "Circle", Multi = false,
+        Items = { "Circle", "Full", "Highlight" },
+        Callback = function(v) S.vizMode = (type(v) == "table" and v[1]) or v or "Circle" end })
+    SecViz:Dropdown({ Name = "Material", Flag = "CMG_VizMaterial", Default = "Neon", Multi = false,
+        Items = { "Neon", "ForceField", "Plastic", "SmoothPlastic", "Glass", "Metal" },
+        Callback = function(v) S.vizMaterial = (type(v) == "table" and v[1]) or v or "Neon" end })
+    SecViz:Dropdown({ Name = "Origin", Flag = "CMG_VizOrigin", Default = "Ground", Multi = false,
+        Items = { "Ground", "Feet", "HRP", "Head" },
+        Callback = function(v) S.vizOrigin = (type(v) == "table" and v[1]) or v or "Ground" end })
 end
 
 local Net = MainPage:SubPage({ Name = "Network" })
@@ -650,9 +733,10 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     S.push, S.sword, S.showRange, S.swordShowRange, S.gunSilent = false, false, false, false, false
-    S.pushManip = "Off"
+    S.pushManip, S.antiPushShowRange = "Off", false
     if S._discDestroy then pcall(S._discDestroy) end
     if S._swordDiscDestroy then pcall(S._swordDiscDestroy) end
+    if S._antiPushDiscDestroy then pcall(S._antiPushDiscDestroy) end
     if S._gunFovDestroy then pcall(S._gunFovDestroy) end
     if S.phys then pcall(function() applyPhys(false) end); S.phys = false end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
