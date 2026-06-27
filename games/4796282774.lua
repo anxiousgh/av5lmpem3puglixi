@@ -364,9 +364,9 @@ do
                         local origin = a[1]
                         local d = tpos - origin
                         a[2] = (d.Magnitude > 0 and d.Unit) or a[2]
-                        if gv()._CMG_gunPendN > 64 then table.clear(pend); gv()._CMG_gunPendN = 0 end
-                        pend[a[3]] = { part = tgt, pos = tpos, partCF = tcf, origin = origin }
-                        gv()._CMG_gunPendN = gv()._CMG_gunPendN + 1
+                        local nowc = os.clock()
+                        for id, e in pairs(pend) do if nowc - (e.t0 or 0) > 2 then pend[id] = nil end end  -- expire old bullets
+                        pend[a[3]] = { part = tgt, pos = tpos, partCF = tcf, origin = origin, t0 = nowc }
                         bump("fireRedir"); if diag then diag.lastTarget = tgt.Name end
                         return a
                     else
@@ -378,8 +378,9 @@ do
             -- Hit:(Id string, part, pos V3, objCF CFrame, normal, t0, tFlight) -> land it on them
             elseif typeof(a[1]) == "string" then
                 bump("hitSeen")
-                if pend[a[1]] then
-                    local pe = pend[a[1]]; pend[a[1]] = nil; gv()._CMG_gunPendN = gv()._CMG_gunPendN - 1
+                local pe = pend[a[1]]
+                if pe then     -- redirect EVERY hit for this bullet Id (don't delete) so a
+                               -- second wall-hit can't contradict the enemy hit and get it rejected
                     local origPos, origT = a[3], a[7]
                     a[2] = pe.part
                     a[3] = pe.pos
