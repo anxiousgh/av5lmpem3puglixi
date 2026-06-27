@@ -239,23 +239,38 @@ do
             or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
             or char:FindFirstChild("HumanoidRootPart")
     end
+    -- where the bullet actually leaves from: the gun's Muzzle (or Handle), not the camera
+    local function gunOrigin()
+        local char = LocalPlayer.Character
+        if not char then return nil end
+        for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") then
+                local handle = t:FindFirstChild("Handle") or t:FindFirstChild("ToolHandle")
+                local muzzle = handle and (handle:FindFirstChild("Muzzle") or handle:FindFirstChild("MuzzlePoint"))
+                if muzzle then return (muzzle:IsA("Attachment") and muzzle.WorldPosition) or muzzle.Position end
+                if handle then return handle.Position end
+            end
+        end
+        return nil
+    end
     local function pickGunAim()
         local cam = workspace.CurrentCamera
         local origin = cam.CFrame.Position
         local mouse = UIS:GetMouseLocation()
         local doTeam = S.gunTeamCheck and multiTeam()
-        -- wall check: raycast camera->target excluding all characters; any hit = blocked
-        local rp
+        -- wall check: raycast from the GUN MUZZLE -> target, excluding all characters; any hit = blocked
+        local rp, wallOrigin
         if S.gunWallCheck then
             local ignore = { LocalPlayer.Character }
             for _, p in ipairs(Players:GetPlayers()) do if p.Character then ignore[#ignore + 1] = p.Character end end
             rp = RaycastParams.new()
             rp.FilterType = Enum.RaycastFilterType.Exclude
             rp.FilterDescendantsInstances = ignore
+            wallOrigin = gunOrigin() or origin   -- fall back to camera only if no muzzle/handle found
         end
         local function visible(part)
             if not rp then return true end
-            return workspace:Raycast(origin, part.Position - origin, rp) == nil
+            return workspace:Raycast(wallOrigin, part.Position - wallOrigin, rp) == nil
         end
         local best, bestScore
         for _, p in ipairs(Players:GetPlayers()) do
