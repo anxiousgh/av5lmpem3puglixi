@@ -571,12 +571,21 @@ do
     Sec:Toggle({ Name = "Enemies only (team)", Flag = "CMG_PushEnemyOnly", Default = false,
         Callback = function(v) S.pushEnemyOnly = v end })
 
-    local SecPM = Combat:Section({ Name = "Push Manipulation", Side = 1 })
-    SecPM:Dropdown({ Name = "Mode", Flag = "CMG_PushManip", Default = "Off", Multi = false,
+    local SecPM = Combat:Section({ Name = "Push Manipulation", Side = 2 })
+    local pmLast = "Anti Push"   -- last non-off mode, restored by the keybind
+    local pmDrop = SecPM:Dropdown({ Name = "Mode", Flag = "CMG_PushManip", Default = "Off", Multi = false,
         Items = { "Off", "Anti Push", "Reduce Push" },
-        Callback = function(v) S.pushManip = (type(v) == "table" and v[1]) or v or "Off" end })
+        Callback = function(v)
+            S.pushManip = (type(v) == "table" and v[1]) or v or "Off"
+            if S.pushManip ~= "Off" then pmLast = S.pushManip end
+        end })
     SecPM:Slider({ Name = "Reduction (Reduce Push)", Flag = "CMG_PushReduce", Min = 0, Max = 100, Default = 50, Decimals = 0, Suffix = " %",
         Callback = function(v) S.pushReduce = v / 100 end })
+    SecPM:Label({ Name = "Toggle key" }):Keybind({ Name = "PushManip", Flag = "CMG_PushManipKey", Mode = "Toggle",
+        Callback = function()
+            S.pushManip = (S.pushManip == "Off") and pmLast or "Off"   -- flip on <-> last mode
+            pcall(function() pmDrop:Set(S.pushManip) end)              -- sync the dropdown display
+        end })
 
     local Sec4 = Combat:Section({ Name = "Gun Silent Aim", Side = 2 })
     local gunTog = Sec4:Toggle({ Name = "Silent aim", Flag = "CMG_GunSilent", Default = false,
