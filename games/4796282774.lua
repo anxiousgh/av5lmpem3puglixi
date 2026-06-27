@@ -47,6 +47,14 @@ if S.showRange == nil then S.showRange = false end
 if S.rangeColor == nil then S.rangeColor = Color3.fromRGB(255, 80, 80) end
 if S.swordLunge == nil then S.swordLunge = true end
 if S.swordLungeCD == nil then S.swordLungeCD = 0.6 end
+-- per-gear ballistics for the aimbot; each gear remembers its own tuning.
+-- speed = studs/s, drop = gravity fraction (0 = flies straight, like a rocket)
+S.gear = S.gear or {
+    ClassicSlingshot = { speed = 120, drop = 1 },
+    RocketLauncher   = { speed = 80,  drop = 0 },
+    ClassicSuperball = { speed = 90,  drop = 1 },
+    ClassicTrowel    = { speed = 100, drop = 1 },
+}
 if gv() then gv()._CMG_S = S end
 
 -- ---- shared target helpers ----
@@ -150,14 +158,42 @@ end
 --  GEAR AIMBOT  -- override MouseLoc.OnClientInvoke to return the nearest enemy.
 --  Hooked once per gear; behaviour is gated by S.aim so toggling never un-hooks.
 -- ============================================================
+-- which loadout gear (if any) is currently equipped -- picks its ballistics preset
+local function activeGearName()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    for _, t in ipairs(char:GetChildren()) do
+        if t:IsA("Tool") and S.gear[t.Name] then return t.Name end
+    end
+    return nil
+end
 do
     local mouse  = LocalPlayer:GetMouse()
     local hooked = setmetatable({}, { __mode = "k" })
     local lastScan = 0
+    -- solve for the aim point that lands a slow, arcing projectile on a moving target:
+    -- iterate flight time t = dist/speed, lead by the target's velocity, then raise the
+    -- point by the gravity drop over t so the arc passes through the lead position.
+    local function predictedAim(part)
+        local origin = myHRP()
+        origin = (origin and origin.Position) or part.Position
+        local cfg = S.gear[activeGearName() or ""] or { speed = 100, drop = 1 }
+        local speed = math.max(cfg.speed, 1)
+        local hrpT  = part.Parent and (part.Parent:FindFirstChild("HumanoidRootPart") or part)
+        local tv    = (hrpT and hrpT.AssemblyLinearVelocity) or Vector3.new()
+        local pos   = part.Position
+        local t = (pos - origin).Magnitude / speed
+        for _ = 1, 4 do t = ((pos + tv * t) - origin).Magnitude / speed end
+        local aim = pos + tv * t
+        if cfg.drop > 0 then
+            aim = aim + Vector3.new(0, 0.5 * (workspace.Gravity * cfg.drop) * t * t, 0)
+        end
+        return aim
+    end
     local function aimQuery()
         if S.aim then
             local part = nearestEnemyPart()
-            if part then return part.Position end
+            if part then return predictedAim(part) end
         end
         return mouse.Hit.p   -- off (or no target) -> behave exactly like the real gear
     end
@@ -293,6 +329,12 @@ do
         Callback = function(v) S.aim = v end })
     Sec2:Label({ Name = "Toggle key" }):Keybind({ Name = "Aimbot", Flag = "CMG_AimKey", Mode = "Toggle",
         Callback = function(state) aimTog:Set(state and true or false) end })
+    -- ballistics tuning -- adjusts the gear you're CURRENTLY holding; each remembers its own
+    Sec2:Label({ Name = "Tune while holding the gear:" })
+    Sec2:Slider({ Name = "Projectile speed", Flag = "CMG_GearSpeed", Min = 20, Max = 400, Default = 120, Decimals = 0, Suffix = " st/s",
+        Callback = function(v) local n = activeGearName(); if n then S.gear[n].speed = v end end })
+    Sec2:Slider({ Name = "Bullet drop", Flag = "CMG_GearDrop", Min = 0, Max = 200, Default = 100, Decimals = 0, Suffix = " %",
+        Callback = function(v) local n = activeGearName(); if n then S.gear[n].drop = v / 100 end end })
 
     local Sec3 = Combat:Section({ Name = "Sword Aura", Side = 1 })
     Sec3:Label({ Name = "ClassicSword -- experimental" })
