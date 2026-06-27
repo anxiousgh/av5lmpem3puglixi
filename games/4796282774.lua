@@ -452,7 +452,7 @@ do
         Callback = function(v) S.push = v end })
     Sec:Slider({ Name = "Range", Flag = "CMG_PushRange", Min = 3, Max = 25, Default = 5, Decimals = 0, Suffix = " studs",
         Callback = function(v) S.pushRange = v end })
-    Sec:Slider({ Name = "Cooldown", Flag = "CMG_PushCD", Min = 50, Max = 1000, Default = 350, Decimals = 0, Suffix = " ms",
+    Sec:Slider({ Name = "Cooldown", Flag = "CMG_PushCD", Min = 0, Max = 1000, Default = 350, Decimals = 0, Suffix = " ms",
         Callback = function(v) S.pushCD = v / 1000 end })
     Sec:Label({ Name = "Toggle key" }):Keybind({ Name = "AutoPush", Flag = "CMG_PushKey", Mode = "Toggle",
         Callback = function(state) pushTog:Set(state and true or false) end })
@@ -508,7 +508,7 @@ do
         Callback = function(v) S.swordRange = v end })
     Sec3:Toggle({ Name = "Lunge (super) damage", Flag = "CMG_SwordLunge", Default = true,
         Callback = function(v) S.swordLunge = v end })
-    Sec3:Slider({ Name = "Lunge cooldown", Flag = "CMG_SwordLungeCD", Min = 200, Max = 1500, Default = 600, Decimals = 0, Suffix = " ms",
+    Sec3:Slider({ Name = "Lunge cooldown", Flag = "CMG_SwordLungeCD", Min = 0, Max = 1500, Default = 600, Decimals = 0, Suffix = " ms",
         Callback = function(v) S.swordLungeCD = v / 1000 end })
     Sec3:Label({ Name = "Toggle key" }):Keybind({ Name = "SwordAura", Flag = "CMG_SwordKey", Mode = "Toggle",
         Callback = function(state) swordTog:Set(state and true or false) end })
