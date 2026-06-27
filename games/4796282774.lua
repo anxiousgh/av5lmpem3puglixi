@@ -36,6 +36,7 @@ local function track(c) conns[#conns + 1] = c; return c end
 -- settings live in getgenv so state + the (one-time) gear hooks survive a re-exec
 local S = (gv() and gv()._CMG_S) or {
     push = false, pushRange = 5, pushCD = 0.35,
+    pushEquip = false, pushEnemyOnly = false,
     showRange = false, rangeColor = Color3.fromRGB(255, 80, 80),
     aim = false,
     sword = false, swordRange = 14, swordCD = 0.2,
@@ -45,6 +46,8 @@ local S = (gv() and gv()._CMG_S) or {
 -- backfill fields added in later versions onto a persisted (re-exec'd) table
 if S.showRange == nil then S.showRange = false end
 if S.rangeColor == nil then S.rangeColor = Color3.fromRGB(255, 80, 80) end
+if S.pushEquip == nil then S.pushEquip = false end
+if S.pushEnemyOnly == nil then S.pushEnemyOnly = false end
 if S.swordLunge == nil then S.swordLunge = true end
 if S.swordLungeCD == nil then S.swordLungeCD = 0.6 end
 -- per-gear ballistics for the aimbot; each gear remembers its own tuning.
@@ -82,11 +85,12 @@ local function nearestEnemyPart()
 end
 -- iterate every living enemy body part within `range` studs, respecting a
 -- per-target cooldown table; calls fn(part) for each one that is due to fire.
-local function forEnemiesInRange(range, cdTable, cd, fn)
+local function forEnemiesInRange(range, cdTable, cd, fn, enemyOnly)
     local hrp = myHRP(); if not hrp then return end
     local now = os.clock()
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character then
+        if p ~= LocalPlayer and p.Character
+           and not (enemyOnly and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
             local hum  = p.Character:FindFirstChildOfClass("Humanoid")
             local part = p.Character:FindFirstChild("Torso") or p.Character:FindFirstChild("HumanoidRootPart")
             if hum and hum.Health > 0 and part
@@ -103,8 +107,10 @@ end
 --  AUTO PUSH  -- defensive: bump anyone who gets close. No teleporting.
 -- ============================================================
 do
-    local lastPush = {}
-    local function pushRemote()  -- any equipped tool exposing a Hit RemoteEvent
+    local lastPush, lastEquip = {}, 0
+    -- equipped tool with a Hit RemoteEvent; optionally auto-equip one from the backpack
+    -- (infection Maul / similar tools start unequipped)
+    local function pushRemote()
         local char = LocalPlayer.Character
         if not char then return nil end
         for _, t in ipairs(char:GetChildren()) do
@@ -113,6 +119,19 @@ do
                 if h and h:IsA("RemoteEvent") then return h end
             end
         end
+        if S.pushEquip and os.clock() - lastEquip > 0.5 then
+            local bp, hum = LocalPlayer:FindFirstChild("Backpack"), char:FindFirstChildOfClass("Humanoid")
+            if bp and hum then
+                for _, t in ipairs(bp:GetChildren()) do
+                    if t:IsA("Tool") and t:FindFirstChild("Hit") and t.Hit:IsA("RemoteEvent") then
+                        lastEquip = os.clock()
+                        pcall(function() hum:EquipTool(t) end)
+                        break
+                    end
+                end
+            end
+        end
+        return nil
     end
     track(RunService.Heartbeat:Connect(function()
         if not S.push then return end
@@ -120,7 +139,7 @@ do
         if not hit then return end
         forEnemiesInRange(S.pushRange, lastPush, S.pushCD, function(part)
             hit:FireServer("Hit", part)
-        end)
+        end, S.pushEnemyOnly)
     end))
 end
 
@@ -322,6 +341,10 @@ do
         Callback = function(v) S.showRange = v end })
     Sec:Label({ Name = "Range color" }):Colorpicker({ Flag = "CMG_PushVizColor", Default = Color3.fromRGB(255, 80, 80),
         Callback = function(c) S.rangeColor = c end })
+    Sec:Toggle({ Name = "Auto-equip Hit tool", Flag = "CMG_PushEquip", Default = false,
+        Callback = function(v) S.pushEquip = v end })
+    Sec:Toggle({ Name = "Enemies only (team)", Flag = "CMG_PushEnemyOnly", Default = false,
+        Callback = function(v) S.pushEnemyOnly = v end })
 
     local Sec2 = Combat:Section({ Name = "Gear Aimbot", Side = 2 })
     Sec2:Label({ Name = "Slingshot / Rocket / Trowel / Superball" })
