@@ -1573,6 +1573,7 @@ do
         on = false, transparency = 0.5, material = "ForceField",
         color = Color3.fromRGB(255, 60, 60),
         outline = false, outlineColor = Color3.fromRGB(255, 255, 255),
+        hideFP = false,   -- hide the clone while in first person (camera on the head)
     }
     local MATERIALS = { "ForceField", "Neon", "Plastic", "SmoothPlastic", "Glass", "Metal" }
     local clone, hl
@@ -1659,6 +1660,14 @@ do
         history[#history + 1] = { t = now, base = serverCFnow(hrp.CFrame), offsets = offsets }
         while history[1] and now - history[1].t > 2 do table.remove(history, 1) end   -- keep ~2s of samples
     end))
+    -- first person = the camera sits ~on the head; used to optionally hide the clone there
+    local function inFirstPerson()
+        local cam = workspace.CurrentCamera
+        local char = LocalPlayer.Character
+        local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+        if not (cam and head) then return false end
+        return (cam.CFrame.Position - head.Position).Magnitude < 1
+    end
     -- render the clone from the snapshot (ping + 0.11) seconds ago = the server's pos+pose NOW
     track(RunService.RenderStepped:Connect(function()
         if not (cfg.on and clone) or #history == 0 then return end
@@ -1669,10 +1678,15 @@ do
             if history[i].t <= targetT then sample = history[i]; break end
         end
         if not sample then return end
+        local hide = cfg.hideFP and inFirstPerson()   -- LTM stacks on top of cfg.transparency
         for cp, rp in pairs(partMap) do       -- body parts + accessory handles
             local off = sample.offsets[rp]
-            if off and cp.Parent then cp.CFrame = sample.base * off end
+            if off and cp.Parent then
+                cp.CFrame = sample.base * off
+                cp.LocalTransparencyModifier = hide and 1 or 0
+            end
         end
+        if hl then hl.Enabled = not hide end
     end))
     track(LocalPlayer.CharacterAdded:Connect(function()
         if cfg.on then task.wait(0.6); buildClone() end
@@ -1681,6 +1695,8 @@ do
     local Sec = SP:Section({ Name = "Server position clone", Side = 1 })
     Sec:Toggle({ Name = "Enabled", Flag = "SrvPosOn", Default = false,
         Callback = function(v) cfg.on = v; if v then buildClone() else clearClone() end end })
+    Sec:Toggle({ Name = "Hide in first person", Flag = "SrvPosHideFP", Default = false,
+        Callback = function(v) cfg.hideFP = v end })
     Sec:Slider({ Name = "Transparency", Flag = "SrvPosTrans", Min = 0, Max = 1, Default = 0.5, Decimals = 2,
         Callback = function(v) cfg.transparency = v; applyStyle() end })
     Sec:Dropdown({ Name = "Material", Flag = "SrvPosMat", Default = "ForceField", Multi = false, Items = MATERIALS,
