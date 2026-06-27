@@ -156,7 +156,7 @@ end
 --  AUTO PUSH  -- defensive: bump anyone who gets close. No teleporting.
 -- ============================================================
 do
-    local lastPush, lastEquip, lastSwing = {}, 0, 0
+    local lastPush, lastEquip = {}, 0
     -- equipped tool with a Hit RemoteEvent (returns tool, hit); optionally auto-equip
     -- one from the backpack (infection Maul / similar tools start unequipped)
     local function pushTool()
@@ -182,24 +182,22 @@ do
         end
         return nil
     end
-    -- play the tool's own swing animation directly on the Animator (bypasses the tool's
-    -- internal debounce, so it fires on each push). The track is cached + reloaded only
-    -- when the tool's Animation instance changes.
+    -- the tool's own swing animation (cached; reloaded only when the Animation changes)
     local swingTrack, swingAnim
-    local function playSwing(tool, hum)
+    local function swingTrackFor(tool, hum)
         local animator = hum and hum:FindFirstChildOfClass("Animator")
-        if not animator then return end
+        if not animator then return nil end
         local anim
         for _, d in ipairs(tool:GetDescendants()) do
             if d:IsA("Animation") then anim = d; break end
         end
-        if not anim then return end
+        if not anim then return nil end
         if anim ~= swingAnim then
             swingAnim = anim
             local ok, tr = pcall(function() return animator:LoadAnimation(anim) end)
             swingTrack = ok and tr or nil
         end
-        if swingTrack then pcall(function() swingTrack:Play(0.1) end) end
+        return swingTrack
     end
     track(RunService.Heartbeat:Connect(function()
         if not S.push then return end
@@ -211,9 +209,11 @@ do
             hit:FireServer("Hit", part)
             fired = true
         end, S.pushEnemyOnly)
-        if fired and tool and os.clock() - lastSwing > 0.45 then   -- throttle to swing length
-            lastSwing = os.clock()
-            playSwing(tool, hum)
+        -- one full swing per push: only (re)start when actually pushing AND the previous
+        -- swing has finished, so it plays at the animation's natural pace, not every frame
+        if fired and tool then
+            local tr = swingTrackFor(tool, hum)
+            if tr and not tr.IsPlaying then pcall(function() tr:Play(0.1) end) end
         end
     end))
 end
