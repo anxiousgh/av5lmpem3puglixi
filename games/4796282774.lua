@@ -106,7 +106,14 @@ local function makeRangeViz()
         local hrp = myHRP(); if not hrp then return end
         color = color or Color3.fromRGB(255, 80, 80)
         if (not model) or builtR ~= radius or builtC ~= color then build(radius, color) end
-        model:PivotTo(CFrame.new(hrp.Position - Vector3.new(0, 2.6, 0)))   -- flat at your feet
+        -- raycast straight down to the real ground so the ring sits on it, never floats
+        local groundY = hrp.Position.Y - 3
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances = { LocalPlayer.Character, model }
+        local res = workspace:Raycast(hrp.Position, Vector3.new(0, -60, 0), rp)
+        if res then groundY = res.Position.Y end
+        model:PivotTo(CFrame.new(hrp.Position.X, groundY + 0.05, hrp.Position.Z))   -- flat on the ground
     end
     function self.destroy()
         if model then pcall(function() model:Destroy() end); model = nil end
@@ -190,7 +197,7 @@ do
     local viz = makeRangeViz()
     S._discDestroy = viz.destroy
     track(RunService.RenderStepped:Connect(function()
-        viz.update(S.showRange, S.pushRange, S.rangeColor)
+        viz.update(S.showRange and S.push, S.pushRange, S.rangeColor)   -- only while Auto Push is on
     end))
 end
 
@@ -442,7 +449,7 @@ do
     local viz = makeRangeViz()
     S._swordDiscDestroy = viz.destroy
     track(RunService.RenderStepped:Connect(function()
-        viz.update(S.swordShowRange, S.swordRange, S.swordRangeColor)
+        viz.update(S.swordShowRange and S.sword, S.swordRange, S.swordRangeColor)   -- only while Sword Aura is on
     end))
 end
 
