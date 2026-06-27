@@ -44,7 +44,7 @@ local S = (gv() and gv()._CMG_S) or {
     sword = false, swordRange = 14, swordCD = 0.2, swordEnemyOnly = false,
     swordLunge = true, swordLungeCD = 0.6,
     gunSilent = false, gunFov = 200, gunHitPart = "Head", gunPriority = "Crosshair",
-    gunMagic = false, gunTeamCheck = false, gunShowFov = true, gunFovColor = Color3.fromRGB(255, 255, 255),
+    gunMagic = false, gunTeamCheck = false, gunWallCheck = true, gunShowFov = true, gunFovColor = Color3.fromRGB(255, 255, 255),
     phys = false, sendRate = 240,
 }
 -- backfill fields added in later versions onto a persisted (re-exec'd) table
@@ -58,6 +58,7 @@ if S.gunHitPart == nil then S.gunHitPart = "Head" end
 if S.gunPriority == nil then S.gunPriority = "Crosshair" end
 if S.gunMagic == nil then S.gunMagic = false end
 if S.gunTeamCheck == nil then S.gunTeamCheck = false end
+if S.gunWallCheck == nil then S.gunWallCheck = true end
 if S.gunShowFov == nil then S.gunShowFov = true end
 if S.gunFovColor == nil then S.gunFovColor = Color3.fromRGB(255, 255, 255) end
 if S.swordLunge == nil then S.swordLunge = true end
@@ -98,12 +99,24 @@ local function nearestEnemyPart()
 end
 -- iterate every living enemy body part within `range` studs, respecting a
 -- per-target cooldown table; calls fn(part) for each one that is due to fire.
+-- a real team mode only if players occupy more than 2 distinct teams (e.g. Red/Blue/
+-- Neutral). With <=2 (Playing/Neutral = FFA) the team filter is ignored so it doesn't
+-- skip every living player (everyone shares the "Playing" team in FFA).
+local function multiTeam()
+    local seen, n = {}, 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        local t = p.Team
+        if t and not seen[t] then seen[t] = true; n = n + 1 end
+    end
+    return n > 2
+end
 local function forEnemiesInRange(range, cdTable, cd, fn, enemyOnly)
     local hrp = myHRP(); if not hrp then return end
+    local doTeam = enemyOnly and multiTeam()
     local now = os.clock()
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and p.Character
-           and not (enemyOnly and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
+           and not (doTeam and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
             local hum  = p.Character:FindFirstChildOfClass("Humanoid")
             local part = p.Character:FindFirstChild("Torso") or p.Character:FindFirstChild("HumanoidRootPart")
             if hum and hum.Health > 0 and part
@@ -264,10 +277,24 @@ do
         local cam = workspace.CurrentCamera
         local origin = cam.CFrame.Position
         local mouse = UIS:GetMouseLocation()
+        local doTeam = S.gunTeamCheck and multiTeam()
+        -- wall check: raycast camera->target excluding all characters; any hit = blocked
+        local rp
+        if S.gunWallCheck then
+            local ignore = { LocalPlayer.Character }
+            for _, p in ipairs(Players:GetPlayers()) do if p.Character then ignore[#ignore + 1] = p.Character end end
+            rp = RaycastParams.new()
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            rp.FilterDescendantsInstances = ignore
+        end
+        local function visible(part)
+            if not rp then return true end
+            return workspace:Raycast(origin, part.Position - origin, rp) == nil
+        end
         local best, bestScore
         for _, p in ipairs(Players:GetPlayers()) do
             if p ~= LocalPlayer and p.Character
-               and not (S.gunTeamCheck and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
+               and not (doTeam and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
                 local hum  = p.Character:FindFirstChildOfClass("Humanoid")
                 local part = aimPartOf(p.Character)
                 if hum and hum.Health > 0 and part then
@@ -276,7 +303,7 @@ do
                         local sp, on = cam:WorldToViewportPoint(part.Position)
                         if on and (mouse - Vector2.new(sp.X, sp.Y)).Magnitude <= S.gunFov then pass = true end
                     end
-                    if pass then
+                    if pass and visible(part) then
                         local score
                         if S.gunPriority == "Lowest HP" then score = hum.Health
                         elseif S.gunPriority == "Closest" then score = (part.Position - origin).Magnitude
@@ -388,9 +415,10 @@ do
     local lunging = false
     local function targetInRange()
         local hrp = myHRP(); if not hrp then return false end
+        local doTeam = S.swordEnemyOnly and multiTeam()
         for _, p in ipairs(Players:GetPlayers()) do
             if p ~= LocalPlayer and p.Character
-               and not (S.swordEnemyOnly and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
+               and not (doTeam and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
                 local hum  = p.Character:FindFirstChildOfClass("Humanoid")
                 local part = p.Character:FindFirstChild("Torso") or p.Character:FindFirstChild("HumanoidRootPart")
                 if hum and hum.Health > 0 and part and (part.Position - hrp.Position).Magnitude <= S.swordRange then
@@ -521,6 +549,8 @@ do
         Callback = function(v) S.gunMagic = v end })
     Sec4:Toggle({ Name = "Team check", Flag = "CMG_GunTeam", Default = false,
         Callback = function(v) S.gunTeamCheck = v end })
+    Sec4:Toggle({ Name = "Wall check (no wallbang)", Flag = "CMG_GunWallCheck", Default = true,
+        Callback = function(v) S.gunWallCheck = v end })
     Sec4:Toggle({ Name = "Show FOV", Flag = "CMG_GunShowFov", Default = true,
         Callback = function(v) S.gunShowFov = v end })
     Sec4:Label({ Name = "FOV color" }):Colorpicker({ Flag = "CMG_GunFovColor", Default = Color3.fromRGB(255, 255, 255),
