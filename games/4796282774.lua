@@ -350,52 +350,57 @@ do
         -- AND the matching Hit (keyed by Id) onto them, so the reported hit lies on the
         -- server's known trajectory. Bullet speed is derived from the shot's own pos/tFlight.
         gv()._CMG_gunHookFn = function(self, method, ...)
-            local st = gv()._CMG_S
-            if not (st and st.gunSilent and method == "FireServer") then return nil end
             local a = table.pack(...)
-            local pend, diag = gv()._CMG_gunPending, gv()._CMG_diag
-            local function bump(k) if diag then diag[k] = (diag[k] or 0) + 1 end end
-            -- Fire:(origin V3, dir V3, Id string, t num) -> aim the bullet at the target
-            if self.Name == "Fire" then
-                if typeof(a[1]) == "Vector3" and typeof(a[2]) == "Vector3" and typeof(a[3]) == "string" then
-                    bump("fireSeen")
-                    local tgt, tpos, tcf = st.gunTarget, st.gunTargetPos, st.gunTargetCF
-                    if tgt and tpos then
-                        local origin = a[1]
-                        local d = tpos - origin
-                        a[2] = (d.Magnitude > 0 and d.Unit) or a[2]
-                        local nowc = os.clock()
-                        for id, e in pairs(pend) do if nowc - (e.t0 or 0) > 2 then pend[id] = nil end end  -- expire old bullets
-                        pend[a[3]] = { part = tgt, pos = tpos, partCF = tcf, origin = origin, t0 = nowc }
-                        bump("fireRedir"); if diag then diag.lastTarget = tgt.Name end
+            -- wrapped in pcall so a bad arg can NEVER spam the console / break the game
+            local ok, res = pcall(function()
+                local st = gv()._CMG_S
+                if not (st and st.gunSilent and method == "FireServer") then return nil end
+                local pend, diag = gv()._CMG_gunPending, gv()._CMG_diag
+                local function bump(k) if diag then diag[k] = (diag[k] or 0) + 1 end end
+                -- Fire:(origin V3, dir V3, Id string, t num) -> aim the bullet at the target
+                if self.Name == "Fire" then
+                    if typeof(a[1]) == "Vector3" and typeof(a[2]) == "Vector3" and typeof(a[3]) == "string" then
+                        bump("fireSeen")
+                        local tgt, tpos = st.gunTarget, st.gunTargetPos
+                        if tgt and tpos then
+                            local origin = a[1]
+                            local d = tpos - origin
+                            a[2] = (d.Magnitude > 0 and d.Unit) or a[2]
+                            local nowc = os.clock()
+                            for id, e in pairs(pend) do if nowc - (e.t0 or 0) > 2 then pend[id] = nil end end
+                            pend[a[3]] = { part = tgt, pos = tpos, origin = origin, t0 = nowc }
+                            bump("fireRedir"); if diag then diag.lastTarget = tgt.Name end
+                            return a
+                        else
+                            bump("fireNoTarget")
+                        end
+                    else
+                        bump("fireSigMismatch")
+                    end
+                -- Hit:(Id string, part, pos V3, objCF CFrame, normal, t0, tFlight) -> land it on them
+                elseif typeof(a[1]) == "string" then
+                    bump("hitSeen")
+                    local pe = pend[a[1]]
+                    if pe then     -- redirect EVERY hit for this bullet Id (don't delete) so a
+                                   -- second wall-hit can't contradict the enemy hit and get it rejected
+                        local origPos, origT = a[3], a[7]
+                        a[2] = pe.part
+                        a[3] = pe.pos
+                        a[4] = CFrame.new()   -- offset 0 = part centre; no ToObjectSpace call
+                        if typeof(origPos) == "Vector3" and typeof(origT) == "number" and origT > 0 then
+                            local speed = (origPos - pe.origin).Magnitude / origT
+                            if speed > 0 then a[7] = (pe.pos - pe.origin).Magnitude / speed end
+                        end
+                        bump("hitRedir")
                         return a
                     else
-                        bump("fireNoTarget")
+                        bump("hitNoPend")
                     end
-                else
-                    bump("fireSigMismatch")
                 end
-            -- Hit:(Id string, part, pos V3, objCF CFrame, normal, t0, tFlight) -> land it on them
-            elseif typeof(a[1]) == "string" then
-                bump("hitSeen")
-                local pe = pend[a[1]]
-                if pe then     -- redirect EVERY hit for this bullet Id (don't delete) so a
-                               -- second wall-hit can't contradict the enemy hit and get it rejected
-                    local origPos, origT = a[3], a[7]
-                    a[2] = pe.part
-                    a[3] = pe.pos
-                    if pe.partCF then a[4] = pe.partCF:ToObjectSpace(CFrame.new(pe.pos)) end
-                    if typeof(origPos) == "Vector3" and typeof(origT) == "number" and origT > 0 then
-                        local speed = (origPos - pe.origin).Magnitude / origT
-                        if speed > 0 then a[7] = (pe.pos - pe.origin).Magnitude / speed end
-                    end
-                    bump("hitRedir")
-                    return a
-                else
-                    bump("hitNoPend")
-                end
-            end
-            return nil
+                return nil
+            end)
+            if ok then return res end
+            return nil   -- swallow any error -> never spam
         end
     end
 end
