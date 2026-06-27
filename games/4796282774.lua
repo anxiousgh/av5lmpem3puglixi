@@ -307,6 +307,7 @@ do
     if gv() then
         gv()._CMG_gunPending = gv()._CMG_gunPending or {}
         gv()._CMG_gunPendN = gv()._CMG_gunPendN or 0
+        gv()._CMG_diag = gv()._CMG_diag or {}     -- live diagnostics (invisible)
         -- The client sends the bullet Id + origin + direction in Fire:FireServer, so the
         -- server validates Hit against that ray. Redirect the FIRE direction onto the target
         -- AND the matching Hit (keyed by Id) onto them, so the reported hit lies on the
@@ -315,32 +316,46 @@ do
             local st = gv()._CMG_S
             if not (st and st.gunSilent and method == "FireServer") then return nil end
             local a = table.pack(...)
-            local pend = gv()._CMG_gunPending
+            local pend, diag = gv()._CMG_gunPending, gv()._CMG_diag
+            local function bump(k) if diag then diag[k] = (diag[k] or 0) + 1 end end
             -- Fire:(origin V3, dir V3, Id string, t num) -> aim the bullet at the target
-            if self.Name == "Fire" and typeof(a[1]) == "Vector3"
-               and typeof(a[2]) == "Vector3" and typeof(a[3]) == "string" then
-                local tgt, tpos, tcf = st.gunTarget, st.gunTargetPos, st.gunTargetCF
-                if tgt and tpos then
-                    local origin = a[1]
-                    local d = tpos - origin
-                    a[2] = (d.Magnitude > 0 and d.Unit) or a[2]
-                    if gv()._CMG_gunPendN > 64 then table.clear(pend); gv()._CMG_gunPendN = 0 end
-                    pend[a[3]] = { part = tgt, pos = tpos, partCF = tcf, origin = origin }
-                    gv()._CMG_gunPendN = gv()._CMG_gunPendN + 1
-                    return a
+            if self.Name == "Fire" then
+                if typeof(a[1]) == "Vector3" and typeof(a[2]) == "Vector3" and typeof(a[3]) == "string" then
+                    bump("fireSeen")
+                    local tgt, tpos, tcf = st.gunTarget, st.gunTargetPos, st.gunTargetCF
+                    if tgt and tpos then
+                        local origin = a[1]
+                        local d = tpos - origin
+                        a[2] = (d.Magnitude > 0 and d.Unit) or a[2]
+                        if gv()._CMG_gunPendN > 64 then table.clear(pend); gv()._CMG_gunPendN = 0 end
+                        pend[a[3]] = { part = tgt, pos = tpos, partCF = tcf, origin = origin }
+                        gv()._CMG_gunPendN = gv()._CMG_gunPendN + 1
+                        bump("fireRedir"); if diag then diag.lastTarget = tgt.Name end
+                        return a
+                    else
+                        bump("fireNoTarget")
+                    end
+                else
+                    bump("fireSigMismatch")
                 end
             -- Hit:(Id string, part, pos V3, objCF CFrame, normal, t0, tFlight) -> land it on them
-            elseif typeof(a[1]) == "string" and pend[a[1]] then
-                local pe = pend[a[1]]; pend[a[1]] = nil; gv()._CMG_gunPendN = gv()._CMG_gunPendN - 1
-                local origPos, origT = a[3], a[7]
-                a[2] = pe.part
-                a[3] = pe.pos
-                if pe.partCF then a[4] = pe.partCF:ToObjectSpace(CFrame.new(pe.pos)) end
-                if typeof(origPos) == "Vector3" and typeof(origT) == "number" and origT > 0 then
-                    local speed = (origPos - pe.origin).Magnitude / origT
-                    if speed > 0 then a[7] = (pe.pos - pe.origin).Magnitude / speed end
+            elseif typeof(a[1]) == "string" then
+                bump("hitSeen")
+                if pend[a[1]] then
+                    local pe = pend[a[1]]; pend[a[1]] = nil; gv()._CMG_gunPendN = gv()._CMG_gunPendN - 1
+                    local origPos, origT = a[3], a[7]
+                    a[2] = pe.part
+                    a[3] = pe.pos
+                    if pe.partCF then a[4] = pe.partCF:ToObjectSpace(CFrame.new(pe.pos)) end
+                    if typeof(origPos) == "Vector3" and typeof(origT) == "number" and origT > 0 then
+                        local speed = (origPos - pe.origin).Magnitude / origT
+                        if speed > 0 then a[7] = (pe.pos - pe.origin).Magnitude / speed end
+                    end
+                    bump("hitRedir")
+                    return a
+                else
+                    bump("hitNoPend")
                 end
-                return a
             end
             return nil
         end
