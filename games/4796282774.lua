@@ -357,52 +357,64 @@ do
         end
     end))
 
-    -- one-time __namecall hook (survives re-exec). Body does NO instance namecalls
-    -- (self is always an Instance here; .Name is a property read, safe).
-    -- The client sends the bullet Id + origin + direction in Fire:FireServer, so the
-    -- server validates Hit against that ray. We redirect the FIRE direction onto the
-    -- target AND the matching Hit (keyed by Id) onto them, so the reported hit lies on
-    -- the server's known trajectory and validates. Bullet speed is derived from the
-    -- real shot's own pos/travelTime so the timing matches too.
+    -- A metamethod hook can't be reinstalled in-session, so we install a thin dispatcher
+    -- ONCE and keep the real logic in gv()._CMG_gunHookFn, reassigned on every load -- that
+    -- way hook fixes actually take effect on re-exec instead of being shadowed by a stale
+    -- closure. The logic fn does NO instance namecalls (self is always an Instance here;
+    -- .Name is a property read; CFrame math is on a separate metatable).
     local gnm = getnamecallmethod
-    if gv() and not gv()._CMG_GUNHOOK and hookmetamethod and gnm then
-        gv()._CMG_GUNHOOK = true
-        local pending = {}      -- Id -> { part, pos, partCF, origin }
-        local pendN = 0
+    if gv() and not gv()._CMG_GUNDISPATCH and hookmetamethod and gnm then
+        gv()._CMG_GUNDISPATCH = true
         local old
         old = hookmetamethod(game, "__namecall", function(self, ...)
-            local st = gv() and gv()._CMG_S
-            if st and st.gunSilent and gnm() == "FireServer" then
-                local a = table.pack(...)
-                -- Fire:(origin V3, dir V3, Id string, t num)  -> aim the bullet at the target
-                if self.Name == "Fire" and typeof(a[1]) == "Vector3"
-                   and typeof(a[2]) == "Vector3" and typeof(a[3]) == "string" then
-                    local tgt, tpos, tcf = st.gunTarget, st.gunTargetPos, st.gunTargetCF
-                    if tgt and tpos then
-                        local origin = a[1]
-                        local d = tpos - origin
-                        a[2] = (d.Magnitude > 0 and d.Unit) or a[2]
-                        if pendN > 64 then table.clear(pending); pendN = 0 end
-                        pending[a[3]] = { part = tgt, pos = tpos, partCF = tcf, origin = origin }
-                        pendN = pendN + 1
-                        return old(self, table.unpack(a, 1, a.n))
-                    end
-                -- Hit:(Id string, part, pos V3, objCF CFrame, normal, t0, tFlight) -> land it on the target
-                elseif typeof(a[1]) == "string" and pending[a[1]] then
-                    local pe = pending[a[1]]; pending[a[1]] = nil; pendN = pendN - 1
-                    local origPos, origT = a[3], a[7]
-                    a[2] = pe.part
-                    a[3] = pe.pos
-                    if pe.partCF then a[4] = pe.partCF:ToObjectSpace(CFrame.new(pe.pos)) end
-                    if typeof(origPos) == "Vector3" and typeof(origT) == "number" and origT > 0 then
-                        local speed = (origPos - pe.origin).Magnitude / origT
-                        if speed > 0 then a[7] = (pe.pos - pe.origin).Magnitude / speed end
-                    end
-                    return old(self, table.unpack(a, 1, a.n))
-                end
+            local fn = gv() and gv()._CMG_gunHookFn
+            if fn then
+                local na = fn(self, gnm(), ...)        -- returns packed override args, or nil
+                if na then return old(self, table.unpack(na, 1, na.n)) end
             end
             return old(self, ...)
         end)
+    end
+    if gv() then
+        gv()._CMG_gunPending = gv()._CMG_gunPending or {}
+        gv()._CMG_gunPendN = gv()._CMG_gunPendN or 0
+        -- The client sends the bullet Id + origin + direction in Fire:FireServer, so the
+        -- server validates Hit against that ray. Redirect the FIRE direction onto the target
+        -- AND the matching Hit (keyed by Id) onto them, so the reported hit lies on the
+        -- server's known trajectory. Bullet speed is derived from the shot's own pos/tFlight.
+        gv()._CMG_gunHookFn = function(self, method, ...)
+            local st = gv()._CMG_S
+            if not (st and st.gunSilent and method == "FireServer") then return nil end
+            local a = table.pack(...)
+            local pend = gv()._CMG_gunPending
+            -- Fire:(origin V3, dir V3, Id string, t num) -> aim the bullet at the target
+            if self.Name == "Fire" and typeof(a[1]) == "Vector3"
+               and typeof(a[2]) == "Vector3" and typeof(a[3]) == "string" then
+                local tgt, tpos, tcf = st.gunTarget, st.gunTargetPos, st.gunTargetCF
+                if tgt and tpos then
+                    local origin = a[1]
+                    local d = tpos - origin
+                    a[2] = (d.Magnitude > 0 and d.Unit) or a[2]
+                    if gv()._CMG_gunPendN > 64 then table.clear(pend); gv()._CMG_gunPendN = 0 end
+                    pend[a[3]] = { part = tgt, pos = tpos, partCF = tcf, origin = origin }
+                    gv()._CMG_gunPendN = gv()._CMG_gunPendN + 1
+                    return a
+                end
+            -- Hit:(Id string, part, pos V3, objCF CFrame, normal, t0, tFlight) -> land it on them
+            elseif typeof(a[1]) == "string" and pend[a[1]] then
+                local pe = pend[a[1]]; pend[a[1]] = nil; gv()._CMG_gunPendN = gv()._CMG_gunPendN - 1
+                local origPos, origT = a[3], a[7]
+                a[2] = pe.part
+                a[3] = pe.pos
+                if pe.partCF then a[4] = pe.partCF:ToObjectSpace(CFrame.new(pe.pos)) end
+                if typeof(origPos) == "Vector3" and typeof(origT) == "number" and origT > 0 then
+                    local speed = (origPos - pe.origin).Magnitude / origT
+                    if speed > 0 then a[7] = (pe.pos - pe.origin).Magnitude / speed end
+                end
+                return a
+            end
+            return nil
+        end
     end
 end
 
