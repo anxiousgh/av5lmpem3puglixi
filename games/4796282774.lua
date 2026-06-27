@@ -87,12 +87,16 @@ local function makeRangeViz()
             disc = Instance.new("Part")
             disc.Shape = Enum.PartType.Cylinder
             disc.Anchored, disc.CanCollide, disc.CanQuery, disc.CanTouch, disc.Massless = true, false, false, false, true
-            disc.Transparency = 1            -- invisible part; the Highlight does the drawing
+            -- 0.9999 (NOT 1): a part at exactly Transparency 1 isn't rendered, so its
+            -- Highlight outline has no geometry to draw. 0.9999 still renders invisibly
+            -- so the outline shows. (Same trick as HC's knife reach visualizer.)
+            disc.Transparency = 0.9999
             disc.Name = "\0"
             pcall(function() disc.Parent = workspace end)
             hl = Instance.new("Highlight")
             hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            hl.FillTransparency = 0.8
+            hl.FillTransparency = 1          -- outline only, no fill
+            hl.OutlineTransparency = 0
             hl.Adornee = disc
             pcall(function() hl.Parent = disc end)
         end
