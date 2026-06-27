@@ -156,16 +156,16 @@ end
 --  AUTO PUSH  -- defensive: bump anyone who gets close. No teleporting.
 -- ============================================================
 do
-    local lastPush, lastEquip = {}, 0
-    -- equipped tool with a Hit RemoteEvent; optionally auto-equip one from the backpack
-    -- (infection Maul / similar tools start unequipped)
-    local function pushRemote()
+    local lastPush, lastEquip, lastSwing = {}, 0, 0
+    -- equipped tool with a Hit RemoteEvent (returns tool, hit); optionally auto-equip
+    -- one from the backpack (infection Maul / similar tools start unequipped)
+    local function pushTool()
         local char = LocalPlayer.Character
         if not char then return nil end
         for _, t in ipairs(char:GetChildren()) do
             if t:IsA("Tool") then
                 local h = t:FindFirstChild("Hit")
-                if h and h:IsA("RemoteEvent") then return h end
+                if h and h:IsA("RemoteEvent") then return t, h end
             end
         end
         if S.pushEquip and os.clock() - lastEquip > 0.5 then
@@ -184,11 +184,19 @@ do
     end
     track(RunService.Heartbeat:Connect(function()
         if not S.push then return end
-        local hit = pushRemote()
+        local tool, hit = pushTool()
         if not hit then return end
+        local fired = false
         forEnemiesInRange(S.pushRange, lastPush, S.pushCD, function(part)
             hit:FireServer("Hit", part)
+            fired = true
         end, S.pushEnemyOnly)
+        -- play the tool's own swing animation when we actually push someone (throttled to
+        -- the swing length so it doesn't restart every frame)
+        if fired and tool and os.clock() - lastSwing > 0.45 then
+            lastSwing = os.clock()
+            pcall(function() tool:Activate() end)
+        end
     end))
 end
 
