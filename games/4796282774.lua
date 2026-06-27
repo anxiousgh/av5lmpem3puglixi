@@ -39,6 +39,7 @@ local function track(c) conns[#conns + 1] = c; return c end
 local S = (gv() and gv()._CMG_S) or {
     push = false, pushRange = 5, pushCD = 0.35,
     pushEquip = false, pushEnemyOnly = false,
+    pushManip = "Off", pushReduce = 0.5,
     showRange = false, rangeColor = Color3.fromRGB(255, 80, 80),
     sword = false, swordRange = 14, swordCD = 0.2, swordEnemyOnly = false,
     swordLunge = true, swordLungeCD = 0.6,
@@ -52,6 +53,8 @@ if S.showRange == nil then S.showRange = false end
 if S.rangeColor == nil then S.rangeColor = Color3.fromRGB(255, 80, 80) end
 if S.pushEquip == nil then S.pushEquip = false end
 if S.pushEnemyOnly == nil then S.pushEnemyOnly = false end
+if S.pushManip == nil then S.pushManip = "Off" end
+if S.pushReduce == nil then S.pushReduce = 0.5 end
 if S.gunSilent == nil then S.gunSilent = false end
 if S.gunFov == nil then S.gunFov = 200 end
 if S.gunHitPart == nil then S.gunHitPart = "Head" end
@@ -224,6 +227,32 @@ do
     S._discDestroy = viz.destroy
     track(RunService.RenderStepped:Connect(function()
         viz.update(S.showRange and S.push, S.pushRange, S.rangeColor)   -- only while Auto Push is on
+    end))
+end
+
+-- ============================================================
+--  PUSH MANIPULATION  -- anti-fling / reduce knockback from other players' push tools.
+--  A push spikes your horizontal velocity; clamp or scale it above a walkspeed-based
+--  threshold (so normal movement is untouched), keeping vertical (gravity/jump) intact.
+-- ============================================================
+do
+    track(RunService.Stepped:Connect(function()
+        local mode = S.pushManip
+        if not mode or mode == "Off" then return end
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local thresh = math.max((hum and hum.WalkSpeed or 16) * 2 + 16, 48)  -- a push exceeds normal movement
+        local v = hrp.AssemblyLinearVelocity
+        if (Vector3.new(v.X, 0, v.Z)).Magnitude > thresh then
+            if mode == "Anti Push" then
+                hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)               -- kill the fling, keep gravity
+            else  -- Reduce Push
+                local keep = 1 - math.clamp(S.pushReduce or 0.5, 0, 1)
+                hrp.AssemblyLinearVelocity = Vector3.new(v.X * keep, v.Y, v.Z * keep)
+            end
+        end
     end))
 end
 
@@ -542,6 +571,13 @@ do
     Sec:Toggle({ Name = "Enemies only (team)", Flag = "CMG_PushEnemyOnly", Default = false,
         Callback = function(v) S.pushEnemyOnly = v end })
 
+    local SecPM = Combat:Section({ Name = "Push Manipulation", Side = 1 })
+    SecPM:Dropdown({ Name = "Mode", Flag = "CMG_PushManip", Default = "Off", Multi = false,
+        Items = { "Off", "Anti Push", "Reduce Push" },
+        Callback = function(v) S.pushManip = (type(v) == "table" and v[1]) or v or "Off" end })
+    SecPM:Slider({ Name = "Reduction (Reduce Push)", Flag = "CMG_PushReduce", Min = 0, Max = 100, Default = 50, Decimals = 0, Suffix = " %",
+        Callback = function(v) S.pushReduce = v / 100 end })
+
     local Sec4 = Combat:Section({ Name = "Gun Silent Aim", Side = 2 })
     local gunTog = Sec4:Toggle({ Name = "Silent aim", Flag = "CMG_GunSilent", Default = false,
         Callback = function(v) S.gunSilent = v end })
@@ -605,6 +641,7 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     S.push, S.sword, S.showRange, S.swordShowRange, S.gunSilent = false, false, false, false, false
+    S.pushManip = "Off"
     if S._discDestroy then pcall(S._discDestroy) end
     if S._swordDiscDestroy then pcall(S._swordDiscDestroy) end
     if S._gunFovDestroy then pcall(S._gunFovDestroy) end
