@@ -182,20 +182,38 @@ do
         end
         return nil
     end
+    -- play the tool's own swing animation directly on the Animator (bypasses the tool's
+    -- internal debounce, so it fires on each push). The track is cached + reloaded only
+    -- when the tool's Animation instance changes.
+    local swingTrack, swingAnim
+    local function playSwing(tool, hum)
+        local animator = hum and hum:FindFirstChildOfClass("Animator")
+        if not animator then return end
+        local anim
+        for _, d in ipairs(tool:GetDescendants()) do
+            if d:IsA("Animation") then anim = d; break end
+        end
+        if not anim then return end
+        if anim ~= swingAnim then
+            swingAnim = anim
+            local ok, tr = pcall(function() return animator:LoadAnimation(anim) end)
+            swingTrack = ok and tr or nil
+        end
+        if swingTrack then pcall(function() swingTrack:Play(0.1) end) end
+    end
     track(RunService.Heartbeat:Connect(function()
         if not S.push then return end
         local tool, hit = pushTool()
         if not hit then return end
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
         local fired = false
         forEnemiesInRange(S.pushRange, lastPush, S.pushCD, function(part)
             hit:FireServer("Hit", part)
             fired = true
         end, S.pushEnemyOnly)
-        -- play the tool's own swing animation when we actually push someone (throttled to
-        -- the swing length so it doesn't restart every frame)
-        if fired and tool and os.clock() - lastSwing > 0.45 then
+        if fired and tool and os.clock() - lastSwing > 0.45 then   -- throttle to swing length
             lastSwing = os.clock()
-            pcall(function() tool:Activate() end)
+            playSwing(tool, hum)
         end
     end))
 end
