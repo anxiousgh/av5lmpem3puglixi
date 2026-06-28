@@ -657,8 +657,8 @@ do
         end })
     reduceSlider = SecPM:Slider({ Name = "Reduction", Flag = "CMG_PushReduce", Min = 0, Max = 100, Default = 50, Decimals = 0, Suffix = " %",
         Callback = function(v) S.pushReduce = v / 100 end })
-    antiRangeSlider = SecPM:Slider({ Name = "Ignore range", Flag = "CMG_AntiPushRange", Min = 0, Max = 10, Default = 0, Decimals = 0, Suffix = " studs",
-        Callback = function(v) S.antiPushRange = v end })   -- 0 = always anti-fling; within this range it lets the push through
+    antiRangeSlider = SecPM:Slider({ Name = "Ignore range", Flag = "CMG_AntiPushRange", Min = 0, Max = 10, Default = 0, Decimals = 1, Suffix = " studs",
+        Callback = function(v) S.antiPushRange = math.floor(v / 0.2 + 0.5) * 0.2 end })   -- snap to 0.2; 0 = always anti-fling
     antiVizToggle = SecPM:Toggle({ Name = "Show range", Flag = "CMG_AntiPushViz", Default = false,
         Callback = function(v) S.antiPushShowRange = v end })
     SecPM:Label({ Name = "Toggle key" }):Keybind({ Name = "PushManip", Flag = "CMG_PushManipKey", Mode = "Toggle",
