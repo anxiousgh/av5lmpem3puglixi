@@ -294,9 +294,20 @@ do
             end
         end
         local hum = char:FindFirstChildOfClass("Humanoid")
-        local thresh = math.max((hum and hum.WalkSpeed or 16) * 2 + 16, 48)  -- a push exceeds normal movement
+        local walk = (hum and hum.WalkSpeed) or 16
+        -- a push is often applied as a body mover on the HRP -> strip them (Anti Push only)
+        if mode == "Anti Push" then
+            for _, d in ipairs(hrp:GetChildren()) do
+                if d:IsA("BodyMover") or d:IsA("LinearVelocity") or d:IsA("AngularVelocity") or d:IsA("VectorForce") then
+                    pcall(function() d:Destroy() end)
+                end
+            end
+        end
+        -- clamp the velocity spike (anything well beyond normal movement is a push)
         local v = hrp.AssemblyLinearVelocity
-        if (Vector3.new(v.X, 0, v.Z)).Magnitude > thresh then
+        local h = Vector3.new(v.X, 0, v.Z)
+        local g = gv(); if g then g._CMG_pushPeak = math.max(g._CMG_pushPeak or 0, h.Magnitude) end  -- probe
+        if h.Magnitude > walk + 6 then
             if mode == "Anti Push" then
                 hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)               -- kill the fling, keep gravity
             else  -- Reduce Push
