@@ -376,6 +376,7 @@ PickupSec:Toggle({ Name = "Auto pickup gun", Flag = "MM2_AutoPickup", Default = 
 -- ============================================================
 --  Universal base AFTER Main, so Main stays the first tab.
 -- ============================================================
+pcall(function() ctx.load("games/combat.lua")(ctx) end)
 pcall(function() ctx.load("games/universal.lua")(ctx) end)
 
 -- ============================================================

@@ -318,6 +318,7 @@ do
 end
 
 -- universal pages after Main so Main stays first
+pcall(function() ctx.load("games/combat.lua")(ctx) end)
 pcall(function() ctx.load("games/universal.lua")(ctx) end)
 
 -- ============================================================

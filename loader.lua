@@ -241,6 +241,8 @@ local function tryGameModule(key)
 end
 
 if not tryGameModule(ctx.placeId) then
+    -- generic/unknown game: combat first (parity with the old always-on Combat tab), then the base
+    pcall(function() load("games/combat.lua")(ctx) end)
     local okU, errU = pcall(function() load("games/universal.lua")(ctx) end)
     if okU then
         print("[wh] loaded universal shell")

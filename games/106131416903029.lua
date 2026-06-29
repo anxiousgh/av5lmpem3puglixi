@@ -32,11 +32,13 @@
 -- ============================================================
 local ctx = ({ ... })[1]
 
--- universal base first (keeps the shared pages/movement/ESP)
-pcall(function() ctx.load("games/universal.lua")(ctx) end)
-
 local Library = ctx.Library
 local Window  = ctx.Window
+
+-- Cook & Sell page is created FIRST so it's the first tab, THEN we load the
+-- universal base (Player/Visuals) so those tabs come after it.
+local Page = Window:Page({ Name = "Cook & Sell" })
+pcall(function() ctx.load("games/universal.lua")(ctx) end)
 
 local Players            = game:GetService("Players")
 local ReplicatedStorage  = game:GetService("ReplicatedStorage")
@@ -476,9 +478,8 @@ local function stopTicker()
 end
 
 -- ============================================================
---  UI
+--  UI   (Page was created at the top so Cook & Sell is the first tab)
 -- ============================================================
-local Page = Window:Page({ Name = "Cook & Sell" })
 
 -- recipe dropdown items: "Auto" + the player's unlocked products
 local recipeItems = { "Auto" }

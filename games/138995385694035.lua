@@ -1762,6 +1762,7 @@ end
 -- ============================================================
 --  Universal base AFTER Main, so Main stays the first tab.
 -- ============================================================
+pcall(function() ctx.load("games/combat.lua")(ctx) end)
 pcall(function() ctx.load("games/universal.lua")(ctx) end)
 
 -- ============================================================

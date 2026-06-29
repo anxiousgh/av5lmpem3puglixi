@@ -315,6 +315,7 @@ do
 end
 
 -- universal pages after Main
+pcall(function() ctx.load("games/combat.lua")(ctx) end)
 pcall(function() ctx.load("games/universal.lua")(ctx) end)
 
 -- teardown
