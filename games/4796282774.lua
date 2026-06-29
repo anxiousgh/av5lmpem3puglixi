@@ -49,7 +49,7 @@ local S = (gv() and gv()._CMG_S) or {
     swordLunge = true, swordLungeCD = 0.6,
     swordFov = 360, swordFovViz = false, swordFovColor = Color3.fromRGB(120, 170, 255),
     swordShowRange = false, swordRangeColor = Color3.fromRGB(120, 170, 255),
-    gunSilent = false, gunFov = 200, gunHitPart = "Head", gunPriority = "Crosshair",
+    gunSilent = false, gunFov = 100, gunHitPart = "Head", gunPriority = "Crosshair",
     gunMagic = false, gunTeamCheck = false, gunWallCheck = true, gunShowFov = true, gunFovColor = Color3.fromRGB(255, 255, 255),
     phys = false, sendRate = 240,
 }
@@ -72,7 +72,7 @@ if S.vizMode == nil then S.vizMode = "Circle" end
 if S.vizMaterial == nil then S.vizMaterial = "Neon" end
 if S.vizOrigin == nil then S.vizOrigin = "Ground" end
 if S.gunSilent == nil then S.gunSilent = false end
-if S.gunFov == nil then S.gunFov = 200 end
+if S.gunFov == nil then S.gunFov = 100 end
 if S.gunHitPart == nil then S.gunHitPart = "Head" end
 if S.gunPriority == nil then S.gunPriority = "Crosshair" end
 if S.gunMagic == nil then S.gunMagic = false end
@@ -838,7 +838,7 @@ do
         Callback = function(v) S.gunSilent = v end })
     Sec4:Label({ Name = "Toggle key" }):Keybind({ Name = "GunSilent", Flag = "CMG_GunKey", Mode = "Toggle",
         Callback = function(state) gunTog:Set(state and true or false) end })
-    Sec4:Slider({ Name = "FOV", Flag = "CMG_GunFov", Min = 20, Max = 1000, Default = 200, Decimals = 0, Suffix = " px",
+    Sec4:Slider({ Name = "FOV", Flag = "CMG_GunFov", Min = 2, Max = 250, Default = 100, Decimals = 0, Suffix = " px",
         Callback = function(v) S.gunFov = v end })
     Sec4:Dropdown({ Name = "Hit part", Flag = "CMG_GunHitPart", Default = "Head", Multi = false,
         Items = { "Head", "UpperTorso", "Torso", "HumanoidRootPart" },
