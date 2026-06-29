@@ -47,6 +47,7 @@ local S = (gv() and gv()._CMG_S) or {
     vizMode = "Circle", vizMaterial = "Neon", vizOrigin = "Ground",
     sword = false, swordRange = 14, swordCD = 0.2, swordEnemyOnly = false,
     swordLunge = true, swordLungeCD = 0.6,
+    swordFov = 360, swordFovViz = false, swordFovColor = Color3.fromRGB(120, 170, 255),
     swordShowRange = false, swordRangeColor = Color3.fromRGB(120, 170, 255),
     gunSilent = false, gunFov = 200, gunHitPart = "Head", gunPriority = "Crosshair",
     gunMagic = false, gunTeamCheck = false, gunWallCheck = true, gunShowFov = true, gunFovColor = Color3.fromRGB(255, 255, 255),
@@ -82,6 +83,9 @@ if S.gunFovColor == nil then S.gunFovColor = Color3.fromRGB(255, 255, 255) end
 if S.swordLunge == nil then S.swordLunge = true end
 if S.swordLungeCD == nil then S.swordLungeCD = 0.6 end
 if S.swordEnemyOnly == nil then S.swordEnemyOnly = false end
+if S.swordFov == nil then S.swordFov = 360 end
+if S.swordFovViz == nil then S.swordFovViz = false end
+if S.swordFovColor == nil then S.swordFovColor = Color3.fromRGB(120, 170, 255) end
 if S.swordShowRange == nil then S.swordShowRange = false end
 if S.swordRangeColor == nil then S.swordRangeColor = Color3.fromRGB(120, 170, 255) end
 if gv() then gv()._CMG_S = S end
@@ -660,6 +664,9 @@ end
 do
     local lastSword, lastSlash, lastLunge = {}, 0, 0
     local lunging = false
+    local function swordFilter(part, hrp)   -- only swing at enemies the character is facing
+        return inViewCone(hrp, part.Position, S.swordFov or 360)
+    end
     local function targetInRange()
         local hrp = myHRP(); if not hrp then return false end
         local doTeam = S.swordEnemyOnly and multiTeam()
@@ -668,7 +675,8 @@ do
                and not (doTeam and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
                 local hum  = p.Character:FindFirstChildOfClass("Humanoid")
                 local part = p.Character:FindFirstChild("Torso") or p.Character:FindFirstChild("HumanoidRootPart")
-                if hum and hum.Health > 0 and part and distToBody(hrp, part.Position) <= S.swordRange then
+                if hum and hum.Health > 0 and part and distToBody(hrp, part.Position) <= S.swordRange
+                   and inViewCone(hrp, part.Position, S.swordFov or 360) then
                     return true
                 end
             end
@@ -678,7 +686,7 @@ do
     local function touchAll(handle)
         forEnemiesInRange(S.swordRange, lastSword, 0, function(part)
             firetouchinterest(handle, part, 0); firetouchinterest(handle, part, 1)
-        end, S.swordEnemyOnly)
+        end, S.swordEnemyOnly, swordFilter)
     end
     track(RunService.Heartbeat:Connect(function()
         if not S.sword or not firetouchinterest then return end
@@ -719,7 +727,7 @@ do
             forEnemiesInRange(S.swordRange, lastSword, S.swordCD, function(part)
                 firetouchinterest(handle, part, 0)
                 firetouchinterest(handle, part, 1)
-            end, S.swordEnemyOnly)
+            end, S.swordEnemyOnly, swordFilter)
         end
     end))
 end
@@ -730,6 +738,15 @@ do
     S._swordDiscDestroy = viz.destroy
     track(RunService.RenderStepped:Connect(function()
         viz.update(S.swordShowRange and S.sword, S.swordRange, S.swordRangeColor)   -- only while Sword Aura is on
+    end))
+end
+
+-- ---- Sword Aura view-cone visualizer ----
+do
+    local viz = makeConeViz()
+    S._swordConeDestroy = viz.destroy
+    track(RunService.RenderStepped:Connect(function()
+        viz.update(S.swordFovViz and S.sword and (S.swordFov or 360) < 360, S.swordRange, S.swordFov or 360, S.swordFovColor)
     end))
 end
 
@@ -846,6 +863,8 @@ do
         Callback = function(v) S.sword = v end })
     Sec3:Slider({ Name = "Range", Flag = "CMG_SwordRange", Min = 5, Max = 30, Default = 14, Decimals = 0, Suffix = " studs",
         Callback = function(v) S.swordRange = v end })
+    Sec3:Slider({ Name = "View angle", Flag = "CMG_SwordFov", Min = 15, Max = 360, Default = 360, Decimals = 0, Suffix = "°",
+        Callback = function(v) S.swordFov = v end })   -- 15 = only straight ahead, 360 = all around (char facing, not camera)
     Sec3:Toggle({ Name = "Lunge (super) damage", Flag = "CMG_SwordLunge", Default = true,
         Callback = function(v) S.swordLunge = v end })
     Sec3:Slider({ Name = "Lunge cooldown", Flag = "CMG_SwordLungeCD", Min = 0, Max = 1500, Default = 600, Decimals = 0, Suffix = " ms",
@@ -856,6 +875,10 @@ do
         Callback = function(v) S.swordShowRange = v end })
     Sec3:Label({ Name = "Range color" }):Colorpicker({ Flag = "CMG_SwordVizColor", Default = Color3.fromRGB(120, 170, 255),
         Callback = function(c) S.swordRangeColor = c end })
+    Sec3:Toggle({ Name = "Show view cone", Flag = "CMG_SwordFovViz", Default = false,
+        Callback = function(v) S.swordFovViz = v end })
+    Sec3:Label({ Name = "View cone color" }):Colorpicker({ Flag = "CMG_SwordFovColor", Default = Color3.fromRGB(120, 170, 255),
+        Callback = function(c) S.swordFovColor = c end })
     Sec3:Label({ Name = "Toggle key" }):Keybind({ Name = "SwordAura", Flag = "CMG_SwordKey", Mode = "Toggle",
         Callback = function(state) swordTog:Set(state and true or false) end })
 
@@ -891,9 +914,10 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     S.push, S.sword, S.showRange, S.swordShowRange, S.gunSilent = false, false, false, false, false
-    S.pushManip, S.antiPushShowRange, S.pushFovViz = "Off", false, false
+    S.pushManip, S.antiPushShowRange, S.pushFovViz, S.swordFovViz = "Off", false, false, false
     if S._discDestroy then pcall(S._discDestroy) end
     if S._pushConeDestroy then pcall(S._pushConeDestroy) end
+    if S._swordConeDestroy then pcall(S._swordConeDestroy) end
     if S._swordDiscDestroy then pcall(S._swordDiscDestroy) end
     if S._antiPushDiscDestroy then pcall(S._antiPushDiscDestroy) end
     if S._gunFovDestroy then pcall(S._gunFovDestroy) end
