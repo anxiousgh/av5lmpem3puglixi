@@ -260,6 +260,16 @@ local function makeConeViz()
     end
     return self
 end
+-- distance from `pos` to the local HRP measured against its WHOLE height plus 1 stud
+-- (0.5 above + 0.5 below), not just its centre point -- so a target level with our head
+-- or feet still counts as in-range, not only one level with the torso. Within the band
+-- this collapses to pure horizontal distance; outside it, distance to the nearest cap.
+local function distToBody(hrp, pos)
+    local half = hrp.Size.Y / 2 + 0.5
+    local c = hrp.Position
+    local y = math.clamp(pos.Y, c.Y - half, c.Y + half)
+    return (pos - Vector3.new(c.X, y, c.Z)).Magnitude
+end
 -- iterate every living enemy body part within `range` studs, respecting a
 -- per-target cooldown table; calls fn(part) for each one that is due to fire.
 -- a real team mode only if players occupy more than 2 distinct teams (e.g. Red/Blue/
@@ -283,7 +293,7 @@ local function forEnemiesInRange(range, cdTable, cd, fn, enemyOnly, filter)
             local hum  = p.Character:FindFirstChildOfClass("Humanoid")
             local part = p.Character:FindFirstChild("Torso") or p.Character:FindFirstChild("HumanoidRootPart")
             if hum and hum.Health > 0 and part
-               and (part.Position - hrp.Position).Magnitude <= range
+               and distToBody(hrp, part.Position) <= range
                and (not filter or filter(part, hrp))   -- optional facing/FOV gate, before cooldown
                and now - (cdTable[p] or 0) >= cd then
                 cdTable[p] = now
@@ -658,7 +668,7 @@ do
                and not (doTeam and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team) then
                 local hum  = p.Character:FindFirstChildOfClass("Humanoid")
                 local part = p.Character:FindFirstChild("Torso") or p.Character:FindFirstChild("HumanoidRootPart")
-                if hum and hum.Health > 0 and part and (part.Position - hrp.Position).Magnitude <= S.swordRange then
+                if hum and hum.Health > 0 and part and distToBody(hrp, part.Position) <= S.swordRange then
                     return true
                 end
             end
