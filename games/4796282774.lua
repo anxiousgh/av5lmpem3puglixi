@@ -40,9 +40,7 @@ local S = (gv() and gv()._CMG_S) or {
     push = false, pushRange = 5, pushCD = 0.35,
     pushEquip = false, pushEnemyOnly = false,
     pushFov = 360, pushFovViz = false, pushFovColor = Color3.fromRGB(80, 200, 255),
-    pushManip = "Off", pushReduce = 0.5, antiPushRange = 0,
-    antiTpMin = 8, antiTpMax = 120,
-    antiPushShowRange = false, antiPushRangeColor = Color3.fromRGB(255, 180, 80),
+    pushReduceOn = false, pushReduce = 0.5,
     showRange = false, rangeColor = Color3.fromRGB(255, 80, 80),
     vizMode = "Circle", vizMaterial = "Neon", vizOrigin = "Ground",
     sword = false, swordRange = 14, swordCD = 0.2, swordEnemyOnly = false,
@@ -61,13 +59,8 @@ if S.pushEnemyOnly == nil then S.pushEnemyOnly = false end
 if S.pushFov == nil then S.pushFov = 360 end
 if S.pushFovViz == nil then S.pushFovViz = false end
 if S.pushFovColor == nil then S.pushFovColor = Color3.fromRGB(80, 200, 255) end
-if S.pushManip == nil then S.pushManip = "Off" end
+if S.pushReduceOn == nil then S.pushReduceOn = false end
 if S.pushReduce == nil then S.pushReduce = 0.5 end
-if S.antiPushRange == nil then S.antiPushRange = 0 end
-if S.antiTpMin == nil then S.antiTpMin = 8 end
-if S.antiTpMax == nil then S.antiTpMax = 120 end
-if S.antiPushShowRange == nil then S.antiPushShowRange = false end
-if S.antiPushRangeColor == nil then S.antiPushRangeColor = Color3.fromRGB(255, 180, 80) end
 if S.vizMode == nil then S.vizMode = "Circle" end
 if S.vizMaterial == nil then S.vizMaterial = "Neon" end
 if S.vizOrigin == nil then S.vizOrigin = "Ground" end
@@ -395,72 +388,26 @@ do
 end
 
 -- ============================================================
---  PUSH MANIPULATION  -- anti-fling / reduce knockback from other players' push tools.
---
---  This game's push is a ONE-SHOT CFrame teleport: it relocates the HRP ~50-140 studs
---  in a single frame with ZERO velocity, then lets client physics resume (you just fall).
---  Verified live -- there are no body-movers and no velocity spike to clamp, which is why
---  the old velocity-only Anti Push did nothing. So:
---    Anti Push   -- remember the last safe CFrame; when a frame shows a big HORIZONTAL
---                   position jump carrying ~no horizontal velocity (the teleport tell;
---                   real running always carries hvel~=walkspeed, lag hitches too), snap
---                   the CFrame back. Respawns are skipped via a post-spawn grace window.
---    Reduce Push -- legacy velocity scaling, kept for any mode whose push IS velocity-based.
+--  REDUCE PUSH  -- scale down (or fully kill) the ACTUAL knockback velocity from other
+--  players' push/fling tools. A push spikes horizontal velocity well past normal
+--  movement; when we see that spike, multiply it down by the Reduction amount
+--  (100% = remove the push entirely). Vertical velocity (gravity/jump) is left intact.
+--  No teleporting / CFrame snapping -- this only touches velocity.
 -- ============================================================
 do
-    local lastSafeCF, lastPos, spawnT = nil, nil, os.clock()
-    track(LocalPlayer.CharacterAdded:Connect(function()
-        spawnT = os.clock(); lastSafeCF, lastPos = nil, nil   -- don't snap against our own respawn
-    end))
     track(RunService.Stepped:Connect(function()
-        local mode = S.pushManip
-        if not mode or mode == "Off" then return end
+        if not S.pushReduceOn then return end
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not hrp then lastSafeCF, lastPos = nil, nil; return end
+        if not hrp then return end
         local hum = char:FindFirstChildOfClass("Humanoid")
         local walk = (hum and hum.WalkSpeed) or 16
         local v = hrp.AssemblyLinearVelocity
-
-        if mode == "Anti Push" then
-            -- Anti Push ignore-range: if anyone is within antiPushRange, let the push through
-            local ignore = false
-            if (S.antiPushRange or 0) > 0 then
-                for _, p in ipairs(Players:GetPlayers()) do
-                    if p ~= LocalPlayer and p.Character then
-                        local part = p.Character:FindFirstChild("HumanoidRootPart") or p.Character:FindFirstChild("Torso")
-                        if part and (part.Position - hrp.Position).Magnitude <= S.antiPushRange then ignore = true; break end
-                    end
-                end
-            end
-            local pos = hrp.Position
-            local sinceSpawn = os.clock() - spawnT
-            if lastSafeCF and lastPos and not ignore and sinceSpawn > 1.5 and not hrp.Anchored then
-                -- horizontal displacement vs horizontal velocity this frame
-                local hMoved = Vector3.new(pos.X - lastPos.X, 0, pos.Z - lastPos.Z).Magnitude
-                local hvel   = Vector3.new(v.X, 0, v.Z).Magnitude
-                -- teleport tell: jumped far horizontally while carrying ~no horizontal speed
-                if hMoved >= (S.antiTpMin or 8) and hMoved <= (S.antiTpMax or 120) and hvel < 8 then
-                    hrp.CFrame = lastSafeCF                                   -- snap back to pre-push spot
-                    hrp.AssemblyLinearVelocity = Vector3.new(0, math.min(v.Y, 0), 0)  -- keep only downward gravity
-                    return                                                    -- keep lastSafeCF as the anchor
-                end
-            end
-            lastSafeCF, lastPos = hrp.CFrame, pos
-        else  -- Reduce Push: scale down a horizontal velocity spike (velocity-based pushes)
-            local h = Vector3.new(v.X, 0, v.Z)
-            if h.Magnitude > walk + 6 then
-                local keep = 1 - math.clamp(S.pushReduce or 0.5, 0, 1)
-                hrp.AssemblyLinearVelocity = Vector3.new(v.X * keep, v.Y, v.Z * keep)
-            end
+        local h = Vector3.new(v.X, 0, v.Z)
+        if h.Magnitude > walk + 6 then   -- anything well past normal movement is a push
+            local keep = 1 - math.clamp(S.pushReduce or 0.5, 0, 1)
+            hrp.AssemblyLinearVelocity = Vector3.new(v.X * keep, v.Y, v.Z * keep)
         end
-    end))
-    -- anti-push ignore-range visualizer
-    local viz = makeRangeViz()
-    S._antiPushDiscDestroy = viz.destroy
-    track(RunService.RenderStepped:Connect(function()
-        local show = S.antiPushShowRange and S.pushManip == "Anti Push" and (S.antiPushRange or 0) > 0
-        viz.update(show, S.antiPushRange or 0, S.antiPushRangeColor)
     end))
 end
 
@@ -798,40 +745,13 @@ do
     Sec:Toggle({ Name = "Enemies only (team)", Flag = "CMG_PushEnemyOnly", Default = false,
         Callback = function(v) S.pushEnemyOnly = v end })
 
-    local SecPM = Combat:Section({ Name = "Push Manipulation", Side = 2 })
-    local pmLast = "Anti Push"   -- last non-off mode, restored by the keybind
-    local reduceSlider, antiRangeSlider, antiVizToggle, antiMinSlider, antiMaxSlider
-    local function pmRefresh(m)   -- show only the controls relevant to the chosen mode
-        if reduceSlider then reduceSlider:SetVisibility(m == "Reduce Push") end
-        if antiRangeSlider then antiRangeSlider:SetVisibility(m == "Anti Push") end
-        if antiVizToggle then antiVizToggle:SetVisibility(m == "Anti Push") end
-        if antiMinSlider then antiMinSlider:SetVisibility(m == "Anti Push") end
-        if antiMaxSlider then antiMaxSlider:SetVisibility(m == "Anti Push") end
-    end
-    local pmDrop = SecPM:Dropdown({ Name = "Mode", Flag = "CMG_PushManip", Default = "Off", Multi = false,
-        Items = { "Off", "Anti Push", "Reduce Push" },
-        Callback = function(v)
-            S.pushManip = (type(v) == "table" and v[1]) or v or "Off"
-            if S.pushManip ~= "Off" then pmLast = S.pushManip end
-            pmRefresh(S.pushManip)
-        end })
-    reduceSlider = SecPM:Slider({ Name = "Reduction", Flag = "CMG_PushReduce", Min = 0, Max = 100, Default = 50, Decimals = 0, Suffix = " %",
-        Callback = function(v) S.pushReduce = v / 100 end })
-    antiRangeSlider = SecPM:Slider({ Name = "Ignore range", Flag = "CMG_AntiPushRange", Min = 0, Max = 10, Default = 0, Decimals = 1, Suffix = " studs",
-        Callback = function(v) S.antiPushRange = math.floor(v / 0.2 + 0.5) * 0.2 end })   -- snap to 0.2; 0 = always anti-fling
-    antiMinSlider = SecPM:Slider({ Name = "Min teleport", Flag = "CMG_AntiTpMin", Min = 4, Max = 40, Default = 8, Decimals = 0, Suffix = " studs",
-        Callback = function(v) S.antiTpMin = v end })   -- ignore jumps smaller than this (normal movement / hitches)
-    antiMaxSlider = SecPM:Slider({ Name = "Max teleport", Flag = "CMG_AntiTpMax", Min = 30, Max = 400, Default = 120, Decimals = 0, Suffix = " studs",
-        Callback = function(v) S.antiTpMax = v end })   -- ignore jumps bigger than this (round-start relocations)
-    antiVizToggle = SecPM:Toggle({ Name = "Show range", Flag = "CMG_AntiPushViz", Default = false,
-        Callback = function(v) S.antiPushShowRange = v end })
-    SecPM:Label({ Name = "Toggle key" }):Keybind({ Name = "PushManip", Flag = "CMG_PushManipKey", Mode = "Toggle",
-        Callback = function()
-            S.pushManip = (S.pushManip == "Off") and pmLast or "Off"
-            pcall(function() pmDrop:Set(S.pushManip) end)
-            pmRefresh(S.pushManip)
-        end })
-    pmRefresh(S.pushManip)   -- initial visibility
+    local SecPM = Combat:Section({ Name = "Reduce Push", Side = 2 })
+    local pmTog = SecPM:Toggle({ Name = "Enabled", Flag = "CMG_PushReduceOn", Default = false,
+        Callback = function(v) S.pushReduceOn = v end })
+    SecPM:Slider({ Name = "Reduction", Flag = "CMG_PushReduce", Min = 0, Max = 100, Default = 50, Decimals = 0, Suffix = " %",
+        Callback = function(v) S.pushReduce = v / 100 end })   -- 100% = remove the knockback entirely
+    SecPM:Label({ Name = "Toggle key" }):Keybind({ Name = "PushReduce", Flag = "CMG_PushReduceKey", Mode = "Toggle",
+        Callback = function(state) pmTog:Set(state and true or false) end })
 
     local Sec4 = Combat:Section({ Name = "Gun Silent Aim", Side = 2 })
     local gunTog = Sec4:Toggle({ Name = "Silent aim", Flag = "CMG_GunSilent", Default = false,
@@ -914,12 +834,11 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     S.push, S.sword, S.showRange, S.swordShowRange, S.gunSilent = false, false, false, false, false
-    S.pushManip, S.antiPushShowRange, S.pushFovViz, S.swordFovViz = "Off", false, false, false
+    S.pushReduceOn, S.pushFovViz, S.swordFovViz = false, false, false
     if S._discDestroy then pcall(S._discDestroy) end
     if S._pushConeDestroy then pcall(S._pushConeDestroy) end
     if S._swordConeDestroy then pcall(S._swordConeDestroy) end
     if S._swordDiscDestroy then pcall(S._swordDiscDestroy) end
-    if S._antiPushDiscDestroy then pcall(S._antiPushDiscDestroy) end
     if S._gunFovDestroy then pcall(S._gunFovDestroy) end
     if S.phys then pcall(function() applyPhys(false) end); S.phys = false end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
