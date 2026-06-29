@@ -131,6 +131,7 @@ local S = {
     hireCashier  = false, hireInt = 30, hireAcc = 0,
     redeemAuto   = false, redeemAcc = 0,
     dailyAuto    = false, dailyAcc  = 0,
+    autoReward   = false,
 }
 
 local CODES = { "BONUS", "YUM", "MONEYBAG" }
@@ -429,6 +430,70 @@ local function hireCashierOnce()
 end
 
 -- ============================================================
+--  REWARD POPUP  ("You Got a Reward!" -> auto-pick a product + press OK!)
+--  GoalComplete fires {rewardType="product", products={ids...}} (or "cash", which
+--  auto-claims). The selection UI (PlayerGui.RewardSelect) disables the HUD while
+--  open, so we invoke the real Select + OK! button handlers -- claims the reward
+--  AND restores the HUD exactly like a manual click. (Validated remote:
+--  SelectRewardProduct:FireServer(productId).)
+-- ============================================================
+local GETC = getconnections or (debug and debug.getconnections)
+
+-- run a GuiButton's connected handler(s) directly (firesignal is unreliable on
+-- GuiButton.Activated in this executor; calling the connection's function works)
+local function invokeButton(btn)
+    if not (btn and GETC) then return false end
+    for _, sig in ipairs({ "Activated", "MouseButton1Click" }) do
+        local ok, conns = pcall(function() return GETC(btn[sig]) end)
+        if ok and conns and #conns > 0 then
+            local fired = false
+            for _, c in ipairs(conns) do        -- run ALL handlers (OK! has 2)
+                if c.Function then pcall(c.Function); fired = true
+                elseif c.Fire then pcall(function() c:Fire() end); fired = true end
+            end
+            if fired then return true end
+        end
+    end
+    return false
+end
+
+local function autoClaimReward()
+    local pg = LP:FindFirstChild("PlayerGui"); if not pg then return end
+    local rsg = pg:FindFirstChild("RewardSelect"); if not rsg then return end
+    local selFrame = rsg:FindFirstChild("Frame")
+    selFrame = selFrame and selFrame:FindFirstChild("RewardSelection")
+    if not selFrame then return end
+    -- pick the first option that has a Select button (any product is fine)
+    local selBtn
+    for _, opt in ipairs(selFrame:GetChildren()) do
+        if opt:IsA("GuiObject") then
+            local s = opt:FindFirstChild("Select")
+            if s then selBtn = s; break end
+        end
+    end
+    if not selBtn or not invokeButton(selBtn) then return end   -- fires SelectRewardProduct + reveal
+    -- wait for the reveal, then press OK! (restores the HUD)
+    local rev = rsg:FindFirstChild("RevealFrame")
+    local t0 = os.clock()
+    while os.clock() - t0 < 4 do
+        local close = rev and rev:FindFirstChild("Close")
+        if close and close.Visible then invokeButton(close); return end
+        task.wait(0.15)
+    end
+end
+
+local rewardConn
+local function setupRewardListener()
+    if rewardConn then return end
+    local gc = remote("GoalComplete"); if not gc then return end
+    rewardConn = gc.OnClientEvent:Connect(function(p1)
+        if not S.autoReward then return end
+        if type(p1) ~= "table" or p1.rewardType ~= "product" then return end  -- cash auto-claims itself
+        task.spawn(function() task.wait(0.4); pcall(autoClaimReward) end)     -- let the popup build first
+    end)
+end
+
+-- ============================================================
 --  master ticker (interval features; cooking has its own coroutine)
 -- ============================================================
 local tickConn
@@ -621,6 +686,8 @@ do
     Free:Button({ Name = "Claim daily login", Callback = function() task.spawn(claimDaily) end })
     Free:Toggle({ Name = "Auto claim daily", Flag = "CS_DailyAuto", Default = false,
         Callback = function(v) S.dailyAuto = v; S.dailyAcc = 115 end })
+    Free:Toggle({ Name = "Auto claim goal reward", Flag = "CS_AutoReward", Default = false,
+        Callback = function(v) S.autoReward = v end })
 end
 
 -- ---------- Info ----------
@@ -642,6 +709,7 @@ do
 end
 
 startTicker()
+setupRewardListener()
 
 -- ============================================================
 --  teardown: stop every loop on unload / re-execution
@@ -652,6 +720,8 @@ do
         S.stock = false
         S.checkout, S.collect, S.autoUpgrade = false, false, false
         S.hireCashier, S.redeemAuto, S.dailyAuto = false, false, false
+        S.autoReward = false
+        if rewardConn then pcall(function() rewardConn:Disconnect() end); rewardConn = nil end
         pcall(stopTicker)
     end
     local g = getgenv and getgenv()
