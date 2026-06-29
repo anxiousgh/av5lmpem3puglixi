@@ -39,6 +39,7 @@ local function track(c) conns[#conns + 1] = c; return c end
 local S = (gv() and gv()._CMG_S) or {
     push = false, pushRange = 5, pushCD = 0.35,
     pushEquip = false, pushEnemyOnly = false,
+    pushFov = 360, pushFovViz = false, pushFovColor = Color3.fromRGB(80, 200, 255),
     pushManip = "Off", pushReduce = 0.5, antiPushRange = 0,
     antiTpMin = 8, antiTpMax = 120,
     antiPushShowRange = false, antiPushRangeColor = Color3.fromRGB(255, 180, 80),
@@ -56,6 +57,9 @@ if S.showRange == nil then S.showRange = false end
 if S.rangeColor == nil then S.rangeColor = Color3.fromRGB(255, 80, 80) end
 if S.pushEquip == nil then S.pushEquip = false end
 if S.pushEnemyOnly == nil then S.pushEnemyOnly = false end
+if S.pushFov == nil then S.pushFov = 360 end
+if S.pushFovViz == nil then S.pushFovViz = false end
+if S.pushFovColor == nil then S.pushFovColor = Color3.fromRGB(80, 200, 255) end
 if S.pushManip == nil then S.pushManip = "Off" end
 if S.pushReduce == nil then S.pushReduce = 0.5 end
 if S.antiPushRange == nil then S.antiPushRange = 0 end
@@ -168,6 +172,94 @@ local function makeRangeViz()
     end
     return self
 end
+-- horizontal facing direction of the character (HRP LookVector flattened to XZ).
+-- Camera is deliberately ignored -- the cone follows where the CHARACTER faces.
+local function faceDir(hrp)
+    local lv = hrp.CFrame.LookVector
+    local f = Vector3.new(lv.X, 0, lv.Z)
+    if f.Magnitude < 1e-4 then return Vector3.new(0, 0, -1) end
+    return f.Unit
+end
+-- is `pos` within the character's view cone? fov is the FULL cone angle in degrees,
+-- measured on the horizontal plane (so targets above/below don't skew the bearing).
+-- 360 = no restriction (everywhere); 15 = a narrow wedge straight ahead.
+local function inViewCone(hrp, pos, fov)
+    fov = fov or 360
+    if fov >= 360 then return true end
+    local to = pos - hrp.Position
+    to = Vector3.new(to.X, 0, to.Z)
+    if to.Magnitude < 1e-4 then return true end   -- directly above/below: no bearing, allow
+    local dot = math.clamp(faceDir(hrp):Dot(to.Unit), -1, 1)
+    return math.deg(math.acos(dot)) <= fov / 2
+end
+-- view-cone visualizer: an outlined wedge (arc rim + two radial edges) of angle `fov`
+-- and radius `radius`, laid flat and re-oriented each frame to the character's facing.
+-- Built in local space with forward = -Z so a CFrame.lookAt along faceDir aligns it.
+local function makeConeViz()
+    local self = {}
+    local model, builtKey = nil, nil
+    local function edge(parent, a, b, color, mat)
+        local mid = (a + b) / 2
+        local len = (b - a).Magnitude
+        if len < 1e-3 then return end
+        local p = Instance.new("Part")
+        p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.Massless = true, false, false, false, true
+        p.Material, p.Color = mat, color
+        p.Size = Vector3.new(0.15, 0.15, len)
+        p.CFrame = CFrame.lookAt(mid, b)
+        p.Parent = parent
+    end
+    local function build(radius, fov, color, material)
+        if model then model:Destroy() end
+        model = Instance.new("Model"); model.Name = "\0"
+        local mat = Enum.Material[material] or Enum.Material.Neon
+        local half = math.rad(fov) / 2
+        local function rim(a) return Vector3.new(math.sin(a), 0, -math.cos(a)) * radius end  -- a=0 -> forward(-Z)
+        local SEG = math.max(2, math.floor(fov / 6))    -- ~one segment per 6 degrees
+        local step = (2 * half) / SEG
+        for i = 0, SEG - 1 do
+            edge(model, rim(-half + step * i), rim(-half + step * (i + 1)), color, mat)   -- arc rim
+        end
+        edge(model, Vector3.new(0, 0, 0), rim(-half), color, mat)   -- left radial edge
+        edge(model, Vector3.new(0, 0, 0), rim(half), color, mat)    -- right radial edge
+        model.WorldPivot = CFrame.new()
+        model.Parent = workspace
+    end
+    function self.update(on, radius, fov, color)
+        if not on then
+            if model then model:Destroy(); model = nil; builtKey = nil end
+            return
+        end
+        local hrp = myHRP(); if not hrp then return end
+        color = color or Color3.fromRGB(80, 200, 255)
+        local material, originOpt = S.vizMaterial or "Neon", S.vizOrigin or "Ground"
+        local key = string.format("%0.2f|%0.1f|%s|%s", radius, fov, tostring(color), material)
+        if (not model) or builtKey ~= key then build(radius, fov, color, material); builtKey = key end
+        local char = LocalPlayer.Character
+        local pos
+        if originOpt == "Feet" then
+            pos = hrp.Position - Vector3.new(0, 2.6, 0)
+        elseif originOpt == "Head" then
+            local head = char and char:FindFirstChild("Head")
+            pos = (head and head.Position) or (hrp.Position + Vector3.new(0, 1.5, 0))
+        elseif originOpt == "HRP" then
+            pos = hrp.Position
+        else  -- Ground: raycast straight down
+            local groundY = hrp.Position.Y - 3
+            local rp = RaycastParams.new()
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            rp.FilterDescendantsInstances = { char, model }
+            local res = workspace:Raycast(hrp.Position, Vector3.new(0, -60, 0), rp)
+            if res then groundY = res.Position.Y end
+            pos = Vector3.new(hrp.Position.X, groundY + 0.05, hrp.Position.Z)
+        end
+        model:PivotTo(CFrame.lookAt(pos, pos + faceDir(hrp)))   -- local -Z -> facing
+    end
+    function self.destroy()
+        if model then pcall(function() model:Destroy() end); model = nil end
+    end
+    return self
+end
 -- iterate every living enemy body part within `range` studs, respecting a
 -- per-target cooldown table; calls fn(part) for each one that is due to fire.
 -- a real team mode only if players occupy more than 2 distinct teams (e.g. Red/Blue/
@@ -181,7 +273,7 @@ local function multiTeam()
     end
     return n > 2
 end
-local function forEnemiesInRange(range, cdTable, cd, fn, enemyOnly)
+local function forEnemiesInRange(range, cdTable, cd, fn, enemyOnly, filter)
     local hrp = myHRP(); if not hrp then return end
     local doTeam = enemyOnly and multiTeam()
     local now = os.clock()
@@ -192,6 +284,7 @@ local function forEnemiesInRange(range, cdTable, cd, fn, enemyOnly)
             local part = p.Character:FindFirstChild("Torso") or p.Character:FindFirstChild("HumanoidRootPart")
             if hum and hum.Health > 0 and part
                and (part.Position - hrp.Position).Magnitude <= range
+               and (not filter or filter(part, hrp))   -- optional facing/FOV gate, before cooldown
                and now - (cdTable[p] or 0) >= cd then
                 cdTable[p] = now
                 fn(part)
@@ -256,7 +349,9 @@ do
         forEnemiesInRange(S.pushRange, lastPush, S.pushCD, function(part)
             hit:FireServer("Hit", part)
             fired = true
-        end, S.pushEnemyOnly)
+        end, S.pushEnemyOnly, function(part, hrp)   -- only push enemies the character is facing
+            return inViewCone(hrp, part.Position, S.pushFov or 360)
+        end)
         -- one full swing per push: only (re)start when actually pushing AND the previous
         -- swing has finished, so it plays at the animation's natural pace, not every frame
         if fired and tool then
@@ -272,6 +367,16 @@ do
     S._discDestroy = viz.destroy
     track(RunService.RenderStepped:Connect(function()
         viz.update(S.showRange and S.push, S.pushRange, S.rangeColor)   -- only while Auto Push is on
+    end))
+end
+
+-- ---- Auto Push view-cone visualizer ----
+do
+    local viz = makeConeViz()
+    S._pushConeDestroy = viz.destroy
+    track(RunService.RenderStepped:Connect(function()
+        -- only while Auto Push is on AND the cone is a real restriction (<360)
+        viz.update(S.pushFovViz and S.push and (S.pushFov or 360) < 360, S.pushRange, S.pushFov or 360, S.pushFovColor)
     end))
 end
 
@@ -649,12 +754,18 @@ do
         Callback = function(v) S.pushRange = v end })
     Sec:Slider({ Name = "Cooldown", Flag = "CMG_PushCD", Min = 0, Max = 1000, Default = 350, Decimals = 0, Suffix = " ms",
         Callback = function(v) S.pushCD = v / 1000 end })
+    Sec:Slider({ Name = "View angle", Flag = "CMG_PushFov", Min = 15, Max = 360, Default = 360, Decimals = 0, Suffix = "°",
+        Callback = function(v) S.pushFov = v end })   -- 15 = only straight ahead, 360 = all around (char facing, not camera)
     Sec:Label({ Name = "Toggle key" }):Keybind({ Name = "AutoPush", Flag = "CMG_PushKey", Mode = "Toggle",
         Callback = function(state) pushTog:Set(state and true or false) end })
     Sec:Toggle({ Name = "Show range", Flag = "CMG_PushViz", Default = false,
         Callback = function(v) S.showRange = v end })
     Sec:Label({ Name = "Range color" }):Colorpicker({ Flag = "CMG_PushVizColor", Default = Color3.fromRGB(255, 80, 80),
         Callback = function(c) S.rangeColor = c end })
+    Sec:Toggle({ Name = "Show view cone", Flag = "CMG_PushFovViz", Default = false,
+        Callback = function(v) S.pushFovViz = v end })
+    Sec:Label({ Name = "View cone color" }):Colorpicker({ Flag = "CMG_PushFovColor", Default = Color3.fromRGB(80, 200, 255),
+        Callback = function(c) S.pushFovColor = c end })
     Sec:Toggle({ Name = "Auto-equip Hit tool", Flag = "CMG_PushEquip", Default = false,
         Callback = function(v) S.pushEquip = v end })
     Sec:Toggle({ Name = "Enemies only (team)", Flag = "CMG_PushEnemyOnly", Default = false,
@@ -770,8 +881,9 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     S.push, S.sword, S.showRange, S.swordShowRange, S.gunSilent = false, false, false, false, false
-    S.pushManip, S.antiPushShowRange = "Off", false
+    S.pushManip, S.antiPushShowRange, S.pushFovViz = "Off", false, false
     if S._discDestroy then pcall(S._discDestroy) end
+    if S._pushConeDestroy then pcall(S._pushConeDestroy) end
     if S._swordDiscDestroy then pcall(S._swordDiscDestroy) end
     if S._antiPushDiscDestroy then pcall(S._antiPushDiscDestroy) end
     if S._gunFovDestroy then pcall(S._gunFovDestroy) end
