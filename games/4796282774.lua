@@ -40,6 +40,7 @@ local S = (gv() and gv()._CMG_S) or {
     push = false, pushRange = 5, pushCD = 0.35,
     pushEquip = false, pushEnemyOnly = false,
     pushManip = "Off", pushReduce = 0.5, antiPushRange = 0,
+    antiTpMin = 8, antiTpMax = 120,
     antiPushShowRange = false, antiPushRangeColor = Color3.fromRGB(255, 180, 80),
     showRange = false, rangeColor = Color3.fromRGB(255, 80, 80),
     vizMode = "Circle", vizMaterial = "Neon", vizOrigin = "Ground",
@@ -58,6 +59,8 @@ if S.pushEnemyOnly == nil then S.pushEnemyOnly = false end
 if S.pushManip == nil then S.pushManip = "Off" end
 if S.pushReduce == nil then S.pushReduce = 0.5 end
 if S.antiPushRange == nil then S.antiPushRange = 0 end
+if S.antiTpMin == nil then S.antiTpMin = 8 end
+if S.antiTpMax == nil then S.antiTpMax = 120 end
 if S.antiPushShowRange == nil then S.antiPushShowRange = false end
 if S.antiPushRangeColor == nil then S.antiPushRangeColor = Color3.fromRGB(255, 180, 80) end
 if S.vizMode == nil then S.vizMode = "Circle" end
@@ -274,43 +277,60 @@ end
 
 -- ============================================================
 --  PUSH MANIPULATION  -- anti-fling / reduce knockback from other players' push tools.
---  A push spikes your horizontal velocity; clamp or scale it above a walkspeed-based
---  threshold (so normal movement is untouched), keeping vertical (gravity/jump) intact.
+--
+--  This game's push is a ONE-SHOT CFrame teleport: it relocates the HRP ~50-140 studs
+--  in a single frame with ZERO velocity, then lets client physics resume (you just fall).
+--  Verified live -- there are no body-movers and no velocity spike to clamp, which is why
+--  the old velocity-only Anti Push did nothing. So:
+--    Anti Push   -- remember the last safe CFrame; when a frame shows a big HORIZONTAL
+--                   position jump carrying ~no horizontal velocity (the teleport tell;
+--                   real running always carries hvel~=walkspeed, lag hitches too), snap
+--                   the CFrame back. Respawns are skipped via a post-spawn grace window.
+--    Reduce Push -- legacy velocity scaling, kept for any mode whose push IS velocity-based.
 -- ============================================================
 do
+    local lastSafeCF, lastPos, spawnT = nil, nil, os.clock()
+    track(LocalPlayer.CharacterAdded:Connect(function()
+        spawnT = os.clock(); lastSafeCF, lastPos = nil, nil   -- don't snap against our own respawn
+    end))
     track(RunService.Stepped:Connect(function()
         local mode = S.pushManip
         if not mode or mode == "Off" then return end
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return end
-        -- Anti Push ignore-range: if anyone is within antiPushRange, let the push through
-        if mode == "Anti Push" and (S.antiPushRange or 0) > 0 then
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LocalPlayer and p.Character then
-                    local part = p.Character:FindFirstChild("HumanoidRootPart") or p.Character:FindFirstChild("Torso")
-                    if part and (part.Position - hrp.Position).Magnitude <= S.antiPushRange then return end
-                end
-            end
-        end
+        if not hrp then lastSafeCF, lastPos = nil, nil; return end
         local hum = char:FindFirstChildOfClass("Humanoid")
         local walk = (hum and hum.WalkSpeed) or 16
-        -- a push is often applied as a body mover on the HRP -> strip them (Anti Push only)
+        local v = hrp.AssemblyLinearVelocity
+
         if mode == "Anti Push" then
-            for _, d in ipairs(hrp:GetChildren()) do
-                if d:IsA("BodyMover") or d:IsA("LinearVelocity") or d:IsA("AngularVelocity") or d:IsA("VectorForce") then
-                    pcall(function() d:Destroy() end)
+            -- Anti Push ignore-range: if anyone is within antiPushRange, let the push through
+            local ignore = false
+            if (S.antiPushRange or 0) > 0 then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= LocalPlayer and p.Character then
+                        local part = p.Character:FindFirstChild("HumanoidRootPart") or p.Character:FindFirstChild("Torso")
+                        if part and (part.Position - hrp.Position).Magnitude <= S.antiPushRange then ignore = true; break end
+                    end
                 end
             end
-        end
-        -- clamp the velocity spike (anything well beyond normal movement is a push)
-        local v = hrp.AssemblyLinearVelocity
-        local h = Vector3.new(v.X, 0, v.Z)
-        local g = gv(); if g then g._CMG_pushPeak = math.max(g._CMG_pushPeak or 0, h.Magnitude) end  -- probe
-        if h.Magnitude > walk + 6 then
-            if mode == "Anti Push" then
-                hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)               -- kill the fling, keep gravity
-            else  -- Reduce Push
+            local pos = hrp.Position
+            local sinceSpawn = os.clock() - spawnT
+            if lastSafeCF and lastPos and not ignore and sinceSpawn > 1.5 and not hrp.Anchored then
+                -- horizontal displacement vs horizontal velocity this frame
+                local hMoved = Vector3.new(pos.X - lastPos.X, 0, pos.Z - lastPos.Z).Magnitude
+                local hvel   = Vector3.new(v.X, 0, v.Z).Magnitude
+                -- teleport tell: jumped far horizontally while carrying ~no horizontal speed
+                if hMoved >= (S.antiTpMin or 8) and hMoved <= (S.antiTpMax or 120) and hvel < 8 then
+                    hrp.CFrame = lastSafeCF                                   -- snap back to pre-push spot
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, math.min(v.Y, 0), 0)  -- keep only downward gravity
+                    return                                                    -- keep lastSafeCF as the anchor
+                end
+            end
+            lastSafeCF, lastPos = hrp.CFrame, pos
+        else  -- Reduce Push: scale down a horizontal velocity spike (velocity-based pushes)
+            local h = Vector3.new(v.X, 0, v.Z)
+            if h.Magnitude > walk + 6 then
                 local keep = 1 - math.clamp(S.pushReduce or 0.5, 0, 1)
                 hrp.AssemblyLinearVelocity = Vector3.new(v.X * keep, v.Y, v.Z * keep)
             end
@@ -642,11 +662,13 @@ do
 
     local SecPM = Combat:Section({ Name = "Push Manipulation", Side = 2 })
     local pmLast = "Anti Push"   -- last non-off mode, restored by the keybind
-    local reduceSlider, antiRangeSlider, antiVizToggle
+    local reduceSlider, antiRangeSlider, antiVizToggle, antiMinSlider, antiMaxSlider
     local function pmRefresh(m)   -- show only the controls relevant to the chosen mode
         if reduceSlider then reduceSlider:SetVisibility(m == "Reduce Push") end
         if antiRangeSlider then antiRangeSlider:SetVisibility(m == "Anti Push") end
         if antiVizToggle then antiVizToggle:SetVisibility(m == "Anti Push") end
+        if antiMinSlider then antiMinSlider:SetVisibility(m == "Anti Push") end
+        if antiMaxSlider then antiMaxSlider:SetVisibility(m == "Anti Push") end
     end
     local pmDrop = SecPM:Dropdown({ Name = "Mode", Flag = "CMG_PushManip", Default = "Off", Multi = false,
         Items = { "Off", "Anti Push", "Reduce Push" },
@@ -659,6 +681,10 @@ do
         Callback = function(v) S.pushReduce = v / 100 end })
     antiRangeSlider = SecPM:Slider({ Name = "Ignore range", Flag = "CMG_AntiPushRange", Min = 0, Max = 10, Default = 0, Decimals = 1, Suffix = " studs",
         Callback = function(v) S.antiPushRange = math.floor(v / 0.2 + 0.5) * 0.2 end })   -- snap to 0.2; 0 = always anti-fling
+    antiMinSlider = SecPM:Slider({ Name = "Min teleport", Flag = "CMG_AntiTpMin", Min = 4, Max = 40, Default = 8, Decimals = 0, Suffix = " studs",
+        Callback = function(v) S.antiTpMin = v end })   -- ignore jumps smaller than this (normal movement / hitches)
+    antiMaxSlider = SecPM:Slider({ Name = "Max teleport", Flag = "CMG_AntiTpMax", Min = 30, Max = 400, Default = 120, Decimals = 0, Suffix = " studs",
+        Callback = function(v) S.antiTpMax = v end })   -- ignore jumps bigger than this (round-start relocations)
     antiVizToggle = SecPM:Toggle({ Name = "Show range", Flag = "CMG_AntiPushViz", Default = false,
         Callback = function(v) S.antiPushShowRange = v end })
     SecPM:Label({ Name = "Toggle key" }):Keybind({ Name = "PushManip", Flag = "CMG_PushManipKey", Mode = "Toggle",
