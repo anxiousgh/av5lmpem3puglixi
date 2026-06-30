@@ -236,8 +236,10 @@ do
         Callback = function(v) holderEsp = v end })
 
     local SecM = Sub:Section({ Name = "Movement", Side = 1 })
-    SecM:Toggle({ Name = "Speed boost (CFrame)", Flag = "TBD_SpeedOn", Default = false,
+    local spdToggle = SecM:Toggle({ Name = "Speed boost (CFrame)", Flag = "TBD_SpeedOn", Default = false,
         Callback = function(v) speedOn = v end })
+    spdToggle:Keybind({ Name = "Toggle speed boost", Flag = "TBD_SpeedKey", Mode = "Toggle",
+        Default = Enum.KeyCode.G, Callback = function() spdToggle:Set(not spdToggle.Value) end })
     SecM:Slider({ Name = "Speed", Flag = "TBD_SpeedMult", Min = 102, Max = 110, Default = 105, Decimals = 0, Suffix = " %",
         Callback = function(v) speedMult = v / 100 end })
     SecM:Label({ Name = "very slight -- 102-110% of normal, replicates" })
