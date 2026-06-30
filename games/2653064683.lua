@@ -121,23 +121,27 @@ end
 -- ---- game Data via getgc: Prompt = clean syllable ('' = any word), and
 --      Players[PossessorIndex] = the current player's UserId (so my turn = it's mine).
 --      Far more reliable than scraping the UI letters (which keep stale ghosts). ----
+-- Re-scan on a throttle and ALWAYS adopt the live game's Data table -- never cache
+-- one forever. Old/finished rounds leave stale tables in the GC (and there's a
+-- template with FuseStart=1), so the live one is the match with the greatest
+-- FuseStart (most recently started game). This is what makes re-entering / new
+-- rounds keep working instead of reading a dead table.
 local dataObj, lastScan = nil, 0
-local function validData(o)
-    if type(o) ~= "table" then return false end
-    local ok, players = pcall(function() return o.Players end)
-    return ok and type(players) == "table" and #players > 0
-end
 local function refreshData()
-    if validData(dataObj) then return end
-    if tick() - lastScan < 1.5 or type(getgc) ~= "function" then return end
+    if type(getgc) ~= "function" then return end
+    if tick() - lastScan < 1 then return end   -- throttle the (heavy) GC walk
     lastScan = tick()
     pcall(function()
+        local best, bestStart
         for _, o in ipairs(getgc(true)) do
             if type(o) == "table" and rawget(o, "Prompt") ~= nil
-                and rawget(o, "PossessorIndex") ~= nil and type(rawget(o, "Players")) == "table" then
-                dataObj = o; return
+                and rawget(o, "PossessorIndex") ~= nil and type(rawget(o, "Players")) == "table"
+                and #rawget(o, "Players") > 0 then
+                local start = tonumber(rawget(o, "FuseStart")) or 0
+                if not bestStart or start > bestStart then bestStart, best = start, o end
             end
         end
+        if best then dataObj = best end
     end)
 end
 local function isMyTurn()
