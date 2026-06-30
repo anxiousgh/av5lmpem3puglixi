@@ -58,6 +58,7 @@ end
 --  The Gun's "Shoot" remote works whether the Gun is equipped
 --  (in Character) or just held in the Backpack.
 -- ============================================================
+local shootPredict = 1.0   -- ping-lead multiplier (x ping x target velocity); 0 = off
 local function findGunShoot()
     local function pull(parent)
         local gun = parent and parent:FindFirstChild("Gun")
@@ -100,14 +101,20 @@ local function shootMurderer()
     if not victim then return false, "no_murderer" end
     local part = targetHitPart(victim.Character)
     if not part then return false, "no_victim" end
-    local theirCF = part.CFrame
+    -- lead the shot a touch by ping * the murderer's velocity -- at higher ping their
+    -- replicated position is more stale, so the lead scales with it (tiny by default).
+    local ping = 0
+    pcall(function() ping = LocalPlayer:GetNetworkPing() end)   -- seconds
+    local lead = part.AssemblyLinearVelocity * (ping * shootPredict)
+    local aimPos = part.Position + lead
+    local theirCF = part.CFrame + lead
     -- origin = our REAL gun-muzzle POSITION (passes the server's origin check) but AIMED
     -- at the murderer. The server fires along the origin's look direction, so without
     -- re-aiming it shoots wherever the gun happens to face -> misses. Correct arg order.
     local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     local att = hrp and hrp:FindFirstChild("GunRaycastAttachment")
-    local muzzle = (att and att.WorldPosition) or (hrp and hrp.Position) or part.Position
-    local origin = CFrame.new(muzzle, part.Position)
+    local muzzle = (att and att.WorldPosition) or (hrp and hrp.Position) or aimPos
+    local origin = CFrame.new(muzzle, aimPos)
     pcall(function() remote:FireServer(origin, theirCF) end)
     return true
 end
@@ -345,6 +352,9 @@ SheriffSec:Button({ Name = "Shoot murderer", Callback = tryShoot })
 SheriffSec:Label({ Name = "Shoot key" }):Keybind({
     Name = "Shoot murderer", Flag = "MM2_ShootKey", Mode = "Hold", Default = Enum.KeyCode.K,
     Callback = function(state2) if state2 then tryShoot() end end })
+SheriffSec:Slider({ Name = "Ping prediction", Flag = "MM2_ShootPredict", Min = 0, Max = 300, Default = 100, Decimals = 0, Suffix = " %",
+    Callback = function(v) shootPredict = v / 100 end })
+SheriffSec:Label({ Name = "leads the shot by ping x velocity (0 = off)" })
 
 local KnifeSec = Sub:Section({ Name = "Murderer knife", Side = 1 })
 KnifeSec:Button({ Name = "Kill all", Callback = function() knifeKillAll(nil) end })
