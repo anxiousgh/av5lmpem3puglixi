@@ -83,14 +83,17 @@ local function findWord(syl, tried, flex)
     syl = syl:lower()
     local minLen = math.max(#syl, 3)
     if flex then
+        -- flashiest word that is STILL a common (dictionary-valid) word -- restrict to
+        -- the frequency list, else flex always picks an obscure junk word and gets
+        -- rejected. Falls through to the common pick if a rare syllable has no match.
         local best, bestScore
         for _, w in ipairs(words) do
-            if #w >= minLen and not tried[w] and (syl == "" or w:find(syl, 1, true)) then
+            if freqRank[w] and #w >= minLen and not tried[w] and (syl == "" or w:find(syl, 1, true)) then
                 local sc = flexScore(w)
                 if not bestScore or sc > bestScore then bestScore, best = sc, w end
             end
         end
-        return best
+        if best then return best end
     end
     local bestCommon, bestRank
     local shortFallback, shortLen
