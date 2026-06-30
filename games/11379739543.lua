@@ -157,7 +157,7 @@ local speedOn, speedMult = false, 1.05
 --  left/right relative to them with randomized amplitude + speed (human-ish juke).
 -- ============================================================
 local lookAway, aimHeld, jiggleOn = false, false, false
-local lookSmooth = 28                    -- rotation easing rate for AIM-AT (higher = snappier; look-away always snaps)
+local lookSmooth = 2                     -- AIM-AT smoothness amount: 0 = off/instant snap, 8 = smoothest (look-away always snaps)
 local predictTime = 0.08                 -- s of target-velocity lead (server pos lags)
 local _arDisabled = false                -- did WE turn off Humanoid.AutoRotate?
 local jAmpMin, jAmpMax = 2, 5            -- studs
@@ -229,8 +229,12 @@ track(RunService.Heartbeat:Connect(function(dt)
                 local from = (handle and handle.Position) or pos
                 local aimDir = Vector3.new(pred.X - from.X, 0, pred.Z - from.Z)
                 aimDir = (aimDir.Magnitude > 0.05) and aimDir.Unit or dir
-                local alpha = 1 - math.exp(-dt * lookSmooth)
-                newCF = newCF.Rotation:Lerp(CFrame.lookAt(Vector3.zero, aimDir), alpha) + pos
+                if lookSmooth <= 0.01 then
+                    newCF = CFrame.lookAt(pos, pos + aimDir)               -- off: instant snap
+                else
+                    local alpha = 1 - math.exp(-dt * (60 / lookSmooth))    -- more smoothness = slower ease
+                    newCF = newCF.Rotation:Lerp(CFrame.lookAt(Vector3.zero, aimDir), alpha) + pos
+                end
             elseif lookAway then
                 -- look-away: SNAP fully so movement-driven rotation can't drag it back
                 newCF = CFrame.lookAt(pos, pos - dir)
@@ -276,7 +280,7 @@ do
     SecJ:Label({ Name = "Aim-at key (hold)" }):Keybind({
         Name = "Look at nearest", Flag = "TBD_AimKey", Mode = "Hold", Default = Enum.KeyCode.E,
         Callback = function(state) aimHeld = state end })
-    SecJ:Slider({ Name = "Aim smoothness (aim-at only)", Flag = "TBD_Smooth", Min = 8, Max = 60, Default = 28, Decimals = 0,
+    SecJ:Slider({ Name = "Aim smoothness (0 = off)", Flag = "TBD_Smooth", Min = 0, Max = 8, Default = 2, Decimals = 0,
         Callback = function(v) lookSmooth = v end })
     SecJ:Slider({ Name = "Prediction", Flag = "TBD_Predict", Min = 0, Max = 300, Default = 80, Decimals = 0, Suffix = " ms",
         Callback = function(v) predictTime = v / 1000 end })
