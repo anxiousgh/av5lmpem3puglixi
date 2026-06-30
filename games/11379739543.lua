@@ -211,11 +211,13 @@ track(RunService.Heartbeat:Connect(function(dt)
                 pos = pos + right * (L - jLast); jLast = L
             end
 
-            local lookDir = aimHeld and dir or (lookAway and -dir or nil)
-            if lookDir then
-                -- ease rotation toward the look direction instead of snapping each frame
+            if aimHeld then
+                -- aim-at: ease rotation toward the target (smoothness applies here only)
                 local alpha = 1 - math.exp(-dt * lookSmooth)
-                newCF = newCF.Rotation:Lerp(CFrame.lookAt(Vector3.zero, lookDir), alpha) + pos
+                newCF = newCF.Rotation:Lerp(CFrame.lookAt(Vector3.zero, dir), alpha) + pos
+            elseif lookAway then
+                -- look-away: SNAP fully so movement-driven rotation can't drag it back
+                newCF = CFrame.lookAt(pos, pos - dir)
             else
                 newCF = newCF.Rotation + pos                   -- keep facing, apply jiggle
             end
