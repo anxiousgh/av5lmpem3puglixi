@@ -21,13 +21,23 @@ local conns = {}
 local function track(c) conns[#conns + 1] = c; return c end
 
 local S = {
-    on = false, flex = false, mode = "Legit", join = false,
+    on = false, flex = false, mode = "Legit", join = false, notify = false,
     startMin = 0.12, startMax = 0.28,   -- pause before typing starts (seconds)
     keyMin = 0.035, keyMax = 0.095,     -- per-keystroke delay (seconds)
 }
 local function randRange(a, b)          -- random in [a,b]; tolerant of min>max
     if b < a then a, b = b, a end
     return a + math.random() * (b - a)
+end
+-- hub notification (falls back to the Roblox core toast if the lib call fails)
+local function notify(text, color)
+    local ok = pcall(function() Library:Notification(text, 3, color or Color3.fromRGB(0, 200, 255)) end)
+    if not ok then
+        pcall(function()
+            game:GetService("StarterGui"):SetCore("SendNotification",
+                { Title = "Word Bomb", Text = text, Duration = 3 })
+        end)
+    end
 end
 
 -- ---- word list (fetched once; ~370k words) ----
@@ -185,6 +195,7 @@ end
 -- ---- main loop ----
 local tried, prevData = {}, nil
 local busy = false
+local lastSeen = nil   -- last syllable announced by the "notify" toggle (debounce)
 if startGame then track(startGame.OnClientEvent:Connect(function() tried = {} end)) end   -- new game = words reusable
 -- generation guard: each reload starts a fresh loop and retires the previous one
 local gg = (getgenv and getgenv()) or {}
@@ -192,10 +203,24 @@ gg.WB_GEN = (gg.WB_GEN or 0) + 1
 local myGen = gg.WB_GEN
 task.spawn(function()
     while myGen == gg.WB_GEN do
-        if S.on and wordsReady then
+        if S.on or S.notify then
             refreshData()
             if dataObj ~= prevData then tried = {}; prevData = dataObj end   -- new game Data = reset used words
-            if dataObj and not busy and isMyTurn() then
+            local mine = dataObj and isMyTurn()
+            -- "Notify detected syllable": show the syllable we read, once per turn
+            if S.notify then
+                if mine then
+                    local syl = getSyllable()
+                    local shown = (syl == "" and "(any word)") or syl
+                    if shown ~= lastSeen then
+                        lastSeen = shown
+                        notify("Sees: '" .. shown .. "'", Color3.fromRGB(0, 255, 120))
+                    end
+                else
+                    lastSeen = nil
+                end
+            end
+            if S.on and wordsReady and dataObj and not busy and mine then
                 local word = findWord(getSyllable(), tried, S.flex)
                 if word then
                     tried[word] = true
@@ -260,6 +285,8 @@ do
         Callback = function(v) S.flex = v end })
     Sec:Toggle({ Name = "Auto join", Flag = "WB_Join", Default = false,
         Callback = function(v) S.join = v end })
+    Sec:Toggle({ Name = "Notify detected syllable", Flag = "WB_Notify", Default = false,
+        Callback = function(v) S.notify = v end })
     local status = Sec:Label({ Name = "Loading word list..." })
     task.spawn(function()
         while not wordsReady do task.wait(0.25) end
@@ -283,7 +310,7 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 
 -- teardown
 local function cleanup()
-    S.on = false
+    S.on = false; S.notify = false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 end
 do
