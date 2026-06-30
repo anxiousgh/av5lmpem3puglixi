@@ -157,8 +157,9 @@ local speedOn, speedMult = false, 1.05
 --  left/right relative to them with randomized amplitude + speed (human-ish juke).
 -- ============================================================
 local lookAway, aimHeld, jiggleOn = false, false, false
-local lookSmooth = 12                    -- rotation easing rate (higher = snappier)
+local lookSmooth = 28                    -- rotation easing rate for AIM-AT (higher = snappier; look-away always snaps)
 local predictTime = 0.08                 -- s of target-velocity lead (server pos lags)
+local _arDisabled = false                -- did WE turn off Humanoid.AutoRotate?
 local jAmpMin, jAmpMax = 2, 5            -- studs
 local jSpdMin, jSpdMax = 6, 12           -- oscillation rate (rad/s)
 local jPhase, jAmp, jSpd, jLast = 0, 3.5, 9, 0
@@ -192,15 +193,24 @@ track(RunService.Heartbeat:Connect(function(dt)
     end
 
     -- bomb juke (only while WE hold the bomb)
+    local looking = (lookAway or aimHeld) and iHaveBomb()
+    -- while we drive rotation, kill Humanoid.AutoRotate so movement doesn't fight our
+    -- facing (that was the look-away jitter); restore it only if we were the disabler.
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        if looking then hum.AutoRotate = false; _arDisabled = true
+        elseif _arDisabled then hum.AutoRotate = true; _arDisabled = false end
+    end
+
     if (lookAway or aimHeld or jiggleOn) and iHaveBomb() then
         local tgt = nearestEnemyHRP()
         if tgt then
             local pos = newCF.Position
-            -- lead the aim by the target's velocity -- their replicated pos lags their
-            -- real (server) pos, so predicting forward lands the facing/pass correctly
+            -- lead by the target's velocity -- their replicated pos lags their real
+            -- (server) pos, so predicting forward lands the facing/pass correctly
             local pred = tgt.Position + targetVel(tgt) * predictTime
-            local flat = Vector3.new(pred.X, pos.Y, pred.Z)
-            local dir = flat - pos
+            -- body->target (flattened), used for look-away + jiggle axis
+            local dir = Vector3.new(pred.X - pos.X, 0, pred.Z - pos.Z)
             dir = (dir.Magnitude > 0.05) and dir.Unit or newCF.LookVector
 
             if jiggleOn then
@@ -212,9 +222,15 @@ track(RunService.Heartbeat:Connect(function(dt)
             end
 
             if aimHeld then
-                -- aim-at: ease rotation toward the target (smoothness applies here only)
+                -- aim the BOMB at them: point from the held bomb handle (offset to the
+                -- hand), not the body centre, so the bomb itself lines up on the target
+                local bomb = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Bomb")
+                local handle = bomb and bomb:FindFirstChild("BombHandle")
+                local from = (handle and handle.Position) or pos
+                local aimDir = Vector3.new(pred.X - from.X, 0, pred.Z - from.Z)
+                aimDir = (aimDir.Magnitude > 0.05) and aimDir.Unit or dir
                 local alpha = 1 - math.exp(-dt * lookSmooth)
-                newCF = newCF.Rotation:Lerp(CFrame.lookAt(Vector3.zero, dir), alpha) + pos
+                newCF = newCF.Rotation:Lerp(CFrame.lookAt(Vector3.zero, aimDir), alpha) + pos
             elseif lookAway then
                 -- look-away: SNAP fully so movement-driven rotation can't drag it back
                 newCF = CFrame.lookAt(pos, pos - dir)
@@ -260,7 +276,7 @@ do
     SecJ:Label({ Name = "Aim-at key (hold)" }):Keybind({
         Name = "Look at nearest", Flag = "TBD_AimKey", Mode = "Hold", Default = Enum.KeyCode.E,
         Callback = function(state) aimHeld = state end })
-    SecJ:Slider({ Name = "Smoothness", Flag = "TBD_Smooth", Min = 3, Max = 30, Default = 12, Decimals = 0,
+    SecJ:Slider({ Name = "Aim smoothness (aim-at only)", Flag = "TBD_Smooth", Min = 8, Max = 60, Default = 28, Decimals = 0,
         Callback = function(v) lookSmooth = v end })
     SecJ:Slider({ Name = "Prediction", Flag = "TBD_Predict", Min = 0, Max = 300, Default = 80, Decimals = 0, Suffix = " ms",
         Callback = function(v) predictTime = v / 1000 end })
@@ -286,6 +302,11 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 local function cleanup()
     holderEsp, autoTag = false, false
     speedOn, lookAway, aimHeld, jiggleOn = false, false, false, false
+    if _arDisabled then
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then pcall(function() hum.AutoRotate = true end) end
+        _arDisabled = false
+    end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 end
 do
