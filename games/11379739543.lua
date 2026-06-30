@@ -157,6 +157,8 @@ local speedOn, speedMult = false, 1.05
 --  left/right relative to them with randomized amplitude + speed (human-ish juke).
 -- ============================================================
 local lookAway, aimHeld, jiggleOn = false, false, false
+local lookSmooth = 12                    -- rotation easing rate (higher = snappier)
+local predictTime = 0.08                 -- s of target-velocity lead (server pos lags)
 local jAmpMin, jAmpMax = 2, 5            -- studs
 local jSpdMin, jSpdMax = 6, 12           -- oscillation rate (rad/s)
 local jPhase, jAmp, jSpd, jLast = 0, 3.5, 9, 0
@@ -164,6 +166,19 @@ local function rerollJiggle()
     jAmp = jAmpMin + math.random() * math.max(0, jAmpMax - jAmpMin)
     jSpd = jSpdMin + math.random() * math.max(0, jSpdMax - jSpdMin)
     jPhase, jLast = 0, 0
+end
+-- robust target velocity: replicated AssemblyLinearVelocity, or a position-delta if
+-- that reads ~0 (other chars are CFrame-streamed, so physics velocity can be stale).
+local _tvLast, _tvPos, _tvT
+local function targetVel(tgt)
+    local v = tgt.AssemblyLinearVelocity
+    local now = os.clock()
+    if _tvLast == tgt and _tvT and now > _tvT + 1e-3 then
+        local dv = (tgt.Position - _tvPos) / (now - _tvT)
+        if dv.Magnitude > v.Magnitude then v = dv end
+    end
+    _tvLast, _tvPos, _tvT = tgt, tgt.Position, now
+    return v
 end
 
 track(RunService.Heartbeat:Connect(function(dt)
@@ -181,7 +196,10 @@ track(RunService.Heartbeat:Connect(function(dt)
         local tgt = nearestEnemyHRP()
         if tgt then
             local pos = newCF.Position
-            local flat = Vector3.new(tgt.Position.X, pos.Y, tgt.Position.Z)
+            -- lead the aim by the target's velocity -- their replicated pos lags their
+            -- real (server) pos, so predicting forward lands the facing/pass correctly
+            local pred = tgt.Position + targetVel(tgt) * predictTime
+            local flat = Vector3.new(pred.X, pos.Y, pred.Z)
             local dir = flat - pos
             dir = (dir.Magnitude > 0.05) and dir.Unit or newCF.LookVector
 
@@ -195,7 +213,9 @@ track(RunService.Heartbeat:Connect(function(dt)
 
             local lookDir = aimHeld and dir or (lookAway and -dir or nil)
             if lookDir then
-                newCF = CFrame.lookAt(pos, pos + lookDir)
+                -- ease rotation toward the look direction instead of snapping each frame
+                local alpha = 1 - math.exp(-dt * lookSmooth)
+                newCF = newCF.Rotation:Lerp(CFrame.lookAt(Vector3.zero, lookDir), alpha) + pos
             else
                 newCF = newCF.Rotation + pos                   -- keep facing, apply jiggle
             end
@@ -236,6 +256,10 @@ do
     SecJ:Label({ Name = "Aim-at key (hold)" }):Keybind({
         Name = "Look at nearest", Flag = "TBD_AimKey", Mode = "Hold", Default = Enum.KeyCode.E,
         Callback = function(state) aimHeld = state end })
+    SecJ:Slider({ Name = "Smoothness", Flag = "TBD_Smooth", Min = 3, Max = 30, Default = 12, Decimals = 0,
+        Callback = function(v) lookSmooth = v end })
+    SecJ:Slider({ Name = "Prediction", Flag = "TBD_Predict", Min = 0, Max = 300, Default = 80, Decimals = 0, Suffix = " ms",
+        Callback = function(v) predictTime = v / 1000 end })
     SecJ:Toggle({ Name = "Jiggle left/right", Flag = "TBD_Jiggle", Default = false,
         Callback = function(v) jiggleOn = v; if v then rerollJiggle() end end })
     SecJ:Slider({ Name = "Jiggle min", Flag = "TBD_JigAmpMin", Min = 1, Max = 15, Default = 2, Decimals = 1, Suffix = " studs",
