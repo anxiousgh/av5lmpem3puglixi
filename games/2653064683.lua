@@ -40,9 +40,25 @@ local function notify(text, color)
     end
 end
 
--- ---- word list (fetched once; ~370k words) ----
+-- ---- word lists (fetched once) ----
+-- words_alpha (~370k) = valid spellings + full syllable coverage, BUT it's stuffed
+-- with obscure/junk tokens the game's "English" dictionary rejects (and they read as
+-- garbage). So we also load a frequency list and PREFER the most common word for a
+-- syllable -- common words are almost always accepted.
 local words, wordsReady = {}, false
+local freqRank = {}     -- word -> rank (lower = more common); absent = uncommon/junk
 task.spawn(function()
+    -- frequency ranks first (non-fatal if it fails -- we just fall back to short words)
+    pcall(function()
+        local fb = game:HttpGet("https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2016/en/en_50k.txt")
+        if fb then
+            local rank = 0
+            for w in fb:gmatch("(%a+)%s+%d+") do
+                w = w:lower(); rank = rank + 1
+                if freqRank[w] == nil then freqRank[w] = rank end
+            end
+        end
+    end)
     local ok, body = pcall(function()
         return game:HttpGet("https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt")
     end)
@@ -60,8 +76,9 @@ local function flexScore(w)
     return s
 end
 -- pick a word containing `syl`, not already tried. empty syllable = any word.
--- flex = longest/rarest (flashy). normal = a RANDOM word of natural length (4-9) via
--- reservoir sampling, so it isn't always the shortest possible.
+-- flex = longest/rarest (flashy). normal = the MOST COMMON word containing the
+-- syllable (by frequency rank) so the game accepts it; if no ranked word matches a
+-- rare syllable, fall back to the shortest words_alpha match (short ~ more common).
 local function findWord(syl, tried, flex)
     syl = syl:lower()
     local minLen = math.max(#syl, 3)
@@ -75,19 +92,19 @@ local function findWord(syl, tried, flex)
         end
         return best
     end
-    local bandLo = math.max(minLen, 4)
-    local pick, count, fallback, fcount = nil, 0, nil, 0
+    local bestCommon, bestRank
+    local shortFallback, shortLen
     for _, w in ipairs(words) do
-        if #w >= minLen and not tried[w] and (syl == "" or w:find(syl, 1, true)) then
-            fcount = fcount + 1
-            if math.random(fcount) == 1 then fallback = w end       -- any-length reservoir
-            if #w >= bandLo and #w <= 9 then
-                count = count + 1
-                if math.random(count) == 1 then pick = w end        -- natural-length reservoir
+        if #w >= minLen and #w <= 14 and not tried[w] and (syl == "" or w:find(syl, 1, true)) then
+            local r = freqRank[w]
+            if r then
+                if not bestRank or r < bestRank then bestRank, bestCommon = r, w end
+            elseif not shortLen or #w < shortLen then
+                shortLen, shortFallback = #w, w
             end
         end
     end
-    return pick or fallback
+    return bestCommon or shortFallback
 end
 
 -- ---- remote + GameID ----
@@ -153,12 +170,6 @@ for _, kc in ipairs(Enum.KeyCode:GetEnumItems()) do
     local n = kc.Name
     if #n == 1 and n:match("%a") then KEY[n:lower()] = kc end
 end
-local ADJ = {   -- QWERTY neighbours -> believable typo
-    q = "wa", w = "qeas", e = "wsdr", r = "edft", t = "rfgy", y = "tghu", u = "yhji",
-    i = "ujko", o = "iklp", p = "ol", a = "qwsz", s = "awedxz", d = "serfcx", f = "drtgvc",
-    g = "ftyhbv", h = "gyujnb", j = "huikmn", k = "jiolm", l = "kop", z = "asx", x = "zsdc",
-    c = "xdfv", v = "cfgb", b = "vghn", n = "bhjm", m = "njk",
-}
 local function pressKey(name)
     local kc = (name == "bs" and Enum.KeyCode.Backspace)
         or (name == "enter" and Enum.KeyCode.Return) or KEY[name]
@@ -173,18 +184,7 @@ end
 local function submitLegit(word)
     word = word:lower()
     task.wait(randRange(S.startMin, S.startMax))      -- pause before starting to type
-    local misspellAt = (math.random() < 0.04) and math.random(1, #word) or -1   -- very rarely
     for i = 1, #word do
-        if i == misspellAt then
-            local nb = ADJ[word:sub(i, i)]
-            if nb and #nb > 0 then
-                local j = math.random(#nb)
-                pressKey(nb:sub(j, j))                    -- fat-finger a neighbour key
-                task.wait(0.11 + math.random() * 0.16)    -- notice it
-                pressKey("bs")                            -- then correct it
-                task.wait(0.06 + math.random() * 0.09)
-            end
-        end
         pressKey(word:sub(i, i))
         task.wait(randRange(S.keyMin, S.keyMax))      -- per-keystroke delay
     end
