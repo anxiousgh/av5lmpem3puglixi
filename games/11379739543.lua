@@ -168,18 +168,25 @@ local function rerollJiggle()
     jSpd = jSpdMin + math.random() * math.max(0, jSpdMax - jSpdMin)
     jPhase, jLast = 0, 0
 end
--- robust target velocity: replicated AssemblyLinearVelocity, or a position-delta if
--- that reads ~0 (other chars are CFrame-streamed, so physics velocity can be stale).
-local _tvLast, _tvPos, _tvT
+-- target velocity over an ~80ms WINDOW (capped). Other chars are CFrame-streamed in
+-- network steps, so a per-frame position delta spikes wildly (seen: ~98deg/frame swings
+-- in the predicted aim). Sampling over a window that spans several steps averages those
+-- out into a stable velocity; the cap stops a single replication jump flinging the aim.
+local _tvTgt, _tvPos, _tvT, _tvVel = nil, nil, 0, Vector3.zero
 local function targetVel(tgt)
-    local v = tgt.AssemblyLinearVelocity
     local now = os.clock()
-    if _tvLast == tgt and _tvT and now > _tvT + 1e-3 then
-        local dv = (tgt.Position - _tvPos) / (now - _tvT)
-        if dv.Magnitude > v.Magnitude then v = dv end
+    if tgt ~= _tvTgt then
+        _tvTgt, _tvPos, _tvT, _tvVel = tgt, tgt.Position, now, Vector3.zero
+        return _tvVel
     end
-    _tvLast, _tvPos, _tvT = tgt, tgt.Position, now
-    return v
+    local w = now - _tvT
+    if w >= 0.08 then
+        local v = (tgt.Position - _tvPos) / w
+        if v.Magnitude > 60 then v = v.Unit * 60 end
+        _tvVel = _tvVel:Lerp(v, 0.5)              -- soften the per-window step
+        _tvPos, _tvT = tgt.Position, now
+    end
+    return _tvVel
 end
 
 track(RunService.Heartbeat:Connect(function(dt)
@@ -206,11 +213,11 @@ track(RunService.Heartbeat:Connect(function(dt)
         local tgt = nearestEnemyHRP()
         if tgt then
             local pos = newCF.Position
-            -- lead by the target's velocity -- their replicated pos lags their real
-            -- (server) pos, so predicting forward lands the facing/pass correctly
-            local pred = tgt.Position + targetVel(tgt) * predictTime
-            -- body->target (flattened), used for look-away + jiggle axis
-            local dir = Vector3.new(pred.X - pos.X, 0, pred.Z - pos.Z)
+            local tp = tgt.Position
+            -- RAW (unpredicted) flattened direction to the target -- stable frame to
+            -- frame; used for look-away + the jiggle axis. Prediction is NOT used here:
+            -- it spikes (network-stepped positions) and made look-away jitter.
+            local dir = Vector3.new(tp.X - pos.X, 0, tp.Z - pos.Z)
             dir = (dir.Magnitude > 0.05) and dir.Unit or newCF.LookVector
 
             if jiggleOn then
@@ -222,8 +229,10 @@ track(RunService.Heartbeat:Connect(function(dt)
             end
 
             if aimHeld then
-                -- aim the BOMB at them: point from the held bomb handle (offset to the
-                -- hand), not the body centre, so the bomb itself lines up on the target
+                -- aim the BOMB at them: lead by the (windowed) target velocity since
+                -- their replicated pos lags, and point from the held bomb handle (offset
+                -- to the hand), not the body centre, so the bomb lines up on the target
+                local pred = tp + targetVel(tgt) * predictTime
                 local bomb = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Bomb")
                 local handle = bomb and bomb:FindFirstChild("BombHandle")
                 local from = (handle and handle.Position) or pos
