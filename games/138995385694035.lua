@@ -1760,6 +1760,195 @@ do
 end
 
 -- ============================================================
+--  7) Server Sniper  -- find which FFA/Anarchy server a player is in and join it.
+--
+--  The game's own FFA menu (CustomCoreGUI.FFA.ServerList) is populated from
+--  ReplicatedStorage.MainFunction:InvokeServer("GetFFAServerList"), which returns
+--  every listed public server as { JobId, PlayerIDs (FULL userId list), Players,
+--  Location, RegionName, ACCESS_CODE, ... }. We query that directly, scan
+--  PlayerIDs for the target's userId, and join with the game's own remote
+--  MainEvent:FireServer("JOIN_FFA_SERVER", JobId) -- the exact call the Join
+--  button fires. A Mode dropdown swaps to the Anarchy list/join remotes
+--  (GetAnarchyServerList / JOIN_ANARCHY_SERVER). Enter a username OR a userId;
+--  the avatar preview confirms who.
+-- ============================================================
+local SniperSub = MainPage:SubPage({ Name = "Server Sniper" })
+do
+    local HttpService = game:GetService("HttpService")
+    local reqfn = (syn and syn.request) or (http and http.request)
+        or (type(http_request) == "function" and http_request)
+        or (type(request) == "function" and request)
+        or (fluxus and fluxus.request)
+
+    local lastFoundJob = nil   -- JobId of the last successful find (for the Join button)
+    local scanning = false
+    local mode = "FFA"         -- "FFA" | "Anarchy" -- which server list to scan + which join remote
+    local function listRemote() return mode == "Anarchy" and "GetAnarchyServerList" or "GetFFAServerList" end
+    local function joinRemote() return mode == "Anarchy" and "JOIN_ANARCHY_SERVER" or "JOIN_FFA_SERVER" end
+
+    -- ---- UI ----
+    local Sec = SniperSub:Section({ Name = "Target", Side = 1 })
+
+    -- avatar preview: a raw ImageLabel dropped into the section's content frame
+    -- (nhack has no image element). rbxthumb renders natively -- no web request.
+    local avatarImg
+    pcall(function()
+        local content = Sec.Items["Content"].Instance
+        local holder = Instance.new("Frame")
+        holder.Name = "\0"
+        holder.BackgroundTransparency = 1
+        holder.Size = UDim2.new(1, 0, 0, 96)
+        holder.Parent = content
+        avatarImg = Instance.new("ImageLabel")
+        avatarImg.AnchorPoint = Vector2.new(0.5, 0)
+        avatarImg.Position = UDim2.new(0.5, 0, 0, 2)
+        avatarImg.Size = UDim2.fromOffset(90, 90)
+        avatarImg.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        avatarImg.BackgroundTransparency = 0.25
+        avatarImg.ScaleType = Enum.ScaleType.Fit
+        avatarImg.Image = ""
+        avatarImg.Parent = holder
+        local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 8); corner.Parent = avatarImg
+        local stroke = Instance.new("UIStroke"); stroke.Color = Color3.fromRGB(90, 90, 90); stroke.Transparency = 0.3; stroke.Parent = avatarImg
+    end)
+    local function setAvatar(uid)
+        if avatarImg then
+            avatarImg.Image = uid and ("rbxthumb://type=AvatarHeadShot&id=" .. uid .. "&w=150&h=150") or ""
+        end
+    end
+
+    local nameLbl = Sec:Label({ Name = "No target" })
+    local box = Sec:Textbox({ Name = "Username or UserID", Flag = "HC_SniperInput",
+        Placeholder = "e.g. builderman or 156" })
+    Sec:Dropdown({ Name = "Mode", Flag = "HC_SniperMode", Default = "FFA", Multi = false,
+        Items = { "FFA", "Anarchy" },
+        Callback = function(v) mode = (type(v) == "table" and v[1]) or v or "FFA" end })
+
+    local Sec2 = SniperSub:Section({ Name = "Result", Side = 2 })
+    local statusLbl  = Sec2:Label({ Name = "Idle" })
+    local serverLbl  = Sec2:Label({ Name = "Server: --" })
+    local playersLbl = Sec2:Label({ Name = "Players: --" })
+    local locLbl     = Sec2:Label({ Name = "Location: --" })
+
+    -- ---- http helpers (only used to resolve a username / show a name) ----
+    local function httpPost(url, tbl)
+        if not reqfn then return nil end
+        local ok, r = pcall(function()
+            return reqfn({ Url = url, Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(tbl) })
+        end)
+        if not ok or not r then return nil end
+        local body = r.Body or r.body
+        if not body then return nil end
+        local ok2, dec = pcall(function() return HttpService:JSONDecode(body) end)
+        return ok2 and dec or nil
+    end
+    local function httpGetJson(url)
+        local ok, body = pcall(function() return game:HttpGet(url) end)
+        if not ok then return nil end
+        local ok2, dec = pcall(function() return HttpService:JSONDecode(body) end)
+        return ok2 and dec or nil
+    end
+
+    -- resolve the textbox input to (userId, displayName, err). All-digits = a userId.
+    local function resolveTarget(input)
+        input = tostring(input or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if input == "" then return nil, nil, "enter a username or userId" end
+        if input:match("^%d+$") then
+            local uid = tonumber(input)
+            local d = httpGetJson("https://users.roblox.com/v1/users/" .. uid)
+            return uid, (d and (d.name or d.displayName)) or ("User " .. uid)
+        end
+        local d = httpPost("https://users.roblox.com/v1/usernames/users",
+            { usernames = { input }, excludeBannedUsers = false })
+        if d and d.data and d.data[1] and d.data[1].id then
+            return d.data[1].id, d.data[1].name
+        end
+        if not reqfn then return nil, nil, "no HTTP -- enter a numeric userId instead" end
+        return nil, nil, "no user named '" .. input .. "'"
+    end
+
+    -- scan the live server list (FFA or Anarchy) for a userId. Returns {serverNum, jobId, players, location, region} | nil, err
+    local function findServer(uid)
+        local ok, list = pcall(function() return ReplicatedStorage.MainFunction:InvokeServer(listRemote()) end)
+        if not ok or type(list) ~= "table" then return nil, "server list unavailable" end
+        local idx = 0
+        for _, s in pairs(list) do
+            idx = idx + 1
+            local ids = s.PlayerIDs
+            if type(ids) == "table" then
+                for _, id in pairs(ids) do
+                    if tonumber(id) == tonumber(uid) then
+                        return { serverNum = idx, jobId = s.JobId, players = s.Players,
+                                 location = s.Location, region = s.RegionName }
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function joinJob(jobId)
+        pcall(function() ReplicatedStorage.MainEvent:FireServer(joinRemote(), jobId) end)
+    end
+
+    local function clearResult()
+        lastFoundJob = nil
+        serverLbl:SetText("Server: --"); playersLbl:SetText("Players: --"); locLbl:SetText("Location: --")
+    end
+
+    -- full flow: resolve -> avatar -> scan -> (optionally) join
+    local function snipe(autoJoin)
+        if scanning then return end
+        scanning = true
+        clearResult()
+        statusLbl:SetText("Resolving...")
+        task.spawn(function()
+            local uid, name, err = resolveTarget(box.Value)
+            if not uid then
+                statusLbl:SetText("x " .. (err or "could not resolve"))
+                nameLbl:SetText("No target"); setAvatar(nil)
+                scanning = false; return
+            end
+            setAvatar(uid)
+            nameLbl:SetText((name or ("User " .. uid)) .. "  (" .. uid .. ")")
+            statusLbl:SetText("Scanning " .. mode .. " servers...")
+            local found, ferr = findServer(uid)
+            if not found then
+                if ferr then statusLbl:SetText("x " .. ferr)
+                elseif uid == LocalPlayer.UserId and mode == "FFA" then statusLbl:SetText("That's you -- you're already here.")
+                else statusLbl:SetText("Not in any listed " .. mode .. " server.") end
+                scanning = false; return
+            end
+            lastFoundJob = found.jobId
+            serverLbl:SetText("Server: #" .. found.serverNum)
+            playersLbl:SetText("Players: " .. tostring(found.players or "?"))
+            locLbl:SetText("Location: " .. tostring(found.location or "?") .. (found.region and (", " .. found.region) or ""))
+            if found.jobId == game.JobId then
+                statusLbl:SetText("Found -- they're in YOUR server!")
+            elseif autoJoin then
+                statusLbl:SetText("Found -- joining server #" .. found.serverNum .. "...")
+                task.wait(0.3)
+                joinJob(found.jobId)
+            else
+                statusLbl:SetText("Found in server #" .. found.serverNum .. " -- press Join.")
+            end
+            scanning = false
+        end)
+    end
+
+    Sec:Button({ Name = "Find server", Callback = function() snipe(false) end })
+    Sec:Button({ Name = "Find & Join", Callback = function() snipe(true) end })
+    Sec2:Button({ Name = "Join found server", Callback = function()
+        if not lastFoundJob then statusLbl:SetText("Nothing found yet -- Find first."); return end
+        if lastFoundJob == game.JobId then statusLbl:SetText("Already in that server."); return end
+        statusLbl:SetText("Joining...")
+        joinJob(lastFoundJob)
+    end })
+    Sec2:Label({ Name = "Only lists public servers (same as the in-game list)." })
+end
+
+-- ============================================================
 --  Universal base AFTER Main, so Main stays the first tab.
 -- ============================================================
 pcall(function() ctx.load("games/combat.lua")(ctx) end)
