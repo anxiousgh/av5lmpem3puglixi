@@ -1945,7 +1945,6 @@ do
         statusLbl:SetText("Joining...")
         joinJob(lastFoundJob)
     end })
-    Sec2:Label({ Name = "Only lists public servers (same as the in-game list)." })
 end
 
 -- ============================================================
