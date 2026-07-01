@@ -1580,9 +1580,20 @@ track(RunService.RenderStepped:Connect(function()
             elseif o == "Mouse" then from = UIS:GetMouseLocation()
             else from = Vector2.new(vs.X * 0.5, vs.Y) end
             rbLine.From = from
-            rbLine.To = Vector2.new(sp.X, sp.Y)
+            local to = Vector2.new(sp.X, sp.Y)
+            if sp.Z <= 0 then
+                -- target is BEHIND the camera: WorldToViewportPoint mirrors the point, so the
+                -- raw coord points the wrong way (old code just hid the line here). Reflect it
+                -- across screen centre and extend well past the edge so the line keeps pointing
+                -- toward the off-screen target instead of disappearing.
+                local center = Vector2.new(vs.X * 0.5, vs.Y * 0.5)
+                local d = center - to
+                if d.Magnitude < 1e-3 then d = Vector2.new(0, 1) end
+                to = center + d.Unit * (vs.Magnitude)
+            end
+            rbLine.To = to
             rbLine.Color = HC.lineColor
-            rbLine.Visible = sp.Z > 0
+            rbLine.Visible = true
         else
             rbLine.Visible = false
         end
