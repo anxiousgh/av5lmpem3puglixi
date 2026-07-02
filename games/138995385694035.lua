@@ -117,7 +117,7 @@ local HC = {
     -- HUD + kill fx
     radar = false, radarSize = 180, radarRange = 300,
     dmgNumbers = false, dmgNumScale = 1.0,
-    hitmarker = false, hitmarkerKill = true, hitmarkerSound = false, killSoundId = 83328286351922,
+    hitmarker = false, hitmarkerKill = true, hitmarkerSound = false, killSoundId = 102740241606246,
     killfeed = false, killfeedTime = 5,
     killEffect = false,
 }
