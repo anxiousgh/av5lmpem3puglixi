@@ -43,6 +43,7 @@ local function track(c) conns[#conns + 1] = c; return c end
 
 local S = {
     forceHit = false, autoShoot = false, aura = false, hitPart = "Head",
+    targetMode = "Closest to mouse",   -- how the aimbot/force-hit/auto-shoot picks among targets
     checkKnocked = true, checkRange = true, checkVisible = true,
     fastFire = false, fastFireCD = 0.06, autoReload = true, noSlowdown = false,
     outline = true, outlineColor = Color3.fromRGB(255, 60, 60),
@@ -108,6 +109,40 @@ local function nearestMousePlayer()
 end
 local function activePool() return S.aura and Players:GetPlayers() or nil end   -- nil => iterate `locked`
 Players.PlayerRemoving:Connect(function(p) locked[p] = nil end)
+
+-- Score a candidate by the chosen Target mode (LOWER = preferred). The Target keybind
+-- always LOCKS the player nearest the mouse; this only decides which locked/aura target
+-- the aimbot, force-hit and auto-shoot actually engage. Mirrors Hood Customs.
+local function scorePlayer(p)
+    if p == LP then return math.huge end
+    local c = aliveChar(p); if not c then return math.huge end
+    local mode = S.targetMode
+    if mode == "Lowest health" then
+        local hum = c:FindFirstChildOfClass("Humanoid")
+        return hum and hum.Health or math.huge
+    elseif mode == "Closest to me" then
+        local mc = myChar(); local mhrp = mc and mc:FindFirstChild("HumanoidRootPart")
+        local part = partOf(c)
+        return (mhrp and part) and (mhrp.Position - part.Position).Magnitude or math.huge
+    end
+    -- "Closest to mouse" (default): screen-space distance from the crosshair
+    local part = partOf(c); if not part then return math.huge end
+    local sp, on = Camera:WorldToViewportPoint(part.Position)
+    if not (on and sp.Z > 0) then return math.huge end
+    return (Vector2.new(sp.X, sp.Y) - UIS:GetMouseLocation()).Magnitude
+end
+-- best (lowest-score) player among the active set; extraOk(p) can add a per-candidate gate
+local function bestByMode(extraOk)
+    local best, bestScore
+    local function tryP(p)
+        if extraOk and not extraOk(p) then return end
+        local s = scorePlayer(p)
+        if s < (bestScore or math.huge) then bestScore, best = s, p end
+    end
+    local pool = activePool()
+    if pool then for _, p in ipairs(pool) do tryP(p) end else for p in pairs(locked) do tryP(p) end end
+    return best
+end
 
 -- ---- bullet-tracer + hit-sound FX (ported from Hood Customs) ----
 --  The forced/synth shots render no bullet visuals, so we fake them: a Beam glow
@@ -316,24 +351,8 @@ do
     end
     FX.playHitSound = playHitSound
 
-    -- current best target (nearest crosshair among the active set, alive only)
-    local function bestTargetPlayer()
-        local mouse = UIS:GetMouseLocation()
-        local best, bestD
-        local function tryP(p)
-            if p == LP then return end
-            local c = aliveChar(p); local part = c and partOf(c); if not part then return end
-            local sp, on = Camera:WorldToViewportPoint(part.Position)
-            if on and sp.Z > 0 then
-                local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
-                if not bestD or d < bestD then bestD, best = d, p end
-            end
-        end
-        local pool = activePool()
-        if pool then for _, p in ipairs(pool) do tryP(p) end else for p in pairs(locked) do tryP(p) end end
-        return best
-    end
-    FX.bestTargetPlayer = bestTargetPlayer
+    -- current best target by the chosen Target mode (used for tracer aim, hit sound, view target)
+    FX.bestTargetPlayer = bestByMode
 
     -- one real shot fired (Ammo dropped by 1): stamp time (for hit sound) + draw a tracer.
     function FX.onShot(origin, hitPos)
@@ -348,21 +367,10 @@ end
 local aimCache = { part = nil, pos = nil }
 track(RunService.RenderStepped:Connect(function()
     if not S.forceHit then aimCache.part, aimCache.pos = nil, nil; return end
-    local mouse = UIS:GetMouseLocation()
-    local bestPart, bestD
-    local function tryP(p)
-        if p == LP then return end
-        local c = aliveChar(p); local part = c and partOf(c); if not part then return end
-        local sp, on = Camera:WorldToViewportPoint(part.Position)
-        if on and sp.Z > 0 then
-            local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
-            if not bestD or d < bestD then bestD, bestPart = d, part end
-        end
-    end
-    local pool = activePool()
-    if pool then for _, p in ipairs(pool) do tryP(p) end else for p in pairs(locked) do tryP(p) end end
-    aimCache.part = bestPart
-    aimCache.pos  = bestPart and bestPart.Position or nil
+    local best = bestByMode()
+    local c = best and aliveChar(best); local part = c and partOf(c)
+    aimCache.part = part
+    aimCache.pos  = part and part.Position or nil
 end))
 
 -- Force Hit: replace GunHandler.Shoot so your manual shots (every pellet) land on the target
@@ -421,12 +429,11 @@ track(RunService.Heartbeat:Connect(function()
         local dist = (part.Position - myHRP.Position).Magnitude
         if S.checkRange and dist > gun.Range.Value then return end
         if S.checkVisible and not visibleTo(muzzle, part) then return end
-        return part, dist
+        return part
     end
-    local bestPart, bestD
-    local pool = activePool()
-    if pool then for _, p in ipairs(pool) do local pt, d = hittable(p); if pt and (not bestD or d < bestD) then bestPart, bestD = pt, d end end
-    else for p in pairs(locked) do local pt, d = hittable(p); if pt and (not bestD or d < bestD) then bestPart, bestD = pt, d end end end
+    -- pick by the chosen Target mode among the players that pass the checks
+    local best = bestByMode(function(p) return hittable(p) ~= nil end)
+    local bestPart = best and hittable(best)
     if bestPart then lastShot = tick(); fireAt(gun, bestPart) end
     -- NOTE: tracers/hit-sound are NOT triggered here. They fire off the gun's Ammo
     -- dropping by exactly 1 (see the Ammo watcher) so there's one tracer per real shot.
@@ -617,6 +624,9 @@ do
     TSec:Label({ Name = "Untarget all" }):Keybind({ Name = "Untarget", Flag = "ZeeUntargetKey", Mode = "Hold", Default = Enum.KeyCode.T,
         Callback = function(state) if state then for p in pairs(locked) do locked[p] = nil end end end })
     TSec:Button({ Name = "Clear all targets", Callback = function() for p in pairs(locked) do locked[p] = nil end end })
+    TSec:Dropdown({ Name = "Target mode", Flag = "ZeeTargetMode", Default = "Closest to mouse", Multi = false,
+        Items = { "Closest to mouse", "Closest to me", "Lowest health" },
+        Callback = function(v) S.targetMode = (type(v) == "table" and v[1]) or v or "Closest to mouse" end })
     TSec:Toggle({ Name = "View target (spectate current)", Flag = "ZeeViewTarget", Default = false,
         Callback = function(v) S.viewTarget = v; if not v and S._restoreView then S._restoreView() end end })
     local lockLbl = TSec:Label({ Name = "Locked: 0" })
