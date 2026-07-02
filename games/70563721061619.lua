@@ -205,7 +205,9 @@ do
         local core = Instance.new("Part")
         core.Anchored, core.CanCollide, core.CanTouch, core.CanQuery, core.CastShadow = true, false, false, false, false
         core.Material, core.Color = Enum.Material.Neon, col
-        local cth = math.max(th, 0.2)
+        -- tiny floor only to avoid a degenerate 0-size part; the screen-space black outline
+        -- keeps even a hairline core visible through walls, so thin is fine now.
+        local cth = math.max(th, 0.01)
         core.Size = Vector3.new(cth, cth, dist)
         core.CFrame = CFrame.lookAt((origin + hitPos) / 2, hitPos)
         core.Name = "\0_zt"; core.Parent = workspace
@@ -254,8 +256,13 @@ do
                 if not startPart.Parent then return end
                 for _, b in ipairs(beams) do if b.Parent then b.Transparency = NumberSequence.new(i / 8) end end
                 if core and core.Parent then core.Transparency = i / 8 end
+                -- keep the highlight SOLID for most of the lifetime, then fade only over the last
+                -- ~3 steps -- otherwise the beam's glow lingers and the highlight looks like it
+                -- died first. This way the highlight lasts at least as long as the tracer.
                 if coreHL and coreHL.Parent then pcall(function()
-                    coreHL.FillTransparency = 0.2 + (i / 8) * 0.8; coreHL.OutlineTransparency = (i / 8) ^ 2
+                    local f = math.max(0, (i - 5) / 3)   -- 0 until i=5, ramps 0->1 by i=8
+                    coreHL.FillTransparency = 0.2 + f * 0.8
+                    coreHL.OutlineTransparency = f
                 end) end
             end
             if startPart.Parent then startPart:Destroy() end
@@ -608,7 +615,7 @@ do
         Callback = function(v) S.btStyle = (type(v) == "table" and v[1]) or v or "Standard" end })
     BSec:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "ZeeBTColor", Default = S.btColor, Callback = function(c) S.btColor = c end })
     BSec:Toggle({ Name = "Through walls", Flag = "ZeeBTWalls", Default = true, Callback = function(v) S.btThroughWalls = v end })
-    BSec:Slider({ Name = "Size", Flag = "ZeeBTSize", Min = 0.02, Max = 1, Default = 0.12, Decimals = 2, Callback = function(v) S.btThickness = v end })
+    BSec:Slider({ Name = "Size", Flag = "ZeeBTSize", Min = 0.005, Max = 1, Default = 0.12, Decimals = 3, Callback = function(v) S.btThickness = v end })
     BSec:Slider({ Name = "Lifetime", Flag = "ZeeBTLife", Min = 0.1, Max = 3, Default = 0.2, Decimals = 2, Suffix = "s", Callback = function(v) S.btLifetime = v end })
 
     local HSec = XSub:Section({ Name = "Hit Sound", Side = 2 })
