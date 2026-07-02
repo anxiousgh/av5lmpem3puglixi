@@ -365,6 +365,10 @@ end
 -- and peeks around cover) and pick the CLOSEST valid one. nil = skip the shot (no error).
 -- HARD CAP 11: the server kicks for origin mismatch past this -- never exceed it.
 local WB_HARD_CAP = 11
+-- The server rejects a shot whose ORIGIN is farther than this from the hit ("range too long").
+-- The origin-spoof (<=WB_HARD_CAP studs) can therefore extend our effective reach: sit up to
+-- WB_HARD_CAP studs past this, and pull the spoofed origin back inside it. 2-stud safety margin.
+local MAX_SHOT_RANGE = 200
 
 -- How many distinct walls sit between two points along the shot ray. Marches the ray,
 -- accumulating each CanCollide part it enters into the ignore list so it steps through to
@@ -429,7 +433,10 @@ function wallbangOrigin(realOrigin, part)
         for _, p in ipairs(parts) do if p.CanCollide then return false end end
         return true
     end
-    if clearFrom(realOrigin) then return realOrigin end       -- already clear, no spoof
+    local function inRange(pos)            -- within the gun's max shot range (else "range too long")
+        return (targetPos - pos).Magnitude <= MAX_SHOT_RANGE - 2
+    end
+    if clearFrom(realOrigin) and inRange(realOrigin) then return realOrigin end   -- clear & in range, no spoof
     -- single-wall only: the server rejects an origin-spoof punched through 2+ walls, so if
     -- more than one wall separates us from the target, skip the shot instead of firing a
     -- wallbang that won't land (covers Force Hit + every TP-shoot wallbang path).
@@ -458,7 +465,7 @@ function wallbangOrigin(realOrigin, part)
     table.sort(cands, function(a, b) return a.Magnitude < b.Magnitude end)  -- closest first
     for _, off in ipairs(cands) do
         local origin = realOrigin + off
-        if inAir(origin) and clearFrom(origin) then return origin end       -- in open air AND shootable
+        if inAir(origin) and clearFrom(origin) and inRange(origin) then return origin end   -- open air, shootable, in range
     end
     return nil                                                -- nothing valid within budget
 end
@@ -895,9 +902,11 @@ track(RunService.Heartbeat:Connect(function()
     local lc = LocalPlayer.Character
     local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
     if not lhrp then return end
-    -- Wallbang on -> reach a little further (by the Max-origin-offset studs), since a wallbanged
-    -- shot spoofs the origin toward the target.
-    local maxDist = HC.autoShootDist + ((HC.wallbang and HC.wallbangOffset) or 0)
+    -- Effective reach is the gun's max shot range; Wallbang extends it by the origin-spoof budget
+    -- (fireShootAt pulls the shot origin back within range so it validates). Never exceed the reach
+    -- or the server errors "range too long"; also honor a tighter user cap.
+    local reach = MAX_SHOT_RANGE + ((HC.wallbang and math.min(HC.wallbangOffset, WB_HARD_CAP)) or 0)
+    local maxDist = math.min(HC.autoShootDist, reach)
     if (lhrp.Position - hrp.Position).Magnitude > maxDist then _asWasEngaged = false; return end
     if HC.autoShootVis and char:FindFirstChildOfClass("ForceField") then _asWasEngaged = false; return end
     -- React INSTANTLY the moment a target becomes engageable (new target, or one that just
@@ -1046,7 +1055,6 @@ end)
 --  pose) -> the shot origin == our real position and validates -> then we restore.
 -- ============================================================
 local TPS_GLUE_Y = 50
-local TPS_MAXRANGE_H = 200   -- Max Range: fixed apex height above the target (+ the wallbang budget)
 local TPS_WALL_RANGE = 90   -- wallbang: max distance to look for cover (prefer nearby buildings)
 local function tpsIgnoreList(targetModel)
     local ig = {}
@@ -1248,23 +1256,26 @@ local function tpShoot()
                 if not th then return end
                 local part = forceShotPart(plr.Character or hcModel(plr))
                 local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)   -- forced to 11 for this burst
-                local apex = th.Position + Vector3.new(0, TPS_MAXRANGE_H + budget, 0)
+                -- Sit near the gun's max range + the spoof budget (hard to shoot back). The origin
+                -- ALWAYS gets spoofed toward the target so origin->hit lands back inside MAX_SHOT_RANGE
+                -- (a raw shot from up here errors "range too long"). Keep a couple studs of headroom.
+                local apex = th.Position + Vector3.new(0, MAX_SHOT_RANGE + budget - 4, 0)
                 if not part then
                     cf, _tpsWallbang = CFrame.new(apex), false
                 elseif tpsLosClear(apex, part.Position, tmodel) then
-                    cf, _tpsWallbang = CFrame.new(apex), false        -- clear shot from way up high
+                    cf, _tpsWallbang = CFrame.new(apex), true         -- clear sky: spoof the far origin back into range
                 else
                     -- a roof/wall is overhead: TP just ABOVE it and wallbang straight down through it
                     local above = tpsAboveRoof(tmodel, th, apex.Y)
                     if above and wallbangOrigin(above, part) then
                         cf, _tpsWallbang = CFrame.new(above), true    -- punch the origin-spoof down through the roof
                     elseif above and tpsLosClear(above, part.Position, tmodel) then
-                        cf, _tpsWallbang = CFrame.new(above), false   -- (rare) clear from just above
+                        cf, _tpsWallbang = CFrame.new(above), true    -- clear from just above (spoof handles range)
                     else
                         -- roof too thick to wallbang from above -> drop UNDER it for a clear downward shot
-                        local under = tpsUnderRoof(tmodel, th, TPS_MAXRANGE_H)
+                        local under = tpsUnderRoof(tmodel, th, MAX_SHOT_RANGE + budget)
                         if under and tpsLosClear(under, part.Position, tmodel) then
-                            cf, _tpsWallbang = CFrame.new(under), false
+                            cf, _tpsWallbang = CFrame.new(under), true
                         elseif under and wallbangOrigin(under, part) then
                             cf, _tpsWallbang = CFrame.new(under), true
                         else
@@ -1296,7 +1307,7 @@ local function tpShoot()
             local fired, ftry = false, tick()
             while not fired and tick() - ftry < 0.4 do
                 fired = fire()
-                if not fired and _tpsWallbang then
+                if not fired and _tpsWallbang and method ~= "Max Range" then   -- Max Range stays up high; just retry from its spot
                     local th2 = plr.Character or hcModel(plr)
                     th2 = th2 and th2:FindFirstChild("HumanoidRootPart")
                     local part2 = forceShotPart(plr.Character or hcModel(plr))
