@@ -872,6 +872,51 @@ end
 -- ============================================================
 local HUD = {}
 do
+-- nhack theme plumbing: read the live Library palette (falls back to the preset) so
+-- the radar/killfeed panels look native next to the watermark/keybind widgets.
+local function themeC(key, fallback)
+    local t = Library and Library.Theme
+    local c = t and t[key]
+    return (typeof(c) == "Color3") and c or fallback
+end
+local function themeFont()
+    local f = Library and Library.Font
+    return (typeof(f) == "Font") and f or Font.fromEnum(Enum.Font.Code)
+end
+local function themeFontSize()
+    local n = Library and Library.FontSize
+    return (type(n) == "number") and n or 9
+end
+-- the watermark-style panel dressing: Miter outline stroke + the 1px accent
+-- gradient liner over a dark liner across the top
+local function nhackPanel(frame)
+    frame.BackgroundColor3 = themeC("Background", Color3.fromRGB(22, 22, 25))
+    frame.BorderSizePixel = 0
+    local s = Instance.new("UIStroke")
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    s.LineJoinMode = Enum.LineJoinMode.Miter
+    s.Color = themeC("Outline", Color3.fromRGB(62, 57, 77))
+    s.Parent = frame
+    local dark = Instance.new("Frame")
+    dark.BorderSizePixel = 0
+    dark.Position = UDim2.new(0, 0, 0, 1)
+    dark.Size = UDim2.new(1, 0, 0, 1)
+    dark.BackgroundColor3 = themeC("Light Border", Color3.fromRGB(16, 16, 19))
+    dark.Parent = frame
+    local acc = Instance.new("Frame")
+    acc.BorderSizePixel = 0
+    acc.Position = UDim2.new(0, 0, 0, 0)
+    acc.Size = UDim2.new(1, 0, 0, 1)
+    acc.BackgroundColor3 = themeC("Accent", Color3.fromRGB(200, 183, 247))
+    acc.Parent = frame
+    local grad = Instance.new("UIGradient")
+    grad.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.5, 1),
+        NumberSequenceKeypoint.new(1, 0) })
+    grad.Parent = acc
+    return s, dark, acc
+end
+
 -- kill effect: the body flashes solid neon and dissolves fast + high (spawnHitCham
 -- killMode) while a shockwave disc blows out along the ground with a light burst.
 local function spawnKillEffect(model)
@@ -933,13 +978,14 @@ local function spawnDmgNumber(model, dmg)
     bb.StudsOffset = Vector3.new(0, 0.4, 0)
     bb.Parent = holder
     local d = math.max(1, math.floor(dmg + 0.5))
-    local hot = math.clamp(d / 60, 0, 1)   -- 60+ damage = full red
+    local hot = math.clamp(d / 60, 0, 1)   -- 60+ damage = full "Risky" red
     local lbl = Instance.new("TextLabel")
     lbl.BackgroundTransparency, lbl.Size = 1, UDim2.fromScale(1, 1)
-    lbl.Font = Enum.Font.GothamBold
+    lbl.FontFace = themeFont()
     lbl.Text = "-" .. d
-    lbl.TextColor3 = Color3.fromRGB(255, 255 - math.floor(hot * 190), 90 - math.floor(hot * 70))
-    lbl.TextSize = (17 + hot * 15) * math.clamp(HC.dmgNumScale, 0.5, 2)
+    lbl.TextColor3 = themeC("Text", Color3.fromRGB(240, 240, 242)):Lerp(themeC("Risky", Color3.fromRGB(255, 70, 80)), hot)
+    lbl.TextSize = (16 + hot * 14) * math.clamp(HC.dmgNumScale, 0.5, 2)
+    lbl.TextStrokeColor3 = themeC("Border", Color3.fromRGB(10, 10, 12))
     lbl.TextStrokeTransparency = 0.15
     lbl.Parent = bb
     task.spawn(function()
@@ -971,7 +1017,7 @@ end
 local function flashHitmarker(kill)
     ensureHmGui()
     local mp = UIS:GetMouseLocation()
-    local col = kill and Color3.fromRGB(255, 45, 45) or Color3.new(1, 1, 1)
+    local col = kill and themeC("Risky", Color3.fromRGB(255, 70, 80)) or themeC("Text", Color3.fromRGB(240, 240, 242))
     local len, gap, thick = kill and 16 or 11, kill and 7 or 5, kill and 3 or 2
     local holder = Instance.new("Frame")
     holder.BackgroundTransparency = 1
@@ -1025,28 +1071,43 @@ local function ensureRadar()
     radarFrame = Instance.new("Frame")
     radarFrame.Size = UDim2.fromOffset(HC.radarSize, HC.radarSize)
     radarFrame.Position = UDim2.new(0, 20, 0.5, -HC.radarSize / 2)
-    radarFrame.BackgroundColor3, radarFrame.BackgroundTransparency = Color3.fromRGB(12, 12, 12), 0.3
-    radarFrame.BorderSizePixel = 0
+    radarFrame.BackgroundTransparency = 0.1
     radarFrame.Active = true
     radarFrame.Parent = radarGui
-    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 10); corner.Parent = radarFrame
-    local stroke = Instance.new("UIStroke"); stroke.Color, stroke.Transparency = Color3.fromRGB(85, 85, 85), 0.35; stroke.Parent = radarFrame
+    nhackPanel(radarFrame)
     for _, horiz in ipairs({ true, false }) do   -- faint crosshair through the middle
         local ln = Instance.new("Frame")
         ln.BorderSizePixel = 0
-        ln.BackgroundColor3, ln.BackgroundTransparency = Color3.fromRGB(120, 120, 120), 0.75
+        ln.BackgroundColor3 = themeC("Outline", Color3.fromRGB(62, 57, 77))
+        ln.BackgroundTransparency = 0.45
         ln.AnchorPoint = Vector2.new(0.5, 0.5)
         ln.Position = UDim2.fromScale(0.5, 0.5)
         ln.Size = horiz and UDim2.new(1, -8, 0, 1) or UDim2.new(0, 1, 1, -8)
         ln.Parent = radarFrame
     end
-    local me = Instance.new("Frame")   -- you, dead center
+    local title = Instance.new("TextLabel")   -- tiny corner tag, watermark-style
+    title.BackgroundTransparency = 1
+    title.FontFace, title.TextSize = themeFont(), themeFontSize()
+    title.TextColor3 = themeC("Inactive Text", Color3.fromRGB(131, 120, 162))
+    title.Text = "radar"
+    title.AnchorPoint = Vector2.new(0, 1)
+    title.Position = UDim2.new(0, 5, 1, -3)
+    title.Size = UDim2.fromOffset(0, 10)
+    title.AutomaticSize = Enum.AutomaticSize.X
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = radarFrame
+    local me = Instance.new("Frame")   -- you, dead center: accent square, nhack-indicator style
     me.AnchorPoint = Vector2.new(0.5, 0.5)
     me.Position = UDim2.fromScale(0.5, 0.5)
-    me.Size = UDim2.fromOffset(7, 7)
-    me.BackgroundColor3, me.BorderSizePixel = Color3.fromRGB(80, 200, 255), 0
+    me.Size = UDim2.fromOffset(6, 6)
+    me.BackgroundColor3 = themeC("Accent", Color3.fromRGB(200, 183, 247))
+    me.BorderSizePixel = 0
     me.Parent = radarFrame
-    local mc = Instance.new("UICorner"); mc.CornerRadius = UDim.new(1, 0); mc.Parent = me
+    local ms = Instance.new("UIStroke")
+    ms.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    ms.LineJoinMode = Enum.LineJoinMode.Miter
+    ms.Color = themeC("Border", Color3.fromRGB(10, 10, 12))
+    ms.Parent = me
     -- drag to move
     local dragging, dragStart, startPos = false, nil, nil
     radarFrame.InputBegan:Connect(function(io)
@@ -1088,11 +1149,15 @@ track(RunService.RenderStepped:Connect(function()
                 seen[plr] = true
                 local dot = radarDots[plr]
                 if not (dot and dot.Parent) then
-                    dot = Instance.new("Frame")
+                    dot = Instance.new("Frame")   -- square + miter border, like nhack's toggle indicator
                     dot.AnchorPoint = Vector2.new(0.5, 0.5)
-                    dot.Size = UDim2.fromOffset(6, 6)
+                    dot.Size = UDim2.fromOffset(5, 5)
                     dot.BorderSizePixel = 0
-                    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(1, 0); c.Parent = dot
+                    local ds = Instance.new("UIStroke")
+                    ds.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+                    ds.LineJoinMode = Enum.LineJoinMode.Miter
+                    ds.Color = themeC("Border", Color3.fromRGB(10, 10, 12))
+                    ds.Parent = dot
                     dot.Parent = radarFrame
                     radarDots[plr] = dot
                 end
@@ -1104,9 +1169,9 @@ track(RunService.RenderStepped:Connect(function()
                 local clamped = mag > edge
                 if clamped then x, y = x / mag * edge, y / mag * edge end
                 dot.Position = UDim2.fromOffset(half + x, half + y)
-                dot.BackgroundColor3 = (plr == tgt) and Color3.fromRGB(255, 60, 60)
-                    or (isKnocked(plr) and Color3.fromRGB(130, 130, 130))
-                    or Color3.new(1, 1, 1)
+                dot.BackgroundColor3 = (plr == tgt) and themeC("Risky", Color3.fromRGB(255, 70, 80))
+                    or (isKnocked(plr) and themeC("Inactive Text", Color3.fromRGB(131, 120, 162)))
+                    or themeC("Text", Color3.fromRGB(240, 240, 242))
                 dot.BackgroundTransparency = clamped and 0.55 or 0   -- rim = out of range, that way
             end
         end
@@ -1157,20 +1222,40 @@ local function killfeedAdd(plr, model)
     local e = Instance.new("Frame")
     e.LayoutOrder = _kfN
     e.AutomaticSize = Enum.AutomaticSize.X
-    e.Size = UDim2.fromOffset(0, 24)
-    e.BackgroundColor3, e.BackgroundTransparency = Color3.fromRGB(12, 12, 12), 1
-    e.BorderSizePixel = 0
+    e.Size = UDim2.fromOffset(0, 19)
+    e.BackgroundTransparency = 1
     e.Parent = kfList
-    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 6); corner.Parent = e
-    local stroke = Instance.new("UIStroke"); stroke.Color, stroke.Transparency = Color3.fromRGB(255, 60, 60), 1; stroke.Parent = e
-    local lbl = Instance.new("TextLabel")
-    lbl.AutomaticSize = Enum.AutomaticSize.X
-    lbl.Size = UDim2.new(0, 0, 1, 0)
-    lbl.BackgroundTransparency, lbl.TextTransparency = 1, 1
-    lbl.Font, lbl.TextSize = Enum.Font.GothamBold, 13
-    lbl.TextColor3 = Color3.new(1, 1, 1)
-    lbl.Text = ("  \u{1F480} %s  \u{00B7}  %s  \u{00B7}  %d studs  "):format(plr.Name, gun, dist)
-    lbl.Parent = e
+    local stroke, liner1, liner2 = nhackPanel(e)
+    stroke.Transparency = 1
+    liner1.BackgroundTransparency = 1
+    liner2.BackgroundTransparency = 1
+    local row = Instance.new("Frame")   -- label row (name accent-coloured => separate labels)
+    row.BackgroundTransparency = 1
+    row.AutomaticSize = Enum.AutomaticSize.X
+    row.Size = UDim2.new(0, 0, 1, 0)
+    row.Parent = e
+    local rl = Instance.new("UIListLayout")
+    rl.FillDirection = Enum.FillDirection.Horizontal
+    rl.VerticalAlignment = Enum.VerticalAlignment.Center
+    rl.SortOrder = Enum.SortOrder.LayoutOrder
+    rl.Parent = row
+    local labels = {}
+    local function seg(text, colorKey, fallback)
+        local lbl = Instance.new("TextLabel")
+        lbl.LayoutOrder = #labels + 1
+        lbl.AutomaticSize = Enum.AutomaticSize.X
+        lbl.Size = UDim2.new(0, 0, 1, 0)
+        lbl.BackgroundTransparency, lbl.TextTransparency = 1, 1
+        lbl.FontFace, lbl.TextSize = themeFont(), themeFontSize() + 1
+        lbl.TextColor3 = themeC(colorKey, fallback)
+        lbl.Text = text
+        lbl.Parent = row
+        labels[#labels + 1] = lbl
+        return lbl
+    end
+    seg("  x ", "Risky", Color3.fromRGB(255, 70, 80))
+    seg(plr.Name, "Accent", Color3.fromRGB(200, 183, 247))
+    seg(("  -  %s  -  %d studs  "):format(gun, dist), "Text", Color3.fromRGB(240, 240, 242))
     -- cap the feed at 6 entries: kill the oldest
     local entries = {}
     for _, c in ipairs(kfList:GetChildren()) do
@@ -1178,14 +1263,18 @@ local function killfeedAdd(plr, model)
     end
     table.sort(entries, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
     for i = 1, #entries - 6 do pcall(function() entries[i]:Destroy() end) end
+    local function setFade(a)   -- a: 0 = fully shown, 1 = invisible
+        e.BackgroundTransparency = 0.05 + a * 0.95
+        stroke.Transparency = a
+        liner1.BackgroundTransparency = a
+        liner2.BackgroundTransparency = a
+        for _, l in ipairs(labels) do l.TextTransparency = a end
+    end
     task.spawn(function()
         for i = 1, 6 do   -- fade in
             task.wait(0.03)
             if not e.Parent then return end
-            local a = 1 - i / 6
-            e.BackgroundTransparency = 0.25 + a * 0.75
-            stroke.Transparency = 0.45 + a * 0.55
-            lbl.TextTransparency = a
+            setFade(1 - i / 6)
         end
         local t0 = tick()
         while tick() - t0 < math.max(1, HC.killfeedTime) do
@@ -1195,10 +1284,7 @@ local function killfeedAdd(plr, model)
         for i = 1, 8 do   -- fade out
             task.wait(0.045)
             if not e.Parent then return end
-            local a = i / 8
-            e.BackgroundTransparency = 0.25 + a * 0.75
-            stroke.Transparency = 0.45 + a * 0.55
-            lbl.TextTransparency = a
+            setFade(i / 8)
         end
         pcall(function() e:Destroy() end)
     end)
