@@ -117,7 +117,7 @@ local HC = {
     -- HUD + kill fx
     radar = false, radarSize = 180, radarRange = 300,
     dmgNumbers = false, dmgNumScale = 1.0,
-    hitmarker = false, hitmarkerKill = true, hitmarkerSound = false,
+    hitmarker = false, hitmarkerKill = true, hitmarkerSound = false, killSoundId = 83328286351922,
     killfeed = false, killfeedTime = 5,
     killEffect = false,
 }
@@ -950,14 +950,13 @@ local function spawnKillEffect(model)
     end)
 end
 
--- kill sound: the hit-sound sample pitched way down = an unmistakable kill thunk
+-- kill sound: its own asset, at the hit-sound volume
 local function playKillSound()
-    if not HC.hitSoundId or HC.hitSoundId == 0 then return end
+    if not HC.killSoundId or HC.killSoundId == 0 then return end
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     local s = Instance.new("Sound")
-    s.SoundId = "rbxassetid://" .. tostring(HC.hitSoundId)
+    s.SoundId = "rbxassetid://" .. tostring(HC.killSoundId)
     s.Volume = math.clamp(HC.hitSoundVolume, 0, 5)
-    s.PlaybackSpeed = 0.55
     s.Parent = pg or Workspace
     s:Play()
     task.delay(5, function() if s and s.Parent then s:Destroy() end end)
