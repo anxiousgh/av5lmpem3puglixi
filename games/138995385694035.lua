@@ -1202,7 +1202,7 @@ local function tpShoot()
     if SHARED then SHARED.pause = true end
     local saved = (SHARED and SHARED.realCF) or lhrp.CFrame
     local savedWbOffset = HC.wallbangOffset
-    if method == "Wallbang" or method == "Max Range" then HC.wallbangOffset = 11 end   -- full origin-spoof budget (Max Range may wallbang a roof)
+    if method == "Wallbang" or method == "Max Range" then HC.wallbangOffset = 9 end   -- tighter origin-spoof budget for TP-shoot (stay well under the 11-stud mismatch cap)
     local function curHRP()
         local c = LocalPlayer.Character
         return c and c:FindFirstChild("HumanoidRootPart")
@@ -1255,7 +1255,7 @@ local function tpShoot()
                 th = th and th:FindFirstChild("HumanoidRootPart")
                 if not th then return end
                 local part = forceShotPart(plr.Character or hcModel(plr))
-                local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)   -- forced to 11 for this burst
+                local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)   -- forced to 9 for this burst
                 -- Sit near the gun's max range + the spoof budget (hard to shoot back). The origin
                 -- ALWAYS gets spoofed toward the target so origin->hit lands back inside MAX_SHOT_RANGE
                 -- (a raw shot from up here errors "range too long"). Keep a couple studs of headroom.
