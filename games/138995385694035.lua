@@ -8,6 +8,8 @@
 --    Checks   : visible(+origin)/knocked/grabbed/forcefield/loaded -- global
 --               target-validity filters respected by all targeting + shooting
 --    FX       : Hit Chams, Target Line, Tracers, Hit Sound, Target Outline
+--    HUD      : Radar, Damage Numbers, Hitmarker (+kill marker/sound), Killfeed,
+--               Kill Effect (neon dissolve + shockwave)
 --    Misc     : Anti-AFK badge, Force-AFK badge, Godmode
 --
 --  HC Shoot payload (witherhook, no-kick form -- origin==aim is a degenerate
@@ -112,6 +114,12 @@ local HC = {
     hitChams = false, hitChamsDuration = 2, hitChamsTransparency = 0.5,
     hitChamsMaterial = "ForceField", hitChamsColor = Color3.fromRGB(255, 60, 60),
     hitChamsOutline = false, hitChamsOutlineColor = Color3.fromRGB(255, 255, 255),
+    -- HUD + kill fx
+    radar = false, radarSize = 180, radarRange = 300,
+    dmgNumbers = false, dmgNumScale = 1.0,
+    hitmarker = false, hitmarkerKill = true, hitmarkerSound = false,
+    killfeed = false, killfeedTime = 5,
+    killEffect = false,
 }
 
 -- true while Auto stomp Targets is desynced onto a victim. While set, every other action
@@ -739,12 +747,15 @@ local function killCham(m)
     end
     pcall(function() m:Destroy() end)
 end
-local function spawnHitCham(model)
-    if not HC.hitChams or not model then return end
+-- killMode (kill effect): full-bright neon flash of the body that dissolves fast and high,
+-- regardless of the Hit Chams toggle -- gated by HC.killEffect at the call site.
+local function spawnHitCham(model, killMode)
+    if not model then return end
+    if not killMode and not HC.hitChams then return end
     local m = Instance.new("Model"); m.Name = "\0"
-    local mat = Enum.Material[HC.hitChamsMaterial] or Enum.Material.ForceField
-    local baseT = math.clamp(HC.hitChamsTransparency, 0, 1)
-    local popT = math.max(0, baseT - 0.35)   -- pop-in: brighter than configured, settles to baseT
+    local mat = killMode and Enum.Material.Neon or (Enum.Material[HC.hitChamsMaterial] or Enum.Material.ForceField)
+    local baseT = killMode and 0.05 or math.clamp(HC.hitChamsTransparency, 0, 1)
+    local popT = killMode and 0 or math.max(0, baseT - 0.35)   -- pop-in: brighter than configured, settles to baseT
     local parts, torso = {}, nil
     local function add(part)
         local ok, p = pcall(function() return part:Clone() end)
@@ -781,11 +792,11 @@ local function spawnHitCham(model)
     if #parts == 0 then m:Destroy(); return end
     torso = torso or parts[1]
     local hl
-    if HC.hitChamsOutline then
+    if HC.hitChamsOutline or killMode then
         hl = Instance.new("Highlight")
         hl.FillTransparency = 1
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.OutlineColor = HC.hitChamsOutlineColor
+        hl.OutlineColor = killMode and HC.hitChamsColor or HC.hitChamsOutlineColor
         hl.Adornee = m; hl.Parent = m
     end
     m.Parent = Workspace   -- client-created instance: stays local, never replicates
@@ -820,13 +831,13 @@ local function spawnHitCham(model)
             for _, p in ipairs(parts) do if p.Parent then p.Transparency = t end end
             if light and light.Parent then light.Brightness = 4 * (1 - a) end
         end
-        local hold, t0 = math.max(0.1, HC.hitChamsDuration), tick()
+        local hold, t0 = killMode and 0.05 or math.max(0.1, HC.hitChamsDuration), tick()
         while tick() - t0 < hold do
             task.wait(0.1)
             if not m.Parent then return end
         end
-        if shimmer then pcall(function() shimmer.Rate = 26 end) end   -- dissolve motes while fading
-        local FADE, RISE, STEPS = 0.7, 1.8, 21
+        if shimmer then pcall(function() shimmer.Rate = killMode and 60 or 26 end) end   -- dissolve motes while fading
+        local FADE, RISE, STEPS = killMode and 0.55 or 0.7, killMode and 3.5 or 1.8, 21
         local prev = 0
         for i = 1, STEPS do
             task.wait(FADE / STEPS)
@@ -850,6 +861,369 @@ end
 local function clearChams()
     for _, m in ipairs(_chams) do pcall(function() m:Destroy() end) end
     _chams = {}
+end
+
+-- ============================================================
+--  KILL FX + HUD  -- kill effect (neon dissolve + shockwave), damage numbers,
+--  screen hitmarker, kill sound, radar, killfeed. All client-side visuals
+--  driven off the same confirmed-hit watcher as the hit sound.
+--  Scoped in a do-block (ONE exported local) -- the main chunk was about to
+--  blow Luau's 200-locals-per-scope limit.
+-- ============================================================
+local HUD = {}
+do
+-- kill effect: the body flashes solid neon and dissolves fast + high (spawnHitCham
+-- killMode) while a shockwave disc blows out along the ground with a light burst.
+local function spawnKillEffect(model)
+    spawnHitCham(model, true)
+    local torso = model and (model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
+        or model:FindFirstChild("HumanoidRootPart"))
+    if not torso then return end
+    local col = HC.hitChamsColor
+    local ring = Instance.new("Part")
+    ring.Shape = Enum.PartType.Cylinder
+    ring.Anchored, ring.CanCollide, ring.CanTouch, ring.CanQuery, ring.CastShadow = true, false, false, false, false
+    ring.Material, ring.Color, ring.Transparency = Enum.Material.Neon, col, 0.15
+    ring.Size = Vector3.new(0.25, 2, 2)
+    -- cylinder axis is X; roll it 90 deg so the disc lies flat at their feet
+    ring.CFrame = CFrame.new(torso.Position - Vector3.new(0, 2, 0)) * CFrame.Angles(0, 0, math.rad(90))
+    ring.Name = "\0_fh"; ring.Parent = Workspace
+    local light = Instance.new("PointLight")
+    light.Color, light.Brightness, light.Range = col, 8, 18
+    light.Parent = ring
+    task.spawn(function()
+        for i = 1, 14 do
+            task.wait(0.5 / 14)
+            if not ring.Parent then return end
+            local a = i / 14
+            local d = 2 + a * 24
+            ring.Size = Vector3.new(0.25, d, d)
+            ring.Transparency = 0.15 + a * 0.85
+            light.Brightness = 8 * (1 - a)
+        end
+        if ring.Parent then ring:Destroy() end
+    end)
+end
+
+-- kill sound: the hit-sound sample pitched way down = an unmistakable kill thunk
+local function playKillSound()
+    if not HC.hitSoundId or HC.hitSoundId == 0 then return end
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local s = Instance.new("Sound")
+    s.SoundId = "rbxassetid://" .. tostring(HC.hitSoundId)
+    s.Volume = math.clamp(HC.hitSoundVolume, 0, 5)
+    s.PlaybackSpeed = 0.55
+    s.Parent = pg or Workspace
+    s:Play()
+    task.delay(5, function() if s and s.Parent then s:Destroy() end end)
+end
+
+-- ---- damage numbers: floating "-N" popping off the target on every confirmed hit ----
+local _dmgActive = 0
+local function spawnDmgNumber(model, dmg)
+    if _dmgActive >= 24 then return end
+    local ref = model and (model:FindFirstChild("Head") or model:FindFirstChild("UpperTorso")
+        or model:FindFirstChild("HumanoidRootPart"))
+    if not ref then return end
+    _dmgActive = _dmgActive + 1
+    local holder = invisAnchor(ref.Position
+        + Vector3.new(math.random(-12, 12) / 10, 1.2, math.random(-12, 12) / 10))
+    local bb = Instance.new("BillboardGui")
+    bb.AlwaysOnTop, bb.Size = true, UDim2.fromOffset(140, 44)
+    bb.StudsOffset = Vector3.new(0, 0.4, 0)
+    bb.Parent = holder
+    local d = math.max(1, math.floor(dmg + 0.5))
+    local hot = math.clamp(d / 60, 0, 1)   -- 60+ damage = full red
+    local lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency, lbl.Size = 1, UDim2.fromScale(1, 1)
+    lbl.Font = Enum.Font.GothamBold
+    lbl.Text = "-" .. d
+    lbl.TextColor3 = Color3.fromRGB(255, 255 - math.floor(hot * 190), 90 - math.floor(hot * 70))
+    lbl.TextSize = (17 + hot * 15) * math.clamp(HC.dmgNumScale, 0.5, 2)
+    lbl.TextStrokeTransparency = 0.15
+    lbl.Parent = bb
+    task.spawn(function()
+        for i = 1, 14 do   -- drift up, fade over the back half
+            task.wait(0.05)
+            if not holder.Parent then break end
+            local a = i / 14
+            bb.StudsOffset = Vector3.new(0, 0.4 + a * 2.4, 0)
+            lbl.TextTransparency = a < 0.5 and 0 or (a - 0.5) * 2
+            lbl.TextStrokeTransparency = 0.15 + a * 0.85
+        end
+        pcall(function() holder:Destroy() end)
+        _dmgActive = math.max(0, _dmgActive - 1)
+    end)
+end
+
+-- ---- hitmarker: 4-leg X flash at the mouse; kill = bigger, red, slower ----
+local hmGui
+local function destroyHmGui()
+    if hmGui then pcall(function() hmGui:Destroy() end); hmGui = nil end
+end
+local function ensureHmGui()
+    if hmGui and hmGui.Parent then return end
+    hmGui = Instance.new("ScreenGui")
+    hmGui.Name = "\0_hm"; hmGui.IgnoreGuiInset = true; hmGui.ResetOnSpawn = false
+    local ok = pcall(function() hmGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not ok or not hmGui.Parent then hmGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+end
+local function flashHitmarker(kill)
+    ensureHmGui()
+    local mp = UIS:GetMouseLocation()
+    local col = kill and Color3.fromRGB(255, 45, 45) or Color3.new(1, 1, 1)
+    local len, gap, thick = kill and 16 or 11, kill and 7 or 5, kill and 3 or 2
+    local holder = Instance.new("Frame")
+    holder.BackgroundTransparency = 1
+    holder.AnchorPoint = Vector2.new(0.5, 0.5)
+    holder.Position = UDim2.fromOffset(mp.X, mp.Y)
+    holder.Size = UDim2.fromOffset(2, 2)
+    holder.Parent = hmGui
+    local legs = {}
+    for _, dxy in ipairs({ {1,1}, {1,-1}, {-1,1}, {-1,-1} }) do
+        local dx, dy = dxy[1], dxy[2]
+        local ln = Instance.new("Frame")
+        ln.BorderSizePixel = 0; ln.BackgroundColor3 = col
+        ln.AnchorPoint = Vector2.new(0.5, 0.5)
+        ln.Size = UDim2.fromOffset(len, thick)
+        ln.Rotation = (dx * dy > 0) and 45 or -45
+        ln.Parent = holder
+        legs[#legs + 1] = { ln = ln, dx = dx, dy = dy }
+    end
+    task.spawn(function()
+        local life, steps = kill and 0.34 or 0.22, 10
+        for i = 0, steps do
+            local a = i / steps
+            local r = (gap + len / 2 + a * 7) / 1.41421   -- legs slide outward as they fade
+            for _, L in ipairs(legs) do
+                if L.ln.Parent then
+                    L.ln.Position = UDim2.fromOffset(L.dx * r, L.dy * r)
+                    L.ln.BackgroundTransparency = a * a
+                end
+            end
+            task.wait(life / steps)
+            if not holder.Parent then return end
+        end
+        pcall(function() holder:Destroy() end)
+    end)
+end
+
+-- ---- radar: camera-relative top-down dot map (white / red = target / grey = knocked) ----
+local radarGui, radarFrame, radarDots
+local function destroyRadar()
+    if radarGui then pcall(function() radarGui:Destroy() end) end
+    radarGui, radarFrame, radarDots = nil, nil, nil
+end
+local function ensureRadar()
+    if radarGui and radarGui.Parent and radarFrame and radarFrame.Parent then return end
+    destroyRadar()
+    radarDots = {}
+    radarGui = Instance.new("ScreenGui")
+    radarGui.Name = "\0_radar"; radarGui.IgnoreGuiInset = true; radarGui.ResetOnSpawn = false
+    local ok = pcall(function() radarGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not ok or not radarGui.Parent then radarGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    radarFrame = Instance.new("Frame")
+    radarFrame.Size = UDim2.fromOffset(HC.radarSize, HC.radarSize)
+    radarFrame.Position = UDim2.new(0, 20, 0.5, -HC.radarSize / 2)
+    radarFrame.BackgroundColor3, radarFrame.BackgroundTransparency = Color3.fromRGB(12, 12, 12), 0.3
+    radarFrame.BorderSizePixel = 0
+    radarFrame.Active = true
+    radarFrame.Parent = radarGui
+    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 10); corner.Parent = radarFrame
+    local stroke = Instance.new("UIStroke"); stroke.Color, stroke.Transparency = Color3.fromRGB(85, 85, 85), 0.35; stroke.Parent = radarFrame
+    for _, horiz in ipairs({ true, false }) do   -- faint crosshair through the middle
+        local ln = Instance.new("Frame")
+        ln.BorderSizePixel = 0
+        ln.BackgroundColor3, ln.BackgroundTransparency = Color3.fromRGB(120, 120, 120), 0.75
+        ln.AnchorPoint = Vector2.new(0.5, 0.5)
+        ln.Position = UDim2.fromScale(0.5, 0.5)
+        ln.Size = horiz and UDim2.new(1, -8, 0, 1) or UDim2.new(0, 1, 1, -8)
+        ln.Parent = radarFrame
+    end
+    local me = Instance.new("Frame")   -- you, dead center
+    me.AnchorPoint = Vector2.new(0.5, 0.5)
+    me.Position = UDim2.fromScale(0.5, 0.5)
+    me.Size = UDim2.fromOffset(7, 7)
+    me.BackgroundColor3, me.BorderSizePixel = Color3.fromRGB(80, 200, 255), 0
+    me.Parent = radarFrame
+    local mc = Instance.new("UICorner"); mc.CornerRadius = UDim.new(1, 0); mc.Parent = me
+    -- drag to move
+    local dragging, dragStart, startPos = false, nil, nil
+    radarFrame.InputBegan:Connect(function(io)
+        if io.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging, dragStart, startPos = true, io.Position, radarFrame.Position
+        end
+    end)
+    radarFrame.InputEnded:Connect(function(io)
+        if io.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    track(UIS.InputChanged:Connect(function(io)
+        if dragging and io.UserInputType == Enum.UserInputType.MouseMovement and radarFrame and radarFrame.Parent then
+            local delta = io.Position - dragStart
+            radarFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end))
+end
+track(RunService.RenderStepped:Connect(function()
+    if not HC.radar then if radarGui then destroyRadar() end return end
+    ensureRadar()
+    radarFrame.Size = UDim2.fromOffset(HC.radarSize, HC.radarSize)
+    local cam = Workspace.CurrentCamera
+    local myM = hcModel(LocalPlayer)
+    local myHrp = myM and myM:FindFirstChild("HumanoidRootPart")
+    if not (cam and myHrp) then return end
+    local look = cam.CFrame.LookVector
+    local fwd = Vector3.new(look.X, 0, look.Z)
+    fwd = fwd.Magnitude > 0.01 and fwd.Unit or Vector3.new(0, 0, -1)
+    local right = Vector3.new(-fwd.Z, 0, fwd.X)
+    local half = HC.radarSize / 2
+    local tgt = getTarget()
+    local seen = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local m = hcModel(plr)
+            local hrp = m and m:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                seen[plr] = true
+                local dot = radarDots[plr]
+                if not (dot and dot.Parent) then
+                    dot = Instance.new("Frame")
+                    dot.AnchorPoint = Vector2.new(0.5, 0.5)
+                    dot.Size = UDim2.fromOffset(6, 6)
+                    dot.BorderSizePixel = 0
+                    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(1, 0); c.Parent = dot
+                    dot.Parent = radarFrame
+                    radarDots[plr] = dot
+                end
+                local rel = hrp.Position - myHrp.Position
+                local x = rel:Dot(right) / HC.radarRange * half
+                local y = -rel:Dot(fwd) / HC.radarRange * half
+                local mag = math.sqrt(x * x + y * y)
+                local edge = half - 6
+                local clamped = mag > edge
+                if clamped then x, y = x / mag * edge, y / mag * edge end
+                dot.Position = UDim2.fromOffset(half + x, half + y)
+                dot.BackgroundColor3 = (plr == tgt) and Color3.fromRGB(255, 60, 60)
+                    or (isKnocked(plr) and Color3.fromRGB(130, 130, 130))
+                    or Color3.new(1, 1, 1)
+                dot.BackgroundTransparency = clamped and 0.55 or 0   -- rim = out of range, that way
+            end
+        end
+    end
+    for plr, dot in pairs(radarDots) do
+        if not seen[plr] then pcall(function() dot:Destroy() end); radarDots[plr] = nil end
+    end
+end))
+
+-- ---- killfeed: your kills, top-right -- weapon + name + distance ----
+local kfGui, kfList
+local _kfN = 0
+local function destroyKillfeed()
+    if kfGui then pcall(function() kfGui:Destroy() end); kfGui, kfList = nil, nil end
+end
+local function ensureKillfeed()
+    if kfGui and kfGui.Parent and kfList and kfList.Parent then return end
+    destroyKillfeed()
+    kfGui = Instance.new("ScreenGui")
+    kfGui.Name = "\0_kf"; kfGui.IgnoreGuiInset = true; kfGui.ResetOnSpawn = false
+    local ok = pcall(function() kfGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not ok or not kfGui.Parent then kfGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    kfList = Instance.new("Frame")
+    kfList.AnchorPoint = Vector2.new(1, 0)
+    kfList.Position = UDim2.new(1, -16, 0, 170)
+    kfList.Size = UDim2.fromOffset(280, 220)
+    kfList.BackgroundTransparency = 1
+    kfList.Parent = kfGui
+    local ll = Instance.new("UIListLayout")
+    ll.FillDirection = Enum.FillDirection.Vertical
+    ll.HorizontalAlignment = Enum.HorizontalAlignment.Right
+    ll.SortOrder = Enum.SortOrder.LayoutOrder
+    ll.Padding = UDim.new(0, 4)
+    ll.Parent = kfList
+end
+local function killfeedAdd(plr, model)
+    ensureKillfeed()
+    _kfN = _kfN + 1
+    local dist = 0
+    pcall(function()
+        local myM = hcModel(LocalPlayer)
+        local a = myM and myM:FindFirstChild("HumanoidRootPart")
+        local b = model and model:FindFirstChild("HumanoidRootPart")
+        if a and b then dist = math.floor((a.Position - b.Position).Magnitude + 0.5) end
+    end)
+    local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+    local gun = tool and tool.Name:gsub("[%[%]]", "") or "Fists"
+    local e = Instance.new("Frame")
+    e.LayoutOrder = _kfN
+    e.AutomaticSize = Enum.AutomaticSize.X
+    e.Size = UDim2.fromOffset(0, 24)
+    e.BackgroundColor3, e.BackgroundTransparency = Color3.fromRGB(12, 12, 12), 1
+    e.BorderSizePixel = 0
+    e.Parent = kfList
+    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 6); corner.Parent = e
+    local stroke = Instance.new("UIStroke"); stroke.Color, stroke.Transparency = Color3.fromRGB(255, 60, 60), 1; stroke.Parent = e
+    local lbl = Instance.new("TextLabel")
+    lbl.AutomaticSize = Enum.AutomaticSize.X
+    lbl.Size = UDim2.new(0, 0, 1, 0)
+    lbl.BackgroundTransparency, lbl.TextTransparency = 1, 1
+    lbl.Font, lbl.TextSize = Enum.Font.GothamBold, 13
+    lbl.TextColor3 = Color3.new(1, 1, 1)
+    lbl.Text = ("  \u{1F480} %s  \u{00B7}  %s  \u{00B7}  %d studs  "):format(plr.Name, gun, dist)
+    lbl.Parent = e
+    -- cap the feed at 6 entries: kill the oldest
+    local entries = {}
+    for _, c in ipairs(kfList:GetChildren()) do
+        if c:IsA("Frame") then entries[#entries + 1] = c end
+    end
+    table.sort(entries, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+    for i = 1, #entries - 6 do pcall(function() entries[i]:Destroy() end) end
+    task.spawn(function()
+        for i = 1, 6 do   -- fade in
+            task.wait(0.03)
+            if not e.Parent then return end
+            local a = 1 - i / 6
+            e.BackgroundTransparency = 0.25 + a * 0.75
+            stroke.Transparency = 0.45 + a * 0.55
+            lbl.TextTransparency = a
+        end
+        local t0 = tick()
+        while tick() - t0 < math.max(1, HC.killfeedTime) do
+            task.wait(0.1)
+            if not e.Parent then return end
+        end
+        for i = 1, 8 do   -- fade out
+            task.wait(0.045)
+            if not e.Parent then return end
+            local a = i / 8
+            e.BackgroundTransparency = 0.25 + a * 0.75
+            stroke.Transparency = 0.45 + a * 0.55
+            lbl.TextTransparency = a
+        end
+        pcall(function() e:Destroy() end)
+    end)
+end
+
+-- one confirmed hit (same trigger as the hit sound): fan out to every enabled FX
+local _killT = {}
+local function onConfirmedHit(plr, hum, oldHP, newHP)
+    local model = hum.Parent
+    local isKill = newHP <= 0.5 and (tick() - (_killT[plr] or 0) > 2)
+    if isKill then _killT[plr] = tick() end
+    if HC.dmgNumbers then pcall(spawnDmgNumber, model, oldHP - newHP) end
+    if HC.hitmarker then pcall(flashHitmarker, isKill and HC.hitmarkerKill) end
+    if isKill and HC.hitmarkerSound then pcall(playKillSound) end
+    if isKill and HC.killEffect then
+        pcall(spawnKillEffect, model)   -- kill effect replaces the plain hit cham on the killing blow
+    elseif HC.hitChams then
+        pcall(spawnHitCham, model)
+    end
+    if isKill and HC.killfeed then pcall(killfeedAdd, plr, model) end
+end
+HUD.onConfirmedHit = onConfirmedHit
+HUD.destroyRadar = destroyRadar
+HUD.destroyKillfeed = destroyKillfeed
+HUD.destroyHmGui = destroyHmGui
 end
 -- shared synth fire + FX. For shotguns, retarget to the torso (largest flat
 -- area, and head shots trip HC's per-shot damage cap) like witherhook.
@@ -971,7 +1345,7 @@ local function ensureHumWatch()
         _watchedHumLast = newHP
         if old and newHP < old - 0.01 and (tick() - _shotT < FX_WINDOW) then
             playHitSound()
-            spawnHitCham(hum.Parent)   -- independently gated: chams even with the sound muted
+            HUD.onConfirmedHit(plr, hum, old, newHP)   -- chams/kill fx/dmg numbers/hitmarker/killfeed, each own-gated
         end
     end)
 end
@@ -2130,7 +2504,45 @@ do
         Callback = function(c) HC.outlineColor = c end })
 end
 
--- 6) Misc
+-- 6) HUD  -- radar, damage numbers, hitmarker, killfeed, kill effect
+local HudSub = MainPage:SubPage({ Name = "HUD" })
+do
+    local Sec = HudSub:Section({ Name = "Radar", Side = 1 })
+    Sec:Toggle({ Name = "Radar", Flag = "HC_Radar", Default = false,
+        Callback = function(v) HC.radar = v end })
+    Sec:Slider({ Name = "Size", Flag = "HC_RadarSize", Min = 120, Max = 300, Default = 180, Decimals = 0, Suffix = " px",
+        Callback = function(v) HC.radarSize = v end })
+    Sec:Slider({ Name = "Range", Flag = "HC_RadarRange", Min = 50, Max = 1000, Default = 300, Decimals = 0, Suffix = " studs",
+        Callback = function(v) HC.radarRange = v end })
+    Sec:Label({ Name = "Drag the panel to move it." })
+
+    local Sec2 = HudSub:Section({ Name = "Damage Numbers", Side = 1 })
+    Sec2:Toggle({ Name = "Damage numbers", Flag = "HC_DmgNum", Default = false,
+        Callback = function(v) HC.dmgNumbers = v end })
+    Sec2:Slider({ Name = "Scale", Flag = "HC_DmgNumScale", Min = 0.5, Max = 2, Default = 1, Decimals = 2,
+        Callback = function(v) HC.dmgNumScale = v end })
+
+    local Sec3 = HudSub:Section({ Name = "Hitmarker", Side = 2 })
+    Sec3:Toggle({ Name = "Hitmarker", Flag = "HC_Hitmarker", Default = false,
+        Callback = function(v) HC.hitmarker = v end })
+    Sec3:Toggle({ Name = "Kill marker (red)", Flag = "HC_HitmarkerKill", Default = true,
+        Callback = function(v) HC.hitmarkerKill = v end })
+    Sec3:Toggle({ Name = "Kill sound", Flag = "HC_KillSound", Default = false,
+        Callback = function(v) HC.hitmarkerSound = v end })
+
+    local Sec4 = HudSub:Section({ Name = "Killfeed", Side = 2 })
+    Sec4:Toggle({ Name = "Killfeed", Flag = "HC_Killfeed", Default = false,
+        Callback = function(v) HC.killfeed = v end })
+    Sec4:Slider({ Name = "Entry lifetime", Flag = "HC_KillfeedTime", Min = 2, Max = 12, Default = 5, Decimals = 0, Suffix = " s",
+        Callback = function(v) HC.killfeedTime = v end })
+
+    local Sec5 = HudSub:Section({ Name = "Kill Effect", Side = 2 })
+    Sec5:Toggle({ Name = "Kill effect (dissolve + shockwave)", Flag = "HC_KillFx", Default = false,
+        Callback = function(v) HC.killEffect = v end })
+    Sec5:Label({ Name = "Uses the Hit Chams color." })
+end
+
+-- 7) Misc
 local MiscSub = MainPage:SubPage({ Name = "Misc" })
 do
     local Sec = MiscSub:Section({ Name = "AFK badge", Side = 1 })
@@ -2147,7 +2559,7 @@ do
 end
 
 -- ============================================================
---  7) Server Sniper  -- find which FFA/Anarchy server a player is in and join it.
+--  8) Server Sniper  -- find which FFA/Anarchy server a player is in and join it.
 --
 --  The game's own FFA menu (CustomCoreGUI.FFA.ServerList) is populated from
 --  ReplicatedStorage.MainFunction:InvokeServer("GetFFAServerList"), which returns
@@ -2354,8 +2766,12 @@ local function hcCleanup()
     HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
     HC.hitChams = false
+    HC.radar, HC.dmgNumbers, HC.hitmarker, HC.killfeed, HC.killEffect = false, false, false, false, false
     pcall(clearChams)
     pcall(clearTracerHL)
+    pcall(HUD.destroyRadar)
+    pcall(HUD.destroyKillfeed)
+    pcall(HUD.destroyHmGui)
     voidUnglue()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_STOMP_RESTORE") end)
     pcall(stompUnglue)         -- stop any stomp desync
