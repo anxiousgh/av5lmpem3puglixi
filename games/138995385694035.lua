@@ -977,15 +977,18 @@ local function spawnDmgNumber(model, dmg)
     bb.StudsOffset = Vector3.new(0, 0.4, 0)
     bb.Parent = holder
     local d = math.max(1, math.floor(dmg + 0.5))
-    local hot = math.clamp(d / 60, 0, 1)   -- 60+ damage = full "Risky" red
+    local hot = math.clamp(d / 60, 0, 1)   -- 60+ damage caps the (subtle) size growth
     local lbl = Instance.new("TextLabel")
     lbl.BackgroundTransparency, lbl.Size = 1, UDim2.fromScale(1, 1)
-    lbl.FontFace = themeFont()
+    -- thin: theme family at Light weight (fall back to the plain theme font)
+    local face = themeFont()
+    pcall(function() face = Font.new(face.Family, Enum.FontWeight.Light, Enum.FontStyle.Normal) end)
+    lbl.FontFace = face
     lbl.Text = "-" .. d
-    lbl.TextColor3 = themeC("Text", Color3.fromRGB(240, 240, 242)):Lerp(themeC("Risky", Color3.fromRGB(255, 70, 80)), hot)
-    lbl.TextSize = (16 + hot * 14) * math.clamp(HC.dmgNumScale, 0.5, 2)
+    lbl.TextColor3 = themeC("Text", Color3.fromRGB(240, 240, 242))   -- always white
+    lbl.TextSize = (11 + hot * 4) * math.clamp(HC.dmgNumScale, 0.5, 2)
     lbl.TextStrokeColor3 = themeC("Border", Color3.fromRGB(10, 10, 12))
-    lbl.TextStrokeTransparency = 0.15
+    lbl.TextStrokeTransparency = 0.5
     lbl.Parent = bb
     task.spawn(function()
         for i = 1, 14 do   -- drift up, fade over the back half
