@@ -94,7 +94,7 @@ local HC = {
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
-    tpShootMethod = "Wallbang", tpShootDist = 30,
+    tpShootMethod = "Wallbang", tpShootDist = 200,
     -- stomp / reload
     stomp = false, stompTargets = false, stompRadius = 5, stompTeleport = false,
     reload = false, reloadKey = Enum.KeyCode.R, reloadThreshold = 0,
@@ -839,6 +839,8 @@ end))
 --  hittable. Independent of Force Hit (which only de-spreads).
 -- ============================================================
 local _asLast = 0
+local _asLastTarget, _asWasEngaged = nil, false
+local AS_FRESH_GAP = 0.05   -- minimum gap for a FRESH engagement (new target / just entered range)
 local function tryEquipNamed(name)
     if name == "" then return end
     local lc = LocalPlayer.Character
@@ -885,17 +887,26 @@ end)
 -- main shoot loop (auto shoot + voidshoot)
 track(RunService.Heartbeat:Connect(function()
     if _stomping or _tpsActive or not (HC.autoShoot or HC.voidshoot) then return end
-    if tick() - _asLast < HC.autoShootCooldown then return end
     local plr = getTarget()
-    if not plr then voidUnglue(); return end
+    if not plr then voidUnglue(); _asWasEngaged, _asLastTarget = false, nil; return end
     local char = plr.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
     local lc = LocalPlayer.Character
     local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
     if not lhrp then return end
-    if (lhrp.Position - hrp.Position).Magnitude > HC.autoShootDist then return end
-    if HC.autoShootVis and char:FindFirstChildOfClass("ForceField") then return end
+    -- Wallbang on -> reach a little further (by the Max-origin-offset studs), since a wallbanged
+    -- shot spoofs the origin toward the target.
+    local maxDist = HC.autoShootDist + ((HC.wallbang and HC.wallbangOffset) or 0)
+    if (lhrp.Position - hrp.Position).Magnitude > maxDist then _asWasEngaged = false; return end
+    if HC.autoShootVis and char:FindFirstChildOfClass("ForceField") then _asWasEngaged = false; return end
+    -- React INSTANTLY the moment a target becomes engageable (new target, or one that just
+    -- rushed/teleported into range) so we get the first shot off; only then fall back to the
+    -- configured cooldown for sustained fire. A tiny floor prevents same-burst double-firing.
+    local fresh = (plr ~= _asLastTarget) or (not _asWasEngaged)
+    local gap = fresh and math.min(AS_FRESH_GAP, HC.autoShootCooldown) or HC.autoShootCooldown
+    if tick() - _asLast < gap then return end
+    _asLastTarget, _asWasEngaged = plr, true
     if HC.autoEquip and HC.autoEquipTool ~= "" then tryEquipNamed(HC.autoEquipTool) end
     local part = forceShotPart(char); if not part then return end
     _asLast = tick()
@@ -1027,8 +1038,7 @@ end)
 --  TP SHOOT  (keybind: teleport to an advantage on the target, shoot, teleport back)
 --    Wallbang -- TP to cover the target can't shoot through; we still hit via the
 --                origin-spoof (wallbangOrigin), so "they can't hit me, I can hit him".
---    Above    -- TP straight above the target.
---    Below    -- TP straight below the target.
+--    Max Range-- TP straight up high above the target (default 200 studs) and shoot down.
 --    Glue     -- glue 50 studs above the target: settle 0.2s, shoot, linger ~1s, return.
 --    Inside   -- like Glue but glued right inside the target.
 --  We actually move (the CFrame is re-asserted each Heartbeat so the server registers the
@@ -1100,6 +1110,37 @@ local function tpsBelowStreet(targetModel, thrp)
     local top = (down and down.Position) or (thrp.Position - Vector3.new(0, 3, 0))
     return CFrame.new(top - Vector3.new(0, 4.5, 0))   -- fully under the road so we're never visible (velocity is zeroed so we don't float up)
 end
+-- clear line of fire from `from` to `toPos`? ignores our body + every OTHER player (so a
+-- teammate in the way doesn't count) but KEEPS the target model, so "first hit is the target"
+-- still reads as clear. nil hit (open air) also counts as clear.
+local function tpsLosClear(from, toPos, targetModel)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local ig = {}
+    local lc = LocalPlayer.Character; if lc then ig[#ig + 1] = lc end
+    local x = Workspace:FindFirstChild("Ignored"); if x then ig[#ig + 1] = x end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            local m = hcModel(p); if m and m ~= targetModel then ig[#ig + 1] = m end
+        end
+    end
+    params.FilterDescendantsInstances = ig
+    local res = Workspace:Raycast(from, toPos - from, params)
+    if not res then return true end
+    return targetModel ~= nil and res.Instance:IsDescendantOf(targetModel)
+end
+-- Max Range helper: a roof/wall sits between the target and the apex above them. Cast straight
+-- UP from the target through the obstruction and drop us just under its underside (directly over
+-- the target) so the shot straight down is clear. Returns nil if nothing overhead within `height`.
+local function tpsUnderRoof(targetModel, thrp, height)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = tpsIgnoreList(targetModel)   -- ignores target + all players + us + Ignored
+    local res = Workspace:Raycast(thrp.Position + Vector3.new(0, 2, 0), Vector3.new(0, height, 0), params)
+    if not res then return nil end
+    local y = math.max(res.Position.Y - 3, thrp.Position.Y + 3)      -- 3 studs under the roof, but never below the target
+    return Vector3.new(thrp.Position.X, y, thrp.Position.Z)
+end
 -- closest LOCKED target that passes the checks (minus visible). Ranked by world distance,
 -- NOT the crosshair -- so TP-shoot works on a locked target without looking at them.
 local function tpsPickTarget()
@@ -1139,7 +1180,7 @@ local function tpShoot()
     if SHARED then SHARED.pause = true end
     local saved = (SHARED and SHARED.realCF) or lhrp.CFrame
     local savedWbOffset = HC.wallbangOffset
-    if method == "Wallbang" then HC.wallbangOffset = 11 end   -- use the full origin-spoof budget
+    if method == "Wallbang" or method == "Max Range" then HC.wallbangOffset = 11 end   -- full origin-spoof budget (Max Range may wallbang a roof)
     local function curHRP()
         local c = LocalPlayer.Character
         return c and c:FindFirstChild("HumanoidRootPart")
@@ -1186,10 +1227,30 @@ local function tpShoot()
                 return
             end
             local cf
-            if method == "Above" then
-                cf = CFrame.new(thrp.Position + Vector3.new(0, HC.tpShootDist, 0))
-            elseif method == "Below" then
-                cf = CFrame.new(thrp.Position - Vector3.new(0, HC.tpShootDist, 0))
+            if method == "Max Range" then
+                for _ = 1, 3 do RunService.Heartbeat:Wait() end   -- let the gun finish equipping
+                local th = plr.Character or hcModel(plr)
+                th = th and th:FindFirstChild("HumanoidRootPart")
+                if not th then return end
+                local part = forceShotPart(plr.Character or hcModel(plr))
+                local apex = th.Position + Vector3.new(0, HC.tpShootDist, 0)
+                if not part then
+                    cf, _tpsWallbang = CFrame.new(apex), false
+                elseif tpsLosClear(apex, part.Position, tmodel) then
+                    cf, _tpsWallbang = CFrame.new(apex), false        -- clear shot from way up high
+                elseif wallbangOrigin(apex, part) then
+                    cf, _tpsWallbang = CFrame.new(apex), true         -- thin wall overhead -> wallbang from up high
+                else
+                    -- a roof/wall sits between us and them: drop right under it (over the target)
+                    local spot = tpsUnderRoof(tmodel, th, HC.tpShootDist)
+                    if spot and tpsLosClear(spot, part.Position, tmodel) then
+                        cf, _tpsWallbang = CFrame.new(spot), false    -- clear shot from under the roof
+                    elseif spot and wallbangOrigin(spot, part) then
+                        cf, _tpsWallbang = CFrame.new(spot), true     -- wall's wallbangable from under it
+                    else
+                        cf, _tpsWallbang = CFrame.new(th.Position), false   -- last resort: point-blank inside
+                    end
+                end
             else                                    -- Wallbang
                 for _ = 1, 3 do RunService.Heartbeat:Wait() end   -- let the gun finish equipping
                 local th = plr.Character or hcModel(plr)
@@ -1717,9 +1778,9 @@ do
 
     local Sec3 = RageSub:Section({ Name = "TP Shoot", Side = 2 })
     Sec3:Dropdown({ Name = "Method", Flag = "HC_TpShootMethod", Default = "Wallbang", Multi = false,
-        Items = { "Wallbang", "Above", "Below", "Glue", "Inside" },
+        Items = { "Wallbang", "Max Range", "Glue", "Inside" },
         Callback = function(v) HC.tpShootMethod = (type(v) == "table" and v[1]) or v or "Wallbang" end })
-    Sec3:Slider({ Name = "Above/Below distance", Flag = "HC_TpShootDist", Min = 3, Max = 100, Default = 30, Decimals = 0, Suffix = " studs",
+    Sec3:Slider({ Name = "Max Range height", Flag = "HC_TpShootDist", Min = 50, Max = 500, Default = 200, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.tpShootDist = v end })
     Sec3:Label({ Name = "TP shoot" }):Keybind({
         Name = "TP shoot", Flag = "HC_TpShootKey", Mode = "Hold", Default = Enum.KeyCode.F,
