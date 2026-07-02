@@ -147,12 +147,30 @@ end
 -- ---- bullet-tracer + hit-sound FX (ported from Hood Customs) ----
 --  The forced/synth shots render no bullet visuals, so we fake them: a Beam glow
 --  from the muzzle that travels to the hit + an impact flash/light/particle burst.
---  Optional "through walls" adds a solid neon core with an AlwaysOnTop Highlight.
+--  A neon core under ONE shared Highlight (black outline) gives the through-walls line.
 do
     local _active, MAX = 0, 12
     local _lastAt, MIN_GAP = 0, 0.04
     local FX_WINDOW = 0.6
     local _shotT = 0
+
+    -- ONE shared, persistent Highlight for every tracer core. Per-tracer highlights hit
+    -- Roblox's simultaneous-Highlight cap during rapid fire (older ones stop rendering while
+    -- their beams live on) AND fading a highlight looks like it "dies" before the glowing beam.
+    -- Instead: all cores live under one Model highlighted once; a core is un-highlighted only
+    -- when it's DESTROYED -- at the exact instant its beam is destroyed. No highlight fade.
+    local hlModel, sharedHL
+    local function ensureHL()
+        if hlModel and hlModel.Parent and sharedHL and sharedHL.Parent then return end
+        if hlModel then pcall(function() hlModel:Destroy() end) end
+        hlModel = Instance.new("Model"); hlModel.Name = "\0_zt"; hlModel.Parent = workspace
+        sharedHL = Instance.new("Highlight")
+        sharedHL.FillTransparency = 0.2
+        sharedHL.OutlineColor, sharedHL.OutlineTransparency = Color3.new(0, 0, 0), 0   -- black outline
+        pcall(function() sharedHL.Adornee = hlModel end)
+        sharedHL.Parent = hlModel
+    end
+    FX.clearHL = function() if hlModel then pcall(function() hlModel:Destroy() end); hlModel = nil; sharedHL = nil end end
 
     -- muzzle = the gun attachment furthest from the body (barrel tip); falls back to
     -- the same handle offset the real shots use, then the head.
@@ -236,23 +254,22 @@ do
             mkBeam(th * 1.1, 0.02, true, whiteHot) -- white-hot textured core
         end
 
-        -- ALWAYS add a solid neon core with a highlighted (+ black outline) silhouette. The
-        -- through-walls toggle just picks the Highlight DepthMode: AlwaysOnTop (seen through
-        -- geometry) vs Occluded (hidden behind walls). The screen-space black outline keeps
-        -- even a hairline core readable, so it can be as thin as the Size slider allows.
+        -- Solid neon core = the highlighted silhouette (black outline). It's parented under the
+        -- ONE shared Highlight model, so no per-tracer Highlight and no cap issues. The through-
+        -- walls toggle + tracer color are applied to the shared Highlight. The screen-space black
+        -- outline keeps even a hairline core readable, so it can be as thin as the Size slider.
+        ensureHL()
+        pcall(function()
+            sharedHL.DepthMode = S.btThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+            sharedHL.FillColor = col
+        end)
         local core = Instance.new("Part")
         core.Anchored, core.CanCollide, core.CanTouch, core.CanQuery, core.CastShadow = true, false, false, false, false
         core.Material, core.Color = Enum.Material.Neon, col
         local cth = math.max(th, 0.01)
         core.Size = Vector3.new(cth, cth, dist)
         core.CFrame = CFrame.lookAt((origin + hitPos) / 2, hitPos)
-        core.Name = "\0_zt"; core.Parent = workspace
-        local coreHL = Instance.new("Highlight")
-        coreHL.DepthMode = S.btThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
-        coreHL.FillColor, coreHL.FillTransparency = col, 0.2
-        coreHL.OutlineColor, coreHL.OutlineTransparency = Color3.new(0, 0, 0), 0   -- black outline
-        pcall(function() coreHL.Adornee = core end)
-        coreHL.Parent = core
+        core.Name = "\0_zt"; core.Parent = (hlModel and hlModel.Parent) and hlModel or workspace
 
         -- muzzle flash at the origin + a spark trail that follows the bullet head
         pcall(function()
@@ -317,20 +334,15 @@ do
                     if flash.Parent then flash:Destroy() end
                 end)
             end
-            -- Fade beams + highlight IN LOCKSTEP so they vanish together, then destroy everything
-            -- at the same instant. The core part's Transparency is only nudged (never near 1):
-            -- a nearly-invisible adornee stops its Highlight from rendering, which is what made
-            -- the highlight look like it died before the beam.
+            -- Fade only the BEAMS over the lifetime. The core + its (shared) highlight are kept
+            -- fully solid the whole time and only vanish when the core is DESTROYED below -- at
+            -- the exact instant the beams are destroyed. So the highlight lasts the full tracer
+            -- lifetime and disappears WITH the beam, never before it.
             for i = 1, 8 do
                 task.wait(S.btLifetime / 8)
                 if not startPart.Parent then break end
                 local a = i / 8
                 for _, b in ipairs(beams) do if b.Parent then b.Transparency = NumberSequence.new(a) end end
-                if core.Parent then core.Transparency = math.min(0.5, a) end
-                if coreHL.Parent then pcall(function()
-                    coreHL.FillTransparency = 0.2 + a * 0.8
-                    coreHL.OutlineTransparency = a
-                end) end
             end
             pcall(function() if startPart.Parent then startPart:Destroy() end end)
             pcall(function() if endPart.Parent then endPart:Destroy() end end)
@@ -607,6 +619,7 @@ do
         if _wAmmoConn then pcall(function() _wAmmoConn:Disconnect() end) end
         if _wHumConn then pcall(function() _wHumConn:Disconnect() end) end
         restoreView()
+        if FX.clearHL then pcall(FX.clearHL) end   -- shared highlight model + any cores under it
         for _, o in ipairs(workspace:GetChildren()) do
             if o.Name == "\0_zt" then pcall(function() o:Destroy() end) end
         end
