@@ -375,44 +375,6 @@ local WB_HARD_CAP = 11
 -- WB_HARD_CAP studs past this, and pull the spoofed origin back inside it. 2-stud safety margin.
 local MAX_SHOT_RANGE = 200
 
--- How many distinct walls sit between two points along the shot ray. Marches the ray,
--- accumulating each CanCollide part it enters into the ignore list so it steps through to
--- the next one. Entry faces within MERGE_GAP studs collapse into ONE wall (a thick or
--- multi-part single wall stays 1); a real air gap between solids counts as another wall.
--- The server rejects shots spoofed through 2+ walls, so we use this to keep wallbangs
--- single-wall only. ignoreList must exclude our char, the Ignored folder and the target.
-local WB_MERGE_GAP = 4
-local function wallsBetween(from, targetPos, ignoreList)
-    local delta = targetPos - from
-    local dist = delta.Magnitude
-    if dist < 0.1 then return 0 end
-    local dir = delta.Unit
-    local rp = RaycastParams.new()
-    rp.FilterType = Enum.RaycastFilterType.Exclude
-    local ig = {}
-    if ignoreList then for _, v in ipairs(ignoreList) do ig[#ig + 1] = v end end
-    rp.FilterDescendantsInstances = ig
-    local faces = {}
-    local pos = from
-    for _ = 1, 24 do
-        local remaining = dist - (pos - from).Magnitude - 0.05
-        if remaining <= 0 then break end
-        local res = Workspace:Raycast(pos, dir * remaining, rp)
-        if not res then break end
-        if res.Instance.CanCollide then faces[#faces + 1] = (res.Position - from).Magnitude end
-        ig[#ig + 1] = res.Instance
-        rp.FilterDescendantsInstances = ig    -- reassign: the params copies the array, so mutating ig alone won't take
-        pos = res.Position + dir * 0.05
-    end
-    if #faces == 0 then return 0 end
-    table.sort(faces)
-    local walls = 1
-    for i = 2, #faces do
-        if faces[i] - faces[i - 1] > WB_MERGE_GAP then walls = walls + 1 end
-    end
-    return walls
-end
-
 function wallbangOrigin(realOrigin, part)
     local targetPos = part.Position
     local toT = targetPos - realOrigin
@@ -442,10 +404,9 @@ function wallbangOrigin(realOrigin, part)
         return (targetPos - pos).Magnitude <= MAX_SHOT_RANGE - 2
     end
     if clearFrom(realOrigin) and inRange(realOrigin) then return realOrigin end   -- clear & in range, no spoof
-    -- single-wall only: the server rejects an origin-spoof punched through 2+ walls, so if
-    -- more than one wall separates us from the target, skip the shot instead of firing a
-    -- wallbang that won't land (covers Force Hit + every TP-shoot wallbang path).
-    if wallsBetween(realOrigin, targetPos, ignore) > 1 then return nil end
+    -- No wall-count limit: any number of walls is fine as long as SOME candidate origin
+    -- within the stud budget sits in open air with clear LoS to the target -- those are
+    -- the checks the server actually runs on the spoofed origin.
     local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)
     -- basis for sideways peeks
     local up0 = math.abs(fwd.Y) > 0.99 and Vector3.new(1, 0, 0) or Vector3.new(0, 1, 0)
