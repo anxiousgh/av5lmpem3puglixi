@@ -7,8 +7,8 @@
 --    Knife Bot: knife aura (attach/orbit) + auto-equip knife + knife reach (+visualizer)
 --    Checks   : visible(+origin)/knocked/grabbed/forcefield/loaded -- global
 --               target-validity filters respected by all targeting + shooting
+--    FX       : Hit Chams, Target Line, Tracers, Hit Sound, Target Outline
 --    Misc     : Anti-AFK badge, Force-AFK badge, Godmode
---    Util     : Target Line, Target Outline
 --
 --  HC Shoot payload (witherhook, no-kick form -- origin==aim is a degenerate
 --  ray so HC SKIPS its spread PRNG check; a real aim makes it kick for
@@ -107,6 +107,10 @@ local HC = {
     -- visuals
     targetLine = false, lineOrigin = "Bottom", lineColor = Color3.fromRGB(255, 60, 60),
     targetOutline = false, outlineColor = Color3.fromRGB(255, 80, 80),
+    -- hit chams (frozen ghost clone of the target on every confirmed hit)
+    hitChams = false, hitChamsDuration = 2, hitChamsTransparency = 0.5,
+    hitChamsMaterial = "ForceField", hitChamsColor = Color3.fromRGB(255, 60, 60),
+    hitChamsOutline = false, hitChamsOutlineColor = Color3.fromRGB(255, 255, 255),
 }
 
 -- true while Auto stomp Targets is desynced onto a victim. While set, every other action
@@ -660,6 +664,85 @@ local function playHitSound()
     s:Play()
     task.delay(5, function() if s and s.Parent then s:Destroy() end end)
 end
+-- ============================================================
+--  HIT CHAMS  -- on every confirmed hit (same trigger as the hit sound), freeze
+--  a ghost clone of the target where they stood, then remove it. Same
+--  clone-and-strip treatment as universal's Server Pos clone, but whitelisted to
+--  the REAL R6/R15 bodyparts + accessory Handles -- HC hangs fake/special parts
+--  off characters and those must never render.
+-- ============================================================
+local CHAM_PARTS = {   -- canonical rig part names (HumanoidRootPart deliberately absent)
+    Head = true, Torso = true, ["Left Arm"] = true, ["Right Arm"] = true,
+    ["Left Leg"] = true, ["Right Leg"] = true,
+    UpperTorso = true, LowerTorso = true,
+    LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
+    RightUpperArm = true, RightLowerArm = true, RightHand = true,
+    LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
+    RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
+}
+local _chams = {}        -- live cham models, oldest-first
+local CHAM_MAX = 10      -- spray-fire flood guard
+local function spawnHitCham(model)
+    if not HC.hitChams or not model then return end
+    local m = Instance.new("Model"); m.Name = "\0"
+    local mat = Enum.Material[HC.hitChamsMaterial] or Enum.Material.ForceField
+    local n = 0
+    local function add(part)
+        local ok, p = pcall(function() return part:Clone() end)
+        if not (ok and p) then return end
+        -- bare mesh shape, NO textures, so the cham color/material shows
+        for _, ch in ipairs(p:GetChildren()) do
+            if ch:IsA("Decal") or ch:IsA("Texture") then
+                pcall(function() ch:Destroy() end)
+            elseif ch:IsA("DataModelMesh") then
+                if ch:IsA("SpecialMesh") then pcall(function() ch.TextureId = "" end) end
+            else
+                pcall(function() ch:Destroy() end)   -- welds / attachments / scripts / particles
+            end
+        end
+        if p:IsA("MeshPart") then pcall(function() p.TextureID = "" end) end
+        p.Name = "Part"
+        p.Anchored = true; p.CanCollide = false; p.CanQuery = false
+        p.CanTouch = false; p.Massless = true
+        p.CFrame = part.CFrame   -- frozen where they stood at the moment of the hit
+        pcall(function()
+            p.Color = HC.hitChamsColor; p.Transparency = HC.hitChamsTransparency; p.Material = mat
+        end)
+        p.Parent = m; n = n + 1
+    end
+    for _, ch in ipairs(model:GetChildren()) do
+        if ch:IsA("BasePart") and CHAM_PARTS[ch.Name] then
+            add(ch)
+        elseif ch:IsA("Accessory") then
+            local handle = ch:FindFirstChild("Handle")
+            if handle and handle:IsA("BasePart") then add(handle) end
+        end
+    end
+    if n == 0 then m:Destroy(); return end
+    if HC.hitChamsOutline then
+        local hl = Instance.new("Highlight")
+        hl.FillTransparency = 1
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.OutlineColor = HC.hitChamsOutlineColor
+        hl.Adornee = m; hl.Parent = m
+    end
+    m.Parent = Workspace   -- client-created instance: stays local, never replicates
+    _chams[#_chams + 1] = m
+    while #_chams > CHAM_MAX do
+        local old = table.remove(_chams, 1)
+        pcall(function() old:Destroy() end)
+    end
+    task.delay(math.max(0.1, HC.hitChamsDuration), function()
+        for i, mm in ipairs(_chams) do
+            if mm == m then table.remove(_chams, i); break end
+        end
+        pcall(function() m:Destroy() end)
+    end)
+end
+local function clearChams()
+    for _, m in ipairs(_chams) do pcall(function() m:Destroy() end) end
+    _chams = {}
+end
 -- shared synth fire + FX. For shotguns, retarget to the torso (largest flat
 -- area, and head shots trip HC's per-shot damage cap) like witherhook.
 local function forceShotPart(char)
@@ -757,6 +840,7 @@ local function ensureHumWatch()
         _watchedHumLast = newHP
         if old and newHP < old - 0.01 and (tick() - _shotT < FX_WINDOW) then
             playHitSound()
+            spawnHitCham(hum.Parent)   -- independently gated: chams even with the sound muted
         end
     end)
 end
@@ -1756,18 +1840,6 @@ do
         Callback = function(v) HC.wallbangOffset = v end })
     Sec2:Toggle({ Name = "Visualize wallbang spot", Flag = "HC_WbVisualize", Default = false,
         Callback = function(v) HC.wbVisualize = v end })
-    -- fake bullet tracer + hit sound (the synth never renders gun visuals)
-    Sec2:Toggle({ Name = "Bullet tracers", Flag = "HC_Tracer", Default = true,
-        Callback = function(v) HC.tracerEnabled = v end })
-    Sec2:Dropdown({ Name = "Tracer style", Flag = "HC_TracerStyle", Default = "Standard", Multi = false,
-        Items = { "Standard", "Laser", "Thin" },
-        Callback = function(v) HC.tracerStyle = (type(v) == "table" and v[1]) or v or "Standard" end })
-    Sec2:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "HC_TracerColor", Default = Color3.fromRGB(0, 255, 80),
-        Callback = function(c) HC.tracerColor = c end })
-    Sec2:Toggle({ Name = "Hit sound", Flag = "HC_HitSound", Default = true,
-        Callback = function(v) HC.hitSoundEnabled = v end })
-    Sec2:Slider({ Name = "Hit sound volume", Flag = "HC_HitSoundVol", Min = 0, Max = 500, Default = 100, Decimals = 0, Suffix = "%",
-        Callback = function(v) HC.hitSoundVolume = v / 100 end })
     Sec2:Toggle({ Name = "Fake ammo HUD (real ammo)", Flag = "HC_AmmoHud", Default = false,
         Callback = function(v) HC.ammoHud = v end })
 
@@ -1868,7 +1940,60 @@ do
         Callback = function(v) HC.checkLoaded = v end })
 end
 
--- 5) Misc
+-- 5) FX  -- all hit feedback + target visuals in one place
+local FxSub = MainPage:SubPage({ Name = "FX" })
+do
+    local Sec = FxSub:Section({ Name = "Hit Chams", Side = 1 })
+    Sec:Toggle({ Name = "Hit chams", Flag = "HC_HitChams", Default = false,
+        Callback = function(v) HC.hitChams = v; if not v then clearChams() end end })
+    Sec:Slider({ Name = "Duration", Flag = "HC_HitChamsDur", Min = 0.5, Max = 5, Default = 2, Decimals = 1, Suffix = " s",
+        Callback = function(v) HC.hitChamsDuration = v end })
+    Sec:Slider({ Name = "Transparency", Flag = "HC_HitChamsTrans", Min = 0, Max = 1, Default = 0.5, Decimals = 2,
+        Callback = function(v) HC.hitChamsTransparency = v end })
+    Sec:Dropdown({ Name = "Material", Flag = "HC_HitChamsMat", Default = "ForceField", Multi = false,
+        Items = { "ForceField", "Neon", "Plastic", "SmoothPlastic", "Glass", "Metal" },
+        Callback = function(v) HC.hitChamsMaterial = (type(v) == "table" and v[1]) or v or "ForceField" end })
+    Sec:Label({ Name = "Cham color" }):Colorpicker({ Flag = "HC_HitChamsColor", Default = Color3.fromRGB(255, 60, 60),
+        Callback = function(c) HC.hitChamsColor = c end })
+    Sec:Toggle({ Name = "Outline", Flag = "HC_HitChamsOutline", Default = false,
+        Callback = function(v) HC.hitChamsOutline = v end })
+    Sec:Label({ Name = "Outline color" }):Colorpicker({ Flag = "HC_HitChamsOutlineColor", Default = Color3.fromRGB(255, 255, 255),
+        Callback = function(c) HC.hitChamsOutlineColor = c end })
+
+    local Sec2 = FxSub:Section({ Name = "Target Line", Side = 1 })
+    if not hasDrawing then Sec2:Label({ Name = "Needs a Drawing-capable executor." }) end
+    Sec2:Toggle({ Name = "Target line", Flag = "HC_TargetLine", Default = false,
+        Callback = function(v) HC.targetLine = v end })
+    Sec2:Dropdown({ Name = "Line origin", Flag = "HC_LineOrigin", Default = "Bottom", Multi = false,
+        Items = { "Bottom", "Top", "Center", "Mouse" },
+        Callback = function(v) HC.lineOrigin = (type(v) == "table" and v[1]) or v or "Bottom" end })
+    Sec2:Label({ Name = "Line color" }):Colorpicker({ Flag = "HC_LineColor", Default = Color3.fromRGB(255, 60, 60),
+        Callback = function(c) HC.lineColor = c end })
+
+    -- fake bullet tracer + hit sound (the synth never renders gun visuals)
+    local Sec3 = FxSub:Section({ Name = "Tracers", Side = 2 })
+    Sec3:Toggle({ Name = "Bullet tracers", Flag = "HC_Tracer", Default = true,
+        Callback = function(v) HC.tracerEnabled = v end })
+    Sec3:Dropdown({ Name = "Tracer style", Flag = "HC_TracerStyle", Default = "Standard", Multi = false,
+        Items = { "Standard", "Laser", "Thin" },
+        Callback = function(v) HC.tracerStyle = (type(v) == "table" and v[1]) or v or "Standard" end })
+    Sec3:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "HC_TracerColor", Default = Color3.fromRGB(0, 255, 80),
+        Callback = function(c) HC.tracerColor = c end })
+
+    local Sec4 = FxSub:Section({ Name = "Hit Sound", Side = 2 })
+    Sec4:Toggle({ Name = "Hit sound", Flag = "HC_HitSound", Default = true,
+        Callback = function(v) HC.hitSoundEnabled = v end })
+    Sec4:Slider({ Name = "Hit sound volume", Flag = "HC_HitSoundVol", Min = 0, Max = 500, Default = 100, Decimals = 0, Suffix = "%",
+        Callback = function(v) HC.hitSoundVolume = v / 100 end })
+
+    local Sec5 = FxSub:Section({ Name = "Target Outline", Side = 2 })
+    Sec5:Toggle({ Name = "Target outline", Flag = "HC_TargetOutline", Default = false,
+        Callback = function(v) HC.targetOutline = v end })
+    Sec5:Label({ Name = "Outline color" }):Colorpicker({ Flag = "HC_OutlineColor", Default = Color3.fromRGB(255, 80, 80),
+        Callback = function(c) HC.outlineColor = c end })
+end
+
+-- 6) Misc
 local MiscSub = MainPage:SubPage({ Name = "Misc" })
 do
     local Sec = MiscSub:Section({ Name = "AFK badge", Side = 1 })
@@ -1882,26 +2007,6 @@ do
         Callback = function(v) godSet(v) end })
     Sec2:Toggle({ Name = "Force Allow Jump", Flag = "HC_ForceJump", Default = false,
         Callback = function(v) setForceJump(v) end })
-end
-
--- 6) Util
-local UtilSub = MainPage:SubPage({ Name = "Util" })
-do
-    local Sec = UtilSub:Section({ Name = "Target Line", Side = 1 })
-    if not hasDrawing then Sec:Label({ Name = "Needs a Drawing-capable executor." }) end
-    Sec:Toggle({ Name = "Target line", Flag = "HC_TargetLine", Default = false,
-        Callback = function(v) HC.targetLine = v end })
-    Sec:Dropdown({ Name = "Line origin", Flag = "HC_LineOrigin", Default = "Bottom", Multi = false,
-        Items = { "Bottom", "Top", "Center", "Mouse" },
-        Callback = function(v) HC.lineOrigin = (type(v) == "table" and v[1]) or v or "Bottom" end })
-    Sec:Label({ Name = "Line color" }):Colorpicker({ Flag = "HC_LineColor", Default = Color3.fromRGB(255, 60, 60),
-        Callback = function(c) HC.lineColor = c end })
-
-    local Sec2 = UtilSub:Section({ Name = "Target Outline", Side = 2 })
-    Sec2:Toggle({ Name = "Target outline", Flag = "HC_TargetOutline", Default = false,
-        Callback = function(v) HC.targetOutline = v end })
-    Sec2:Label({ Name = "Outline color" }):Colorpicker({ Flag = "HC_OutlineColor", Default = Color3.fromRGB(255, 80, 80),
-        Callback = function(c) HC.outlineColor = c end })
 end
 
 -- ============================================================
@@ -2068,7 +2173,10 @@ do
             lastFoundJob = found.jobId
             serverLbl:SetText("Server: #" .. found.serverNum)
             playersLbl:SetText("Players: " .. tostring(found.players or "?"))
-            locLbl:SetText("Location: " .. tostring(found.location or "?") .. (found.region and (", " .. found.region) or ""))
+            -- the list often returns literal "N/A" strings for Location/RegionName
+            local function realStr(s) s = tostring(s or ""); return (s ~= "" and s ~= "N/A") and s or nil end
+            local loc, reg = realStr(found.location), realStr(found.region)
+            locLbl:SetText("Location: " .. ((loc and reg) and (loc .. ", " .. reg) or loc or reg or "unknown"))
             if found.jobId == game.JobId then
                 statusLbl:SetText("Found -- they're in YOUR server!")
             elseif autoJoin then
@@ -2108,6 +2216,8 @@ local function hcCleanup()
     HC.knifeAura, HC.knifeEquip, HC.antiAfk, HC.forceAfk, HC.godmode = false, false, false, false, false
     HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
+    HC.hitChams = false
+    pcall(clearChams)
     voidUnglue()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_STOMP_RESTORE") end)
     pcall(stompUnglue)         -- stop any stomp desync
