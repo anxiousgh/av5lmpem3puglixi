@@ -88,6 +88,7 @@ local HC = {
     wbVisualize = false,  -- marker at the spot the wallbang would spoof the origin to
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
+    tracerThroughWalls = true,
     hitSoundEnabled = true, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
     ammoHud = false,
     autoShoot = false, autoShootDist = 250, autoShootCooldown = 0.15, autoShootVis = true,
@@ -530,12 +531,34 @@ local function fireShootAt(part)
 end
 
 -- ============================================================
---  FORCE-HIT FX  -- fake bullet tracers + hit sound (ported from witherhook).
---  The synth Shoot never touches the gun script, so it renders no bullet
---  visuals -- we fake them locally. All local-only, with anti-freeze caps.
+--  FORCE-HIT FX  -- fake bullet tracers + hit sound. Tracers are the Zee
+--  version (ported back 2026-07-02): Beam glow + travel + muzzle flash +
+--  spark trail + impact flash/light/particle burst, with a solid neon core
+--  under ONE shared Highlight (black outline) for the through-walls line.
+--  All local-only, with anti-freeze caps.
 -- ============================================================
-local _activeTracers, MAX_TRACERS = 0, 10
-local _lastTracerAt, MIN_TRACER_GAP = 0, 0.05
+local _activeTracers, MAX_TRACERS = 0, 12
+local _lastTracerAt, MIN_TRACER_GAP = 0, 0.04
+
+-- ONE shared, persistent Highlight for every tracer core. Per-tracer highlights hit
+-- Roblox's simultaneous-Highlight cap during rapid fire (older ones stop rendering while
+-- their beams live on) AND fading a highlight looks like it "dies" before the glowing beam.
+-- Instead: all cores live under one Model highlighted once; a core is un-highlighted only
+-- when it's DESTROYED -- at the exact instant its beam is destroyed. No highlight fade.
+local _hlModel, _sharedHL
+local function ensureTracerHL()
+    if _hlModel and _hlModel.Parent and _sharedHL and _sharedHL.Parent then return end
+    if _hlModel then pcall(function() _hlModel:Destroy() end) end
+    _hlModel = Instance.new("Model"); _hlModel.Name = "\0_fh"; _hlModel.Parent = Workspace
+    _sharedHL = Instance.new("Highlight")
+    _sharedHL.FillTransparency = 0.2
+    _sharedHL.OutlineColor, _sharedHL.OutlineTransparency = Color3.new(0, 0, 0), 0   -- black outline
+    pcall(function() _sharedHL.Adornee = _hlModel end)
+    _sharedHL.Parent = _hlModel
+end
+local function clearTracerHL()
+    if _hlModel then pcall(function() _hlModel:Destroy() end); _hlModel = nil; _sharedHL = nil end
+end
 -- the gun's muzzle (barrel tip), not the handle centre (which sits in the hand by the chest).
 -- The muzzle is a FIXED point on the gun, independent of where we shoot: it's the gun's own
 -- attachment furthest from our body (the barrel sticks out front). Picking by shoot direction
@@ -568,6 +591,13 @@ local function muzzlePos()
     local h = c and c:FindFirstChild("Head")
     return h and h.Position
 end
+local function invisAnchor(pos)
+    local p = Instance.new("Part")
+    p.Anchored, p.CanCollide, p.CanTouch, p.CanQuery, p.CastShadow = true, false, false, false, false
+    p.Size, p.Transparency, p.CFrame = Vector3.new(0.05, 0.05, 0.05), 1, CFrame.new(pos)
+    p.Name = "\0_fh"; p.Parent = Workspace
+    return p
+end
 local function spawnTracer(origin, hitPos)
     if not (HC.tracerEnabled and origin and hitPos) then return end
     local dist = (hitPos - origin).Magnitude
@@ -579,79 +609,139 @@ local function spawnTracer(origin, hitPos)
     task.delay(math.max(1.5, HC.tracerLifetime + 1), function()
         _activeTracers = math.max(0, _activeTracers - 1)
     end)
+
     local dir = (hitPos - origin).Unit
-    local col = HC.tracerColor
-    local function invisAnchor(pos)
-        local p = Instance.new("Part")
-        p.Anchored, p.CanCollide, p.CanTouch, p.CanQuery, p.CastShadow = true, false, false, false, false
-        p.Size, p.Transparency, p.CFrame = Vector3.new(0.05, 0.05, 0.05), 1, CFrame.new(pos)
-        p.Parent = Workspace
-        return p
-    end
-    local startPart = invisAnchor(origin); startPart.Name = "_fh_tracer"
-    local endPart = invisAnchor(origin); endPart.Name = "_fh_tracer"
+    local col, th = HC.tracerColor, HC.tracerThickness
+    local TEX = "rbxassetid://446111271"   -- soft energy streak
+    local startPart, endPart = invisAnchor(origin), invisAnchor(origin)
     local att0 = Instance.new("Attachment", startPart)
     local att1 = Instance.new("Attachment", endPart)
     local beams = {}
-    local function mkBeam()
+    local function mkBeam(width, transp, textured, colSeq)
         local b = Instance.new("Beam")
         b.Attachment0, b.Attachment1 = att0, att1
-        b.LightEmission, b.LightInfluence, b.FaceCamera, b.Segments = 1, 0, true, 1
+        b.LightEmission, b.LightInfluence, b.FaceCamera, b.Segments = 1, 0, true, 4
+        b.Width0, b.Width1 = width, width
+        b.Color = colSeq or ColorSequence.new(col)
+        b.Transparency = NumberSequence.new(transp or 0)
+        if textured then pcall(function()
+            b.Texture, b.TextureMode = TEX, Enum.TextureMode.Wrap
+            b.TextureLength, b.TextureSpeed = 4, 12   -- fast scroll = energy flow
+        end) end
         b.Parent = startPart; beams[#beams + 1] = b; return b
     end
-    local th = HC.tracerThickness
+    local whiteHot = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, col), ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)),
+        ColorSequenceKeypoint.new(1, col) })
     if HC.tracerStyle == "Laser" then
-        local b = mkBeam(); b.Width0, b.Width1 = th * 1.2, th * 1.2
-        b.Color, b.Transparency = ColorSequence.new(col), NumberSequence.new(0)
+        mkBeam(th * 3.5, 0.6)                 -- soft glow halo
+        mkBeam(th * 1.2, 0, false, whiteHot)  -- solid hot core
+        mkBeam(th * 0.5, 0, true)             -- scrolling energy line
     elseif HC.tracerStyle == "Thin" then
-        local b = mkBeam(); b.Width0, b.Width1 = th * 0.6, th * 0.6
-        b.Color, b.Transparency = ColorSequence.new(col), NumberSequence.new(0.1)
-    else  -- Standard: outer halo + white-hot inner core
-        local outer = mkBeam(); outer.Width0, outer.Width1 = th * 5, th * 4
-        outer.Color = ColorSequence.new(col)
+        mkBeam(th * 1.4, 0.7)                 -- faint glow
+        mkBeam(th * 0.55, 0.05, true)         -- thin textured line
+    else  -- Standard: halo + mid glow + white-hot textured core
+        local outer = mkBeam(th * 5, nil)
         outer.Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0.55), NumberSequenceKeypoint.new(0.5, 0.35),
-            NumberSequenceKeypoint.new(1, 0.55) })
-        local inner = mkBeam(); inner.Width0, inner.Width1 = th * 1.8, th * 1.2
-        inner.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, col), ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)),
-            ColorSequenceKeypoint.new(1, col) })
-        inner.Transparency = NumberSequence.new(0.05)
-        pcall(function()
-            inner.Texture, inner.TextureMode = "rbxassetid://446111271", Enum.TextureMode.Wrap
-            inner.TextureLength, inner.TextureSpeed = 6, 8
-        end)
+            NumberSequenceKeypoint.new(0, 0.6), NumberSequenceKeypoint.new(0.5, 0.35),
+            NumberSequenceKeypoint.new(1, 0.6) })
+        mkBeam(th * 2.6, 0.25)                 -- mid glow
+        mkBeam(th * 1.1, 0.02, true, whiteHot) -- white-hot textured core
     end
+
+    -- Solid neon core = the highlighted silhouette (black outline). It's parented under the
+    -- ONE shared Highlight model, so no per-tracer Highlight and no cap issues. The through-
+    -- walls toggle + tracer color are applied to the shared Highlight. The screen-space black
+    -- outline keeps even a hairline core readable, so it can be as thin as the Size slider.
+    ensureTracerHL()
+    pcall(function()
+        _sharedHL.DepthMode = HC.tracerThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+        _sharedHL.FillColor = col
+    end)
+    local core = Instance.new("Part")
+    core.Anchored, core.CanCollide, core.CanTouch, core.CanQuery, core.CastShadow = true, false, false, false, false
+    core.Material, core.Color = Enum.Material.Neon, col
+    local cth = math.max(th, 0.01)
+    core.Size = Vector3.new(cth, cth, dist)
+    core.CFrame = CFrame.lookAt((origin + hitPos) / 2, hitPos)
+    core.Name = "\0_fh"; core.Parent = (_hlModel and _hlModel.Parent) and _hlModel or Workspace
+
+    -- muzzle flash at the origin + a spark trail that follows the bullet head
+    pcall(function()
+        local mAtt = Instance.new("Attachment", startPart)
+        local mLight = Instance.new("PointLight"); mLight.Color, mLight.Brightness, mLight.Range = col, 6, 9
+        mLight.Parent = startPart
+        local mp = Instance.new("ParticleEmitter")
+        mp.Color, mp.LightEmission = ColorSequence.new(col), 1
+        mp.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 4), NumberSequenceKeypoint.new(1, 0) })
+        mp.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+        mp.Speed, mp.Lifetime = NumberRange.new(4, 10), NumberRange.new(0.08, 0.18)
+        mp.Rate, mp.SpreadAngle = 0, Vector2.new(35, 35)
+        mp.Parent = mAtt; mp:Emit(10)
+        task.delay(0.12, function() if mLight.Parent then mLight.Brightness = 0 end end)
+    end)
+    local sparks
+    pcall(function()
+        local sAtt = Instance.new("Attachment", endPart)
+        sparks = Instance.new("ParticleEmitter")
+        sparks.Color, sparks.LightEmission = whiteHot, 1
+        sparks.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 2), NumberSequenceKeypoint.new(1, 0) })
+        sparks.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) })
+        sparks.Speed, sparks.Lifetime = NumberRange.new(2, 6), NumberRange.new(0.1, 0.25)
+        sparks.Rate, sparks.SpreadAngle = 220, Vector2.new(20, 20)
+        pcall(function() sparks.Texture = TEX end)
+        sparks.Parent = sAtt
+    end)
+
     task.spawn(function()
-        for i = 1, 8 do  -- travel: extend end attachment origin -> hit
+        for i = 1, 8 do  -- travel: extend the end attachment origin -> hit
             task.wait(0.06 / 8)
-            if not startPart.Parent then return end
+            if not startPart.Parent then break end
             endPart.CFrame = CFrame.new(origin + dir * (dist * (i / 8)))
         end
-        if not startPart.Parent then return end
-        endPart.CFrame = CFrame.new(hitPos)
-        -- impact: neon ball + light, expand & fade
-        local flash = invisAnchor(hitPos)
-        flash.Transparency, flash.Material, flash.Color = 0, Enum.Material.Neon, col
-        flash.Shape, flash.Size = Enum.PartType.Ball, Vector3.new(0.6, 0.6, 0.6)
-        local light = Instance.new("PointLight"); light.Color, light.Brightness, light.Range = col, 5, 10
-        light.Parent = flash
-        task.spawn(function()
-            for i = 1, 10 do
-                task.wait(0.22 / 10)
-                if not flash.Parent then return end
-                local p = i / 10; local s = 0.6 + p * 2.6
-                flash.Size, flash.Transparency, light.Brightness = Vector3.new(s, s, s), p, 5 * (1 - p)
-            end
-            if flash.Parent then flash:Destroy() end
-        end)
-        for i = 1, 8 do  -- fade beams
-            task.wait(HC.tracerLifetime / 8)
-            if not startPart.Parent then return end
-            for _, b in ipairs(beams) do if b.Parent then b.Transparency = NumberSequence.new(i / 8) end end
+        if endPart.Parent then endPart.CFrame = CFrame.new(hitPos) end
+        if sparks then pcall(function() sparks.Rate = 0 end) end   -- stop the trail on impact
+        -- impact VFX: neon flash ball + point light + particle burst
+        if startPart.Parent then
+            local flash = invisAnchor(hitPos)
+            flash.Transparency, flash.Material, flash.Color = 0, Enum.Material.Neon, col
+            flash.Shape, flash.Size = Enum.PartType.Ball, Vector3.new(0.6, 0.6, 0.6)
+            local light = Instance.new("PointLight"); light.Color, light.Brightness, light.Range = col, 5, 10
+            light.Parent = flash
+            pcall(function()
+                local att = Instance.new("Attachment", flash)
+                local pe = Instance.new("ParticleEmitter")
+                pe.Color, pe.LightEmission = whiteHot, 1
+                pe.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 3), NumberSequenceKeypoint.new(1, 0) })
+                pe.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+                pe.Speed, pe.Lifetime = NumberRange.new(6, 16), NumberRange.new(0.15, 0.35)
+                pe.Rate, pe.SpreadAngle = 0, Vector2.new(180, 180)
+                pcall(function() pe.Texture = TEX end)
+                pe.Parent = att; pe:Emit(18)
+            end)
+            task.spawn(function()
+                for i = 1, 10 do
+                    task.wait(0.22 / 10)
+                    if not flash.Parent then return end
+                    local p = i / 10; local s = 0.6 + p * 2.6
+                    flash.Size, flash.Transparency, light.Brightness = Vector3.new(s, s, s), p, 5 * (1 - p)
+                end
+                if flash.Parent then flash:Destroy() end
+            end)
         end
-        if startPart.Parent then startPart:Destroy() end
-        if endPart.Parent then endPart:Destroy() end
+        -- Fade only the BEAMS over the lifetime. The core + its (shared) highlight are kept
+        -- fully solid the whole time and only vanish when the core is DESTROYED below -- at
+        -- the exact instant the beams are destroyed. So the highlight lasts the full tracer
+        -- lifetime and disappears WITH the beam, never before it.
+        for i = 1, 8 do
+            task.wait(HC.tracerLifetime / 8)
+            if not startPart.Parent then break end
+            local a = i / 8
+            for _, b in ipairs(beams) do if b.Parent then b.Transparency = NumberSequence.new(a) end end
+        end
+        pcall(function() if startPart.Parent then startPart:Destroy() end end)
+        pcall(function() if endPart.Parent then endPart:Destroy() end end)
+        pcall(function() if core.Parent then core:Destroy() end end)
     end)
 end
 local function playHitSound()
@@ -682,11 +772,19 @@ local CHAM_PARTS = {   -- canonical rig part names (HumanoidRootPart deliberatel
 }
 local _chams = {}        -- live cham models, oldest-first
 local CHAM_MAX = 10      -- spray-fire flood guard
+local function killCham(m)
+    for i, mm in ipairs(_chams) do
+        if mm == m then table.remove(_chams, i); break end
+    end
+    pcall(function() m:Destroy() end)
+end
 local function spawnHitCham(model)
     if not HC.hitChams or not model then return end
     local m = Instance.new("Model"); m.Name = "\0"
     local mat = Enum.Material[HC.hitChamsMaterial] or Enum.Material.ForceField
-    local n = 0
+    local baseT = math.clamp(HC.hitChamsTransparency, 0, 1)
+    local popT = math.max(0, baseT - 0.35)   -- pop-in: brighter than configured, settles to baseT
+    local parts, torso = {}, nil
     local function add(part)
         local ok, p = pcall(function() return part:Clone() end)
         if not (ok and p) then return end
@@ -706,9 +804,10 @@ local function spawnHitCham(model)
         p.CanTouch = false; p.Massless = true
         p.CFrame = part.CFrame   -- frozen where they stood at the moment of the hit
         pcall(function()
-            p.Color = HC.hitChamsColor; p.Transparency = HC.hitChamsTransparency; p.Material = mat
+            p.Color = HC.hitChamsColor; p.Transparency = popT; p.Material = mat
         end)
-        p.Parent = m; n = n + 1
+        p.Parent = m; parts[#parts + 1] = p
+        if part.Name == "UpperTorso" or part.Name == "Torso" then torso = p end
     end
     for _, ch in ipairs(model:GetChildren()) do
         if ch:IsA("BasePart") and CHAM_PARTS[ch.Name] then
@@ -718,9 +817,11 @@ local function spawnHitCham(model)
             if handle and handle:IsA("BasePart") then add(handle) end
         end
     end
-    if n == 0 then m:Destroy(); return end
+    if #parts == 0 then m:Destroy(); return end
+    torso = torso or parts[1]
+    local hl
     if HC.hitChamsOutline then
-        local hl = Instance.new("Highlight")
+        hl = Instance.new("Highlight")
         hl.FillTransparency = 1
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         hl.OutlineColor = HC.hitChamsOutlineColor
@@ -728,15 +829,61 @@ local function spawnHitCham(model)
     end
     m.Parent = Workspace   -- client-created instance: stays local, never replicates
     _chams[#_chams + 1] = m
-    while #_chams > CHAM_MAX do
-        local old = table.remove(_chams, 1)
-        pcall(function() old:Destroy() end)
-    end
-    task.delay(math.max(0.1, HC.hitChamsDuration), function()
-        for i, mm in ipairs(_chams) do
-            if mm == m then table.remove(_chams, i); break end
+    while #_chams > CHAM_MAX do killCham(_chams[1]) end
+
+    -- spawn VFX: light pulse inside the torso + a shimmer burst of rising motes
+    local shimmer, light
+    pcall(function()
+        light = Instance.new("PointLight")
+        light.Color, light.Brightness, light.Range = HC.hitChamsColor, 4, 12
+        light.Parent = torso
+        local att = Instance.new("Attachment", torso)
+        shimmer = Instance.new("ParticleEmitter")
+        shimmer.Color, shimmer.LightEmission = ColorSequence.new(HC.hitChamsColor), 1
+        shimmer.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35), NumberSequenceKeypoint.new(1, 0) })
+        shimmer.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 1) })
+        shimmer.Speed, shimmer.Lifetime = NumberRange.new(2, 5), NumberRange.new(0.3, 0.7)
+        shimmer.Rate, shimmer.SpreadAngle = 0, Vector2.new(180, 180)
+        shimmer.Acceleration = Vector3.new(0, 4, 0)   -- motes drift upward
+        shimmer.Parent = att
+        shimmer:Emit(14)
+    end)
+
+    -- lifecycle: pop-in settle -> hold -> rising dissolve (never a hard despawn)
+    task.spawn(function()
+        for i = 1, 4 do   -- settle the pop-in brightness back to the configured transparency
+            task.wait(0.05)
+            if not m.Parent then return end
+            local a = i / 4
+            local t = math.max(0, baseT - 0.35 * (1 - a))
+            for _, p in ipairs(parts) do if p.Parent then p.Transparency = t end end
+            if light and light.Parent then light.Brightness = 4 * (1 - a) end
         end
-        pcall(function() m:Destroy() end)
+        local hold, t0 = math.max(0.1, HC.hitChamsDuration), tick()
+        while tick() - t0 < hold do
+            task.wait(0.1)
+            if not m.Parent then return end
+        end
+        if shimmer then pcall(function() shimmer.Rate = 26 end) end   -- dissolve motes while fading
+        local FADE, RISE, STEPS = 0.7, 1.8, 21
+        local prev = 0
+        for i = 1, STEPS do
+            task.wait(FADE / STEPS)
+            if not m.Parent then return end
+            local a = i / STEPS
+            local e = a * a * (3 - 2 * a)   -- smoothstep: slow start, fast middle, soft end
+            local dy = (e - prev) * RISE; prev = e
+            for _, p in ipairs(parts) do
+                if p.Parent then
+                    p.CFrame = p.CFrame + Vector3.new(0, dy, 0)   -- ghost rises as it dissolves
+                    p.Transparency = baseT + (1 - baseT) * e
+                end
+            end
+            if hl then pcall(function() hl.OutlineTransparency = e end) end
+        end
+        if shimmer then pcall(function() shimmer.Rate = 0 end) end
+        task.wait(0.15)   -- let the last motes die before their emitter vanishes
+        killCham(m)
     end)
 end
 local function clearChams()
@@ -1979,6 +2126,12 @@ do
         Callback = function(v) HC.tracerStyle = (type(v) == "table" and v[1]) or v or "Standard" end })
     Sec3:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "HC_TracerColor", Default = Color3.fromRGB(0, 255, 80),
         Callback = function(c) HC.tracerColor = c end })
+    Sec3:Toggle({ Name = "Through walls", Flag = "HC_TracerWalls", Default = true,
+        Callback = function(v) HC.tracerThroughWalls = v end })
+    Sec3:Slider({ Name = "Size", Flag = "HC_TracerSize", Min = 0.005, Max = 1, Default = 0.12, Decimals = 3,
+        Callback = function(v) HC.tracerThickness = v end })
+    Sec3:Slider({ Name = "Lifetime", Flag = "HC_TracerLife", Min = 0.1, Max = 3, Default = 0.2, Decimals = 2, Suffix = "s",
+        Callback = function(v) HC.tracerLifetime = v end })
 
     local Sec4 = FxSub:Section({ Name = "Hit Sound", Side = 2 })
     Sec4:Toggle({ Name = "Hit sound", Flag = "HC_HitSound", Default = true,
@@ -2218,6 +2371,7 @@ local function hcCleanup()
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
     HC.hitChams = false
     pcall(clearChams)
+    pcall(clearTracerHL)
     voidUnglue()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_STOMP_RESTORE") end)
     pcall(stompUnglue)         -- stop any stomp desync
