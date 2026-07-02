@@ -94,7 +94,7 @@ local HC = {
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
-    tpShootMethod = "Wallbang", tpShootDist = 200,
+    tpShootMethod = "Wallbang",
     -- stomp / reload
     stomp = false, stompTargets = false, stompRadius = 5, stompTeleport = false,
     reload = false, reloadKey = Enum.KeyCode.R, reloadThreshold = 0,
@@ -1038,13 +1038,15 @@ end)
 --  TP SHOOT  (keybind: teleport to an advantage on the target, shoot, teleport back)
 --    Wallbang -- TP to cover the target can't shoot through; we still hit via the
 --                origin-spoof (wallbangOrigin), so "they can't hit me, I can hit him".
---    Max Range-- TP straight up high above the target (default 200 studs) and shoot down.
+--    Max Range-- TP high above the target (200 studs + wallbang range) and shoot down; if a
+--                roof/wall is overhead, TP just ABOVE it and wallbang straight down through it.
 --    Glue     -- glue 50 studs above the target: settle 0.2s, shoot, linger ~1s, return.
 --    Inside   -- like Glue but glued right inside the target.
 --  We actually move (the CFrame is re-asserted each Heartbeat so the server registers the
 --  pose) -> the shot origin == our real position and validates -> then we restore.
 -- ============================================================
 local TPS_GLUE_Y = 50
+local TPS_MAXRANGE_H = 200   -- Max Range: fixed apex height above the target (+ the wallbang budget)
 local TPS_WALL_RANGE = 90   -- wallbang: max distance to look for cover (prefer nearby buildings)
 local function tpsIgnoreList(targetModel)
     local ig = {}
@@ -1141,6 +1143,18 @@ local function tpsUnderRoof(targetModel, thrp, height)
     local y = math.max(res.Position.Y - 3, thrp.Position.Y + 3)      -- 3 studs under the roof, but never below the target
     return Vector3.new(thrp.Position.X, y, thrp.Position.Z)
 end
+-- Max Range helper: cast DOWN from the apex to the roof/wall covering the target and drop us
+-- just ABOVE its top surface (over the target) -- close enough that the <=11-stud origin-spoof
+-- can punch DOWN through the roof to the target. Returns nil if nothing is overhead.
+local function tpsAboveRoof(targetModel, thrp, apexY)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = tpsIgnoreList(targetModel)   -- ignores target + all players + us + Ignored
+    local from = Vector3.new(thrp.Position.X, apexY, thrp.Position.Z)
+    local res = Workspace:Raycast(from, Vector3.new(0, -(apexY - thrp.Position.Y), 0), params)
+    if not res then return nil end
+    return Vector3.new(thrp.Position.X, res.Position.Y + 2, thrp.Position.Z)   -- 2 studs above the roof top
+end
 -- closest LOCKED target that passes the checks (minus visible). Ranked by world distance,
 -- NOT the crosshair -- so TP-shoot works on a locked target without looking at them.
 local function tpsPickTarget()
@@ -1233,22 +1247,29 @@ local function tpShoot()
                 th = th and th:FindFirstChild("HumanoidRootPart")
                 if not th then return end
                 local part = forceShotPart(plr.Character or hcModel(plr))
-                local apex = th.Position + Vector3.new(0, HC.tpShootDist, 0)
+                local budget = math.min(HC.wallbangOffset, WB_HARD_CAP)   -- forced to 11 for this burst
+                local apex = th.Position + Vector3.new(0, TPS_MAXRANGE_H + budget, 0)
                 if not part then
                     cf, _tpsWallbang = CFrame.new(apex), false
                 elseif tpsLosClear(apex, part.Position, tmodel) then
                     cf, _tpsWallbang = CFrame.new(apex), false        -- clear shot from way up high
-                elseif wallbangOrigin(apex, part) then
-                    cf, _tpsWallbang = CFrame.new(apex), true         -- thin wall overhead -> wallbang from up high
                 else
-                    -- a roof/wall sits between us and them: drop right under it (over the target)
-                    local spot = tpsUnderRoof(tmodel, th, HC.tpShootDist)
-                    if spot and tpsLosClear(spot, part.Position, tmodel) then
-                        cf, _tpsWallbang = CFrame.new(spot), false    -- clear shot from under the roof
-                    elseif spot and wallbangOrigin(spot, part) then
-                        cf, _tpsWallbang = CFrame.new(spot), true     -- wall's wallbangable from under it
+                    -- a roof/wall is overhead: TP just ABOVE it and wallbang straight down through it
+                    local above = tpsAboveRoof(tmodel, th, apex.Y)
+                    if above and wallbangOrigin(above, part) then
+                        cf, _tpsWallbang = CFrame.new(above), true    -- punch the origin-spoof down through the roof
+                    elseif above and tpsLosClear(above, part.Position, tmodel) then
+                        cf, _tpsWallbang = CFrame.new(above), false   -- (rare) clear from just above
                     else
-                        cf, _tpsWallbang = CFrame.new(th.Position), false   -- last resort: point-blank inside
+                        -- roof too thick to wallbang from above -> drop UNDER it for a clear downward shot
+                        local under = tpsUnderRoof(tmodel, th, TPS_MAXRANGE_H)
+                        if under and tpsLosClear(under, part.Position, tmodel) then
+                            cf, _tpsWallbang = CFrame.new(under), false
+                        elseif under and wallbangOrigin(under, part) then
+                            cf, _tpsWallbang = CFrame.new(under), true
+                        else
+                            cf, _tpsWallbang = CFrame.new(th.Position), false   -- last resort: point-blank inside
+                        end
                     end
                 end
             else                                    -- Wallbang
@@ -1780,8 +1801,6 @@ do
     Sec3:Dropdown({ Name = "Method", Flag = "HC_TpShootMethod", Default = "Wallbang", Multi = false,
         Items = { "Wallbang", "Max Range", "Glue", "Inside" },
         Callback = function(v) HC.tpShootMethod = (type(v) == "table" and v[1]) or v or "Wallbang" end })
-    Sec3:Slider({ Name = "Max Range height", Flag = "HC_TpShootDist", Min = 50, Max = 500, Default = 200, Decimals = 0, Suffix = " studs",
-        Callback = function(v) HC.tpShootDist = v end })
     Sec3:Label({ Name = "TP shoot" }):Keybind({
         Name = "TP shoot", Flag = "HC_TpShootKey", Mode = "Hold", Default = Enum.KeyCode.F,
         Callback = function(state) if state then tpShoot() end end })
