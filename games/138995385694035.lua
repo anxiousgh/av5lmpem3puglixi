@@ -956,7 +956,11 @@ local function onAmmoShot()
     fxShotFired(hitPos)
 end
 
--- ammo watcher: re-attaches when the equipped gun changes; each decrease = one shot
+-- ammo watcher: re-attaches when the equipped gun changes. SOLE trigger: a shot
+-- drops Ammo by exactly ONE (same guard as Zee). Ignore increases (pickup), the
+-- reload reset / multi-step value dances, and any change while reloading --
+-- otherwise a reload after the target dies keeps "firing" phantom tracers at
+-- whatever the crosshair points at.
 local _watchedAmmo, _watchedAmmoConn, _watchedAmmoLast
 local function ensureAmmoWatch()
     local av = findServerAmmo()
@@ -968,7 +972,14 @@ local function ensureAmmoWatch()
     _watchedAmmoConn = av:GetPropertyChangedSignal("Value"):Connect(function()
         local newV, old = av.Value, _watchedAmmoLast
         _watchedAmmoLast = newV
-        if old and newV < old then onAmmoShot() end
+        if not old or (old - newV) ~= 1 then return end
+        local mdl = hcModel(LocalPlayer)
+        local be = mdl and mdl:FindFirstChild("BodyEffects")
+        if be then
+            local r = be:FindFirstChild("Reload")
+            if r and r.Value == true then return end
+        end
+        onAmmoShot()
     end)
 end
 
