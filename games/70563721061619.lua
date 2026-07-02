@@ -16,9 +16,9 @@
 --               flash/light/particles) drawn per real shot. Each tracer ALWAYS gets a
 --               solid neon core with a Highlight + BLACK outline; the "Through walls"
 --               toggle flips its DepthMode (AlwaysOnTop vs Occluded). Size + lifetime
---               sliders, styles. Drawn only on
---               real shots (auto-shoot fireAt + a single-step Ammo-drop watcher) -- the
---               ammo watcher ignores reload/pickup jumps so no phantom tracers.
+--               sliders, styles, muzzle flash + spark trail + impact burst. Drawn on ONE
+--               trigger only: the gun's Ammo dropping by exactly 1 (== one real shot) --
+--               reload/pickup jumps and multi-drops are ignored, so no phantom tracers.
 --               Plus the HC HIT SOUND (asset 121566025787365) on a target HP drop.
 --  View target: swaps Camera.CameraSubject to the current target so you spectate them;
 --               auto-restores to yourself when no target is alive.
@@ -116,7 +116,6 @@ Players.PlayerRemoving:Connect(function(p) locked[p] = nil end)
 do
     local _active, MAX = 0, 12
     local _lastAt, MIN_GAP = 0, 0.04
-    local _lastDirect = 0
     local FX_WINDOW = 0.6
     local _shotT = 0
 
@@ -165,48 +164,50 @@ do
 
         local dir = (hitPos - origin).Unit
         local col, th = S.btColor, S.btThickness
+        local TEX = "rbxassetid://446111271"   -- soft energy streak
         local startPart, endPart = anchor(origin), anchor(origin)
         local att0 = Instance.new("Attachment", startPart)
         local att1 = Instance.new("Attachment", endPart)
         local beams = {}
-        local function mkBeam()
+        local function mkBeam(width, transp, textured, colSeq)
             local b = Instance.new("Beam")
             b.Attachment0, b.Attachment1 = att0, att1
-            b.LightEmission, b.LightInfluence, b.FaceCamera, b.Segments = 1, 0, true, 1
+            b.LightEmission, b.LightInfluence, b.FaceCamera, b.Segments = 1, 0, true, 4
+            b.Width0, b.Width1 = width, width
+            b.Color = colSeq or ColorSequence.new(col)
+            b.Transparency = NumberSequence.new(transp or 0)
+            if textured then pcall(function()
+                b.Texture, b.TextureMode = TEX, Enum.TextureMode.Wrap
+                b.TextureLength, b.TextureSpeed = 4, 12   -- fast scroll = energy flow
+            end) end
             b.Parent = startPart; beams[#beams + 1] = b; return b
         end
+        local whiteHot = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, col), ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)),
+            ColorSequenceKeypoint.new(1, col) })
         if S.btStyle == "Laser" then
-            local b = mkBeam(); b.Width0, b.Width1 = th * 1.2, th * 1.2
-            b.Color, b.Transparency = ColorSequence.new(col), NumberSequence.new(0)
+            mkBeam(th * 3.5, 0.6)                 -- soft glow halo
+            mkBeam(th * 1.2, 0, false, whiteHot)  -- solid hot core
+            mkBeam(th * 0.5, 0, true)             -- scrolling energy line
         elseif S.btStyle == "Thin" then
-            local b = mkBeam(); b.Width0, b.Width1 = th * 0.6, th * 0.6
-            b.Color, b.Transparency = ColorSequence.new(col), NumberSequence.new(0.1)
-        else  -- Standard: outer halo + white-hot textured core
-            local outer = mkBeam(); outer.Width0, outer.Width1 = th * 5, th * 4
-            outer.Color = ColorSequence.new(col)
+            mkBeam(th * 1.4, 0.7)                 -- faint glow
+            mkBeam(th * 0.55, 0.05, true)         -- thin textured line
+        else  -- Standard: halo + mid glow + white-hot textured core
+            local outer = mkBeam(th * 5, nil)
             outer.Transparency = NumberSequence.new({
-                NumberSequenceKeypoint.new(0, 0.55), NumberSequenceKeypoint.new(0.5, 0.35),
-                NumberSequenceKeypoint.new(1, 0.55) })
-            local inner = mkBeam(); inner.Width0, inner.Width1 = th * 1.8, th * 1.2
-            inner.Color = ColorSequence.new({
-                ColorSequenceKeypoint.new(0, col), ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)),
-                ColorSequenceKeypoint.new(1, col) })
-            inner.Transparency = NumberSequence.new(0.05)
-            pcall(function()
-                inner.Texture, inner.TextureMode = "rbxassetid://446111271", Enum.TextureMode.Wrap
-                inner.TextureLength, inner.TextureSpeed = 6, 8
-            end)
+                NumberSequenceKeypoint.new(0, 0.6), NumberSequenceKeypoint.new(0.5, 0.35),
+                NumberSequenceKeypoint.new(1, 0.6) })
+            mkBeam(th * 2.6, 0.25)                 -- mid glow
+            mkBeam(th * 1.1, 0.02, true, whiteHot) -- white-hot textured core
         end
 
         -- ALWAYS add a solid neon core with a highlighted (+ black outline) silhouette. The
         -- through-walls toggle just picks the Highlight DepthMode: AlwaysOnTop (seen through
-        -- geometry) vs Occluded (hidden behind walls). Core is kept thick enough that the
-        -- silhouette + screen-space black outline read clearly at distance (0.06 was invisible).
+        -- geometry) vs Occluded (hidden behind walls). The screen-space black outline keeps
+        -- even a hairline core readable, so it can be as thin as the Size slider allows.
         local core = Instance.new("Part")
         core.Anchored, core.CanCollide, core.CanTouch, core.CanQuery, core.CastShadow = true, false, false, false, false
         core.Material, core.Color = Enum.Material.Neon, col
-        -- tiny floor only to avoid a degenerate 0-size part; the screen-space black outline
-        -- keeps even a hairline core visible through walls, so thin is fine now.
         local cth = math.max(th, 0.01)
         core.Size = Vector3.new(cth, cth, dist)
         core.CFrame = CFrame.lookAt((origin + hitPos) / 2, hitPos)
@@ -218,56 +219,87 @@ do
         pcall(function() coreHL.Adornee = core end)
         coreHL.Parent = core
 
+        -- muzzle flash at the origin + a spark trail that follows the bullet head
+        pcall(function()
+            local mAtt = Instance.new("Attachment", startPart)
+            local mLight = Instance.new("PointLight"); mLight.Color, mLight.Brightness, mLight.Range = col, 6, 9
+            mLight.Parent = startPart
+            local mp = Instance.new("ParticleEmitter")
+            mp.Color, mp.LightEmission = ColorSequence.new(col), 1
+            mp.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 4), NumberSequenceKeypoint.new(1, 0) })
+            mp.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+            mp.Speed, mp.Lifetime = NumberRange.new(4, 10), NumberRange.new(0.08, 0.18)
+            mp.Rate, mp.SpreadAngle = 0, Vector2.new(35, 35)
+            mp.Parent = mAtt; mp:Emit(10)
+            task.delay(0.12, function() if mLight.Parent then mLight.Brightness = 0 end end)
+        end)
+        local sparks
+        pcall(function()
+            local sAtt = Instance.new("Attachment", endPart)
+            sparks = Instance.new("ParticleEmitter")
+            sparks.Color, sparks.LightEmission = whiteHot, 1
+            sparks.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 2), NumberSequenceKeypoint.new(1, 0) })
+            sparks.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) })
+            sparks.Speed, sparks.Lifetime = NumberRange.new(2, 6), NumberRange.new(0.1, 0.25)
+            sparks.Rate, sparks.SpreadAngle = 220, Vector2.new(20, 20)
+            pcall(function() sparks.Texture = TEX end)
+            sparks.Parent = sAtt
+        end)
+
         task.spawn(function()
             for i = 1, 8 do  -- travel: extend the end attachment origin -> hit
                 task.wait(0.06 / 8)
-                if not startPart.Parent then return end
+                if not startPart.Parent then break end
                 endPart.CFrame = CFrame.new(origin + dir * (dist * (i / 8)))
             end
-            if not startPart.Parent then return end
-            endPart.CFrame = CFrame.new(hitPos)
+            if endPart.Parent then endPart.CFrame = CFrame.new(hitPos) end
+            if sparks then pcall(function() sparks.Rate = 0 end) end   -- stop the trail on impact
             -- impact VFX: neon flash ball + point light + particle burst
-            local flash = anchor(hitPos)
-            flash.Transparency, flash.Material, flash.Color = 0, Enum.Material.Neon, col
-            flash.Shape, flash.Size = Enum.PartType.Ball, Vector3.new(0.6, 0.6, 0.6)
-            local light = Instance.new("PointLight"); light.Color, light.Brightness, light.Range = col, 5, 10
-            light.Parent = flash
-            pcall(function()
-                local att = Instance.new("Attachment", flash)
-                local pe = Instance.new("ParticleEmitter")
-                pe.Color, pe.LightEmission = ColorSequence.new(col), 1
-                pe.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 3), NumberSequenceKeypoint.new(1, 0) })
-                pe.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
-                pe.Speed, pe.Lifetime = NumberRange.new(6, 14), NumberRange.new(0.15, 0.35)
-                pe.Rate, pe.SpreadAngle = 0, Vector2.new(180, 180)
-                pe.Parent = att; pe:Emit(14)
-            end)
-            task.spawn(function()
-                for i = 1, 10 do
-                    task.wait(0.22 / 10)
-                    if not flash.Parent then return end
-                    local p = i / 10; local s = 0.6 + p * 2.6
-                    flash.Size, flash.Transparency, light.Brightness = Vector3.new(s, s, s), p, 5 * (1 - p)
-                end
-                if flash.Parent then flash:Destroy() end
-            end)
-            for i = 1, 8 do  -- fade beams + core over the lifetime
+            if startPart.Parent then
+                local flash = anchor(hitPos)
+                flash.Transparency, flash.Material, flash.Color = 0, Enum.Material.Neon, col
+                flash.Shape, flash.Size = Enum.PartType.Ball, Vector3.new(0.6, 0.6, 0.6)
+                local light = Instance.new("PointLight"); light.Color, light.Brightness, light.Range = col, 5, 10
+                light.Parent = flash
+                pcall(function()
+                    local att = Instance.new("Attachment", flash)
+                    local pe = Instance.new("ParticleEmitter")
+                    pe.Color, pe.LightEmission = whiteHot, 1
+                    pe.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 3), NumberSequenceKeypoint.new(1, 0) })
+                    pe.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+                    pe.Speed, pe.Lifetime = NumberRange.new(6, 16), NumberRange.new(0.15, 0.35)
+                    pe.Rate, pe.SpreadAngle = 0, Vector2.new(180, 180)
+                    pcall(function() pe.Texture = TEX end)
+                    pe.Parent = att; pe:Emit(18)
+                end)
+                task.spawn(function()
+                    for i = 1, 10 do
+                        task.wait(0.22 / 10)
+                        if not flash.Parent then return end
+                        local p = i / 10; local s = 0.6 + p * 2.6
+                        flash.Size, flash.Transparency, light.Brightness = Vector3.new(s, s, s), p, 5 * (1 - p)
+                    end
+                    if flash.Parent then flash:Destroy() end
+                end)
+            end
+            -- Fade beams + highlight IN LOCKSTEP so they vanish together, then destroy everything
+            -- at the same instant. The core part's Transparency is only nudged (never near 1):
+            -- a nearly-invisible adornee stops its Highlight from rendering, which is what made
+            -- the highlight look like it died before the beam.
+            for i = 1, 8 do
                 task.wait(S.btLifetime / 8)
-                if not startPart.Parent then return end
-                for _, b in ipairs(beams) do if b.Parent then b.Transparency = NumberSequence.new(i / 8) end end
-                if core and core.Parent then core.Transparency = i / 8 end
-                -- keep the highlight SOLID for most of the lifetime, then fade only over the last
-                -- ~3 steps -- otherwise the beam's glow lingers and the highlight looks like it
-                -- died first. This way the highlight lasts at least as long as the tracer.
-                if coreHL and coreHL.Parent then pcall(function()
-                    local f = math.max(0, (i - 5) / 3)   -- 0 until i=5, ramps 0->1 by i=8
-                    coreHL.FillTransparency = 0.2 + f * 0.8
-                    coreHL.OutlineTransparency = f
+                if not startPart.Parent then break end
+                local a = i / 8
+                for _, b in ipairs(beams) do if b.Parent then b.Transparency = NumberSequence.new(a) end end
+                if core.Parent then core.Transparency = math.min(0.5, a) end
+                if coreHL.Parent then pcall(function()
+                    coreHL.FillTransparency = 0.2 + a * 0.8
+                    coreHL.OutlineTransparency = a
                 end) end
             end
-            if startPart.Parent then startPart:Destroy() end
-            if endPart.Parent then endPart:Destroy() end
-            if core and core.Parent then core:Destroy() end
+            pcall(function() if startPart.Parent then startPart:Destroy() end end)
+            pcall(function() if endPart.Parent then endPart:Destroy() end end)
+            pcall(function() if core.Parent then core:Destroy() end end)
         end)
     end
     FX.spawnTracer = spawnTracer
@@ -303,14 +335,11 @@ do
     end
     FX.bestTargetPlayer = bestTargetPlayer
 
-    -- one real shot fired: stamp time (for hit sound) + draw a tracer. direct=true
-    -- for our own force/auto shots (so the ammo watcher won't double-draw).
-    function FX.onShot(origin, hitPos, direct)
+    -- one real shot fired (Ammo dropped by 1): stamp time (for hit sound) + draw a tracer.
+    function FX.onShot(origin, hitPos)
         _shotT = tick()
-        if direct then _lastDirect = tick() end
         if S.btEnabled and origin and hitPos then spawnTracer(origin, hitPos) end
     end
-    FX.lastDirect = function() return _lastDirect end
     FX.shotT = function() return _shotT end
     FX.FX_WINDOW = FX_WINDOW
 end
@@ -343,7 +372,6 @@ if okGH and type(GH) == "table" and type(GH.Shoot) == "function" then
     GH.Shoot = function(params, ...)
         if S.forceHit and aimCache.part and aimCache.pos then
             local origin = (type(params) == "table" and params.ForcedOrigin) or aimCache.pos
-            pcall(function() FX.onShot(FX.muzzlePos(), aimCache.pos, true) end)
             return aimCache.pos, aimCache.part, (origin - aimCache.pos).Unit   -- hitPos, hitPart, normal
         end
         return oldShoot(params, ...)
@@ -399,10 +427,9 @@ track(RunService.Heartbeat:Connect(function()
     local pool = activePool()
     if pool then for _, p in ipairs(pool) do local pt, d = hittable(p); if pt and (not bestD or d < bestD) then bestPart, bestD = pt, d end end
     else for p in pairs(locked) do local pt, d = hittable(p); if pt and (not bestD or d < bestD) then bestPart, bestD = pt, d end end end
-    if bestPart then
-        lastShot = tick(); fireAt(gun, bestPart)
-        pcall(function() FX.onShot(FX.muzzlePos(), bestPart.Position, true) end)
-    end
+    if bestPart then lastShot = tick(); fireAt(gun, bestPart) end
+    -- NOTE: tracers/hit-sound are NOT triggered here. They fire off the gun's Ammo
+    -- dropping by exactly 1 (see the Ammo watcher) so there's one tracer per real shot.
 end))
 
 -- ---- No Slowdown ----
@@ -489,8 +516,7 @@ end
 
 -- ---- FX drivers: ammo-drop -> manual tracer, target HP-drop -> hit sound, view target ----
 do
-    -- manual shots draw off the gun's Ammo dropping (our own force/auto shots draw
-    -- directly and stamp _lastDirect so we don't double up here).
+    -- the ONLY tracer/hit-sound trigger: the gun's Ammo dropping by exactly 1 = one real shot.
     local _wAmmo, _wAmmoConn, _wAmmoLast
     local function ensureAmmoWatch()
         local gun = equippedGun()
@@ -503,12 +529,12 @@ do
         _wAmmoConn = av:GetPropertyChangedSignal("Value"):Connect(function()
             local newV, old = av.Value, _wAmmoLast
             _wAmmoLast = newV
-            -- a shot drops ammo by ONE. Ignore increases (pickup), the reload reset (e.g. 6->0),
-            -- and any change while reloading -- those were drawing phantom tracers.
+            -- SOLE tracer trigger: a shot drops Ammo by exactly ONE. Ignore increases (pickup),
+            -- the reload reset (e.g. 6->0), multi-drops, and any change while reloading -- so a
+            -- tracer plays once per real shot and never phantom-fires.
             if not old or (old - newV) ~= 1 then return end
             local be = myChar() and myChar():FindFirstChild("BodyEffects")
             if be and be:FindFirstChild("Reload") and be.Reload.Value == true then return end
-            if tick() - FX.lastDirect() < 0.12 then return end         -- force/auto already drew
             local hitPos
             local p = FX.bestTargetPlayer()
             local c = p and aliveChar(p); local part = c and partOf(c)
@@ -521,7 +547,7 @@ do
                 local res = workspace:Raycast(ray.Origin, ray.Direction * 1000, rp)
                 hitPos = (res and res.Position) or (ray.Origin + ray.Direction * 300)
             end
-            FX.onShot(FX.muzzlePos(), hitPos, false)
+            FX.onShot(FX.muzzlePos(), hitPos)
         end)
     end
 
