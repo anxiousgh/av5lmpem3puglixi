@@ -13,8 +13,11 @@
 --  Shotguns ([Double-Barrel SG] / [TacticalShotgun]) fire 5 pellets, never more.
 --
 --  FX (ported from Hood Customs): fake BULLET TRACERS (Beam glow + travel + impact
---               flash/light/particles) drawn per real shot; optional "through walls"
---               highlight core (AlwaysOnTop neon line), size + lifetime sliders, styles.
+--               flash/light/particles) drawn per real shot. Each tracer ALWAYS gets a
+--               solid neon core with an AlwaysOnTop Highlight + BLACK outline, so it's
+--               visible through walls; size + lifetime sliders, styles. Drawn only on
+--               real shots (auto-shoot fireAt + a single-step Ammo-drop watcher) -- the
+--               ammo watcher ignores reload/pickup jumps so no phantom tracers.
 --               Plus the HC HIT SOUND (asset 121566025787365) on a target HP drop.
 --  View target: swaps Camera.CameraSubject to the current target so you spectate them;
 --               auto-restores to yourself when no target is alive.
@@ -44,8 +47,9 @@ local S = {
     outline = true, outlineColor = Color3.fromRGB(255, 60, 60),
     tracer = false, tracerColor = Color3.fromRGB(255, 60, 60), tracerOrigin = "Bottom",
     -- fake bullet tracers + hit sound (HC-style) + view target
+    -- (tracers always get an AlwaysOnTop highlighted core + black outline => visible through walls)
     btEnabled = false, btColor = Color3.fromRGB(255, 60, 60), btStyle = "Standard",
-    btThickness = 0.12, btLifetime = 0.2, btThroughWalls = false,
+    btThickness = 0.12, btLifetime = 0.2,
     hitSoundEnabled = false, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
     viewTarget = false,
 }
@@ -193,23 +197,22 @@ do
             end)
         end
 
-        -- through-walls: solid neon core with an AlwaysOnTop Highlight (silhouette shows over geometry)
-        local core, coreHL
-        if S.btThroughWalls then
-            core = Instance.new("Part")
-            core.Anchored, core.CanCollide, core.CanTouch, core.CanQuery, core.CastShadow = true, false, false, false, false
-            core.Material, core.Color = Enum.Material.Neon, col
-            local cth = math.max(th * 0.5, 0.05)
-            core.Size = Vector3.new(cth, cth, dist)
-            core.CFrame = CFrame.lookAt((origin + hitPos) / 2, hitPos)
-            core.Name = "\0_zt"; core.Parent = workspace
-            coreHL = Instance.new("Highlight")
-            coreHL.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            coreHL.FillColor, coreHL.FillTransparency = col, 0.15
-            coreHL.OutlineColor, coreHL.OutlineTransparency = col, 0
-            pcall(function() coreHL.Adornee = core end)
-            coreHL.Parent = core
-        end
+        -- ALWAYS add a solid neon core with an AlwaysOnTop Highlight (+ black outline) so the
+        -- tracer is visible THROUGH walls. Core is kept thick enough that the silhouette + the
+        -- screen-space black outline read clearly at distance (a 0.06-thick line was invisible).
+        local core = Instance.new("Part")
+        core.Anchored, core.CanCollide, core.CanTouch, core.CanQuery, core.CastShadow = true, false, false, false, false
+        core.Material, core.Color = Enum.Material.Neon, col
+        local cth = math.max(th, 0.2)
+        core.Size = Vector3.new(cth, cth, dist)
+        core.CFrame = CFrame.lookAt((origin + hitPos) / 2, hitPos)
+        core.Name = "\0_zt"; core.Parent = workspace
+        local coreHL = Instance.new("Highlight")
+        coreHL.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        coreHL.FillColor, coreHL.FillTransparency = col, 0.2
+        coreHL.OutlineColor, coreHL.OutlineTransparency = Color3.new(0, 0, 0), 0   -- black outline
+        pcall(function() coreHL.Adornee = core end)
+        coreHL.Parent = core
 
         task.spawn(function()
             for i = 1, 8 do  -- travel: extend the end attachment origin -> hit
@@ -250,7 +253,7 @@ do
                 for _, b in ipairs(beams) do if b.Parent then b.Transparency = NumberSequence.new(i / 8) end end
                 if core and core.Parent then core.Transparency = i / 8 end
                 if coreHL and coreHL.Parent then pcall(function()
-                    coreHL.FillTransparency = 0.15 + (i / 8) * 0.85; coreHL.OutlineTransparency = i / 8
+                    coreHL.FillTransparency = 0.2 + (i / 8) * 0.8; coreHL.OutlineTransparency = (i / 8) ^ 2
                 end) end
             end
             if startPart.Parent then startPart:Destroy() end
@@ -491,7 +494,11 @@ do
         _wAmmoConn = av:GetPropertyChangedSignal("Value"):Connect(function()
             local newV, old = av.Value, _wAmmoLast
             _wAmmoLast = newV
-            if not old or newV >= old then return end                 -- only decrements = shots
+            -- a shot drops ammo by ONE. Ignore increases (pickup), the reload reset (e.g. 6->0),
+            -- and any change while reloading -- those were drawing phantom tracers.
+            if not old or (old - newV) ~= 1 then return end
+            local be = myChar() and myChar():FindFirstChild("BodyEffects")
+            if be and be:FindFirstChild("Reload") and be.Reload.Value == true then return end
             if tick() - FX.lastDirect() < 0.12 then return end         -- force/auto already drew
             local hitPos
             local p = FX.bestTargetPlayer()
@@ -598,7 +605,7 @@ do
     BSec:Dropdown({ Name = "Style", Flag = "ZeeBTStyle", Default = "Standard", Multi = false, Items = { "Standard", "Laser", "Thin" },
         Callback = function(v) S.btStyle = (type(v) == "table" and v[1]) or v or "Standard" end })
     BSec:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "ZeeBTColor", Default = S.btColor, Callback = function(c) S.btColor = c end })
-    BSec:Toggle({ Name = "Through walls (highlight)", Flag = "ZeeBTWalls", Default = false, Callback = function(v) S.btThroughWalls = v end })
+    BSec:Label({ Name = "Highlighted + black outline, seen through walls" })
     BSec:Slider({ Name = "Size", Flag = "ZeeBTSize", Min = 0.02, Max = 1, Default = 0.12, Decimals = 2, Callback = function(v) S.btThickness = v end })
     BSec:Slider({ Name = "Lifetime", Flag = "ZeeBTLife", Min = 0.1, Max = 3, Default = 0.2, Decimals = 2, Suffix = "s", Callback = function(v) S.btLifetime = v end })
 
