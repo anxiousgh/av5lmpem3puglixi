@@ -14,8 +14,9 @@
 --
 --  FX (ported from Hood Customs): fake BULLET TRACERS (Beam glow + travel + impact
 --               flash/light/particles) drawn per real shot. Each tracer ALWAYS gets a
---               solid neon core with an AlwaysOnTop Highlight + BLACK outline, so it's
---               visible through walls; size + lifetime sliders, styles. Drawn only on
+--               solid neon core with a Highlight + BLACK outline; the "Through walls"
+--               toggle flips its DepthMode (AlwaysOnTop vs Occluded). Size + lifetime
+--               sliders, styles. Drawn only on
 --               real shots (auto-shoot fireAt + a single-step Ammo-drop watcher) -- the
 --               ammo watcher ignores reload/pickup jumps so no phantom tracers.
 --               Plus the HC HIT SOUND (asset 121566025787365) on a target HP drop.
@@ -47,9 +48,9 @@ local S = {
     outline = true, outlineColor = Color3.fromRGB(255, 60, 60),
     tracer = false, tracerColor = Color3.fromRGB(255, 60, 60), tracerOrigin = "Bottom",
     -- fake bullet tracers + hit sound (HC-style) + view target
-    -- (tracers always get an AlwaysOnTop highlighted core + black outline => visible through walls)
+    -- (tracers always get a highlighted core + black outline; through-walls toggles its DepthMode)
     btEnabled = false, btColor = Color3.fromRGB(255, 60, 60), btStyle = "Standard",
-    btThickness = 0.12, btLifetime = 0.2,
+    btThickness = 0.12, btLifetime = 0.2, btThroughWalls = true,
     hitSoundEnabled = false, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
     viewTarget = false,
 }
@@ -197,9 +198,10 @@ do
             end)
         end
 
-        -- ALWAYS add a solid neon core with an AlwaysOnTop Highlight (+ black outline) so the
-        -- tracer is visible THROUGH walls. Core is kept thick enough that the silhouette + the
-        -- screen-space black outline read clearly at distance (a 0.06-thick line was invisible).
+        -- ALWAYS add a solid neon core with a highlighted (+ black outline) silhouette. The
+        -- through-walls toggle just picks the Highlight DepthMode: AlwaysOnTop (seen through
+        -- geometry) vs Occluded (hidden behind walls). Core is kept thick enough that the
+        -- silhouette + screen-space black outline read clearly at distance (0.06 was invisible).
         local core = Instance.new("Part")
         core.Anchored, core.CanCollide, core.CanTouch, core.CanQuery, core.CastShadow = true, false, false, false, false
         core.Material, core.Color = Enum.Material.Neon, col
@@ -208,7 +210,7 @@ do
         core.CFrame = CFrame.lookAt((origin + hitPos) / 2, hitPos)
         core.Name = "\0_zt"; core.Parent = workspace
         local coreHL = Instance.new("Highlight")
-        coreHL.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        coreHL.DepthMode = S.btThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
         coreHL.FillColor, coreHL.FillTransparency = col, 0.2
         coreHL.OutlineColor, coreHL.OutlineTransparency = Color3.new(0, 0, 0), 0   -- black outline
         pcall(function() coreHL.Adornee = core end)
@@ -605,7 +607,7 @@ do
     BSec:Dropdown({ Name = "Style", Flag = "ZeeBTStyle", Default = "Standard", Multi = false, Items = { "Standard", "Laser", "Thin" },
         Callback = function(v) S.btStyle = (type(v) == "table" and v[1]) or v or "Standard" end })
     BSec:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "ZeeBTColor", Default = S.btColor, Callback = function(c) S.btColor = c end })
-    BSec:Label({ Name = "Highlighted + black outline, seen through walls" })
+    BSec:Toggle({ Name = "Through walls", Flag = "ZeeBTWalls", Default = true, Callback = function(v) S.btThroughWalls = v end })
     BSec:Slider({ Name = "Size", Flag = "ZeeBTSize", Min = 0.02, Max = 1, Default = 0.12, Decimals = 2, Callback = function(v) S.btThickness = v end })
     BSec:Slider({ Name = "Lifetime", Flag = "ZeeBTLife", Min = 0.1, Max = 3, Default = 0.2, Decimals = 2, Suffix = "s", Callback = function(v) S.btLifetime = v end })
 
