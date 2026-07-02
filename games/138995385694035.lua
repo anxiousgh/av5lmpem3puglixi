@@ -895,11 +895,20 @@ local function fxShotFired(hitPos)
     spawnTracer(origin, hitPos)
 end
 
--- a real shot landed (server ammo dropped): tracer to the engaged target, else crosshair
+-- a real shot landed (server ammo dropped): tracer to the engaged target, else crosshair.
+-- Fast guns: the server's decrements for the tail of a spray can arrive AFTER the target
+-- died/unlocked -- draw those to the body we were just shooting, not wherever the camera
+-- drifted (that's the SMG "tracer at my crosshair" phantom).
+local _lastShotPart, _lastShotPartT = nil, 0
 local function onAmmoShot()
     local hitPos
     local plr = getTarget()
     local part = plr and plr.Character and forceShotPart(plr.Character)
+    if part then
+        _lastShotPart, _lastShotPartT = part, tick()
+    elseif _lastShotPart and _lastShotPart.Parent and (tick() - _lastShotPartT < FX_WINDOW) then
+        part = _lastShotPart
+    end
     if part then hitPos = part.Position end
     if not hitPos then
         local cam = Workspace.CurrentCamera
@@ -934,11 +943,14 @@ local function ensureAmmoWatch()
         local newV, old = av.Value, _watchedAmmoLast
         _watchedAmmoLast = newV
         if not old or (old - newV) ~= 1 then return end
+        -- HC's reload flags are "Reloading"/"Reloading_CLIENT" (Zee's game calls it "Reload")
         local mdl = hcModel(LocalPlayer)
         local be = mdl and mdl:FindFirstChild("BodyEffects")
         if be then
-            local r = be:FindFirstChild("Reload")
-            if r and r.Value == true then return end
+            for _, nm in ipairs({ "Reloading", "Reloading_CLIENT", "Reload" }) do
+                local r = be:FindFirstChild(nm)
+                if r and r.Value == true then return end
+            end
         end
         onAmmoShot()
     end)
