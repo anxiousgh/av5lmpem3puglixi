@@ -324,8 +324,34 @@ do
     pcall(function() warnGui.Parent = espParent() end)
 end
 
+-- ---------- mouse-lock handoff ----------
+-- This game's look scripts lock the mouse and do NOT re-assert the lock after
+-- the menu frees the cursor, so closing the menu left the camera dead. Sample
+-- whatever MouseBehavior the game runs while the menu is CLOSED, and hand that
+-- exact mode back the moment it closes again (self-calibrating: lobby/spectate
+-- naturally record Default and get Default back).
+do
+    local UIS = game:GetService("UserInputService")
+    local lastGameMouseMode = UIS.MouseBehavior
+    track(RunService.Heartbeat:Connect(function()
+        if not Library.WindowOpenState then
+            lastGameMouseMode = UIS.MouseBehavior
+        end
+    end))
+    pcall(function()
+        Library:BindToWindowVisibility(function(open)
+            if open then return end
+            local restore = lastGameMouseMode
+            task.defer(function()
+                pcall(function() UIS.MouseBehavior = restore end)
+            end)
+        end)
+    end)
+end
+
 local intelLabels = {}   -- filled in the UI block below
 local wasChased = false
+local lastIntel = 0
 track(RunService.Heartbeat:Connect(function()
     local kp = getKillerPlayer()
     local kc = kp and kp.Character
@@ -344,6 +370,10 @@ track(RunService.Heartbeat:Connect(function()
         warnGui.Enabled = false
     end
     wasChased = chased
+
+    -- labels only need a few updates a second; SetText at 60 Hz is wasted work
+    if os.clock() - lastIntel < 0.25 then return end
+    lastIntel = os.clock()
 
     if intelLabels.killer then
         local hrp = myHRP()

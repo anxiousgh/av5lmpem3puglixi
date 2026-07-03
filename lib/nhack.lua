@@ -266,6 +266,10 @@ do
         if Self.OnExit then pcall(Self.OnExit) end -- [wh] teardown hook (turns features off)
         Self:ApplyWindowInputState(false)
 
+        if Self.MouseFreeBindName then -- [wh] see BindToRenderStep mouse-free patch
+            pcall(function() RunService:UnbindFromRenderStep(Self.MouseFreeBindName) end)
+        end
+
         if Self.BackgroundEffects then
             Self.BackgroundEffects.IsSnowing = false
 
@@ -875,13 +879,25 @@ do
 
     -- [wh] Keep the mouse free while the menu is open. The game's camera /
     -- shiftlock scripts re-lock MouseBehavior to LockCenter every frame, which
-    -- otherwise traps the cursor in the screen centre. SetWindowVisibilityState
-    -- only sets Default once on open, so re-assert it each frame here.
-    Library:Connect(RunService.RenderStepped, function()
-        if Library.WindowOpenState and UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
-            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-        end
-    end)
+    -- otherwise traps the cursor in the screen centre. A plain RenderStepped
+    -- connection can still LOSE that fight when the game's write runs later in
+    -- the same frame (Violence District's look scripts do), so bind at
+    -- RenderPriority.Last to get the final word each frame.
+    Library.MouseFreeBindName = "wh_mousefree_" .. tostring(math.floor(os.clock() * 1e6))
+    if not pcall(function()
+        RunService:BindToRenderStep(Library.MouseFreeBindName, Enum.RenderPriority.Last.Value, function()
+            if Library.WindowOpenState and UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
+                UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+            end
+        end)
+    end) then
+        Library.MouseFreeBindName = nil
+        Library:Connect(RunService.RenderStepped, function()
+            if Library.WindowOpenState and UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
+                UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+            end
+        end)
+    end
 
     Library.RegisterSettingsWidget = function(Self, Data)
         if type(Data) ~= "table" then
