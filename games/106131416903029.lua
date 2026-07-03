@@ -1,5 +1,5 @@
 -- ============================================================
---  games/106131416903029.lua  --  🍓 Cook & Sell! [ALPHA]  (Alpaca Games / "Riese")
+--  games/106131416903029.lua  --  Cook & Sell! [ALPHA]  (Alpaca Games / "Riese")
 --
 --  Restaurant tycoon. Loop: cook food in the pot -> 8 plated items land in
 --  UnplacedProducts -> stock shelves -> customers buy -> checkout at register

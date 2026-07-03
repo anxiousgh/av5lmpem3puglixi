@@ -1,5 +1,5 @@
 -- ============================================================
---  games/70959844973091.lua  --  😈 Split or Steal Brainrot
+--  games/70959844973091.lua  --  Split or Steal Brainrot
 --
 --  Per-game module: loads the universal base first (so movement/etc. still
 --  work), then adds a "Brainrot" page with an auto cash collector.

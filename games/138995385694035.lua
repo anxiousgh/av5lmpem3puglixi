@@ -8,8 +8,8 @@
 --    Checks   : visible(+origin)/knocked/grabbed/forcefield/loaded -- global
 --               target-validity filters respected by all targeting + shooting
 --    FX       : Hit Chams, Target Line, Tracers, Hit Sound, Target Outline
---    HUD      : Radar, Damage Numbers, Hitmarker (+kill marker/sound), Killfeed,
---               Kill Effect (neon dissolve + shockwave)
+--    HUD      : Radar (sweep + pings), Damage Numbers, Killfeed,
+--               Kill Effect (neon dissolve + shockwave) + kill sound
 --    Misc     : Anti-AFK badge, Force-AFK badge, Godmode
 --
 --  HC Shoot payload (witherhook, no-kick form -- origin==aim is a degenerate
@@ -117,7 +117,7 @@ local HC = {
     -- HUD + kill fx
     radar = false, radarSize = 180, radarRange = 300,
     dmgNumbers = false, dmgNumScale = 1.0,
-    hitmarker = false, hitmarkerKill = true, hitmarkerSound = false, killSoundId = 102740241606246,
+    killSound = false, killSoundId = 102740241606246,
     killfeed = false, killfeedTime = 5,
     killEffect = false,
 }
@@ -865,7 +865,7 @@ end
 
 -- ============================================================
 --  KILL FX + HUD  -- kill effect (neon dissolve + shockwave), damage numbers,
---  screen hitmarker, kill sound, radar, killfeed. All client-side visuals
+--  kill sound, radar, killfeed. All client-side visuals
 --  driven off the same confirmed-hit watcher as the hit sound.
 --  Scoped in a do-block (ONE exported local) -- the main chunk was about to
 --  blow Luau's 200-locals-per-scope limit.
@@ -986,15 +986,18 @@ local function spawnDmgNumber(model, dmg)
     lbl.FontFace = face
     lbl.Text = "-" .. d
     lbl.TextColor3 = themeC("Text", Color3.fromRGB(240, 240, 242))   -- always white
-    lbl.TextSize = (11 + hot * 4) * math.clamp(HC.dmgNumScale, 0.5, 2)
+    local size = (11 + hot * 4) * math.clamp(HC.dmgNumScale, 0.5, 2)
+    lbl.TextSize = math.max(1, size * 0.4)   -- pop-in: grow past full, settle
     lbl.TextStrokeColor3 = themeC("Border", Color3.fromRGB(10, 10, 12))
     lbl.TextStrokeTransparency = 0.5
     lbl.Parent = bb
     task.spawn(function()
-        for i = 1, 14 do   -- drift up, fade over the back half
+        local POP = { 0.75, 1.18, 1.06, 1 }   -- overshoot curve over the first 4 steps
+        for i = 1, 14 do   -- pop, drift up, fade over the back half
             task.wait(0.05)
             if not holder.Parent then break end
             local a = i / 14
+            lbl.TextSize = size * (POP[i] or 1)
             bb.StudsOffset = Vector3.new(0, 0.4 + a * 2.4, 0)
             lbl.TextTransparency = a < 0.5 and 0 or (a - 0.5) * 2
             lbl.TextStrokeTransparency = 0.15 + a * 0.85
@@ -1004,63 +1007,37 @@ local function spawnDmgNumber(model, dmg)
     end)
 end
 
--- ---- hitmarker: 4-leg X flash at the mouse; kill = bigger, red, slower ----
-local hmGui
-local function destroyHmGui()
-    if hmGui then pcall(function() hmGui:Destroy() end); hmGui = nil end
-end
-local function ensureHmGui()
-    if hmGui and hmGui.Parent then return end
-    hmGui = Instance.new("ScreenGui")
-    hmGui.Name = "\0_hm"; hmGui.IgnoreGuiInset = true; hmGui.ResetOnSpawn = false
-    local ok = pcall(function() hmGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
-    if not ok or not hmGui.Parent then hmGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
-end
-local function flashHitmarker(kill)
-    ensureHmGui()
-    local mp = UIS:GetMouseLocation()
-    local col = kill and themeC("Risky", Color3.fromRGB(255, 70, 80)) or themeC("Text", Color3.fromRGB(240, 240, 242))
-    local len, gap, thick = kill and 16 or 11, kill and 7 or 5, kill and 3 or 2
-    local holder = Instance.new("Frame")
-    holder.BackgroundTransparency = 1
-    holder.AnchorPoint = Vector2.new(0.5, 0.5)
-    holder.Position = UDim2.fromOffset(mp.X, mp.Y)
-    holder.Size = UDim2.fromOffset(2, 2)
-    holder.Parent = hmGui
-    local legs = {}
-    for _, dxy in ipairs({ {1,1}, {1,-1}, {-1,1}, {-1,-1} }) do
-        local dx, dy = dxy[1], dxy[2]
-        local ln = Instance.new("Frame")
-        ln.BorderSizePixel = 0; ln.BackgroundColor3 = col
-        ln.AnchorPoint = Vector2.new(0.5, 0.5)
-        ln.Size = UDim2.fromOffset(len, thick)
-        ln.Rotation = (dx * dy > 0) and 45 or -45
-        ln.Parent = holder
-        legs[#legs + 1] = { ln = ln, dx = dx, dy = dy }
-    end
-    task.spawn(function()
-        local life, steps = kill and 0.34 or 0.22, 10
-        for i = 0, steps do
-            local a = i / steps
-            local r = (gap + len / 2 + a * 7) / 1.41421   -- legs slide outward as they fade
-            for _, L in ipairs(legs) do
-                if L.ln.Parent then
-                    L.ln.Position = UDim2.fromOffset(L.dx * r, L.dy * r)
-                    L.ln.BackgroundTransparency = a * a
-                end
-            end
-            task.wait(life / steps)
-            if not holder.Parent then return end
-        end
-        pcall(function() holder:Destroy() end)
-    end)
-end
-
 -- ---- radar: camera-relative top-down dot map (white / red = target / grey = knocked) ----
-local radarGui, radarFrame, radarDots
+local radarGui, radarFrame, radarDots, radarSweep, radarAccGrad
 local function destroyRadar()
     if radarGui then pcall(function() radarGui:Destroy() end) end
-    radarGui, radarFrame, radarDots = nil, nil, nil
+    radarGui, radarFrame, radarDots, radarSweep, radarAccGrad = nil, nil, nil, nil, nil
+end
+-- expanding hollow square where a dot just appeared (nhack is all miter squares)
+local function radarPing(x, y, col)
+    if not (radarFrame and radarFrame.Parent) then return end
+    local ring = Instance.new("Frame")
+    ring.BackgroundTransparency = 1
+    ring.AnchorPoint = Vector2.new(0.5, 0.5)
+    ring.Position = UDim2.fromOffset(x, y)
+    ring.Size = UDim2.fromOffset(5, 5)
+    local rs = Instance.new("UIStroke")
+    rs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    rs.LineJoinMode = Enum.LineJoinMode.Miter
+    rs.Color = col
+    rs.Parent = ring
+    ring.Parent = radarFrame
+    task.spawn(function()
+        for i = 1, 8 do
+            task.wait(0.03)
+            if not ring.Parent then return end
+            local a = i / 8
+            local d = 5 + a * 14
+            ring.Size = UDim2.fromOffset(d, d)
+            rs.Transparency = a
+        end
+        pcall(function() ring:Destroy() end)
+    end)
 end
 local function ensureRadar()
     if radarGui and radarGui.Parent and radarFrame and radarFrame.Parent then return end
@@ -1075,8 +1052,47 @@ local function ensureRadar()
     radarFrame.Position = UDim2.new(0, 20, 0.5, -HC.radarSize / 2)
     radarFrame.BackgroundTransparency = 0.1
     radarFrame.Active = true
+    radarFrame.ClipsDescendants = true
     radarFrame.Parent = radarGui
-    nhackPanel(radarFrame)
+    local pStroke, _, pAcc = nhackPanel(radarFrame)
+    radarAccGrad = pAcc:FindFirstChildOfClass("UIGradient")
+    -- pop-in: scale up from 92% while the panel fades to its resting look
+    do
+        local scale = Instance.new("UIScale")
+        scale.Scale = 0.92
+        scale.Parent = radarFrame
+        radarFrame.BackgroundTransparency = 1
+        pStroke.Transparency = 1
+        task.spawn(function()
+            for i = 1, 6 do
+                task.wait(0.025)
+                if not (radarFrame and radarFrame.Parent) then return end
+                local a = i / 6
+                scale.Scale = 0.92 + 0.08 * (1 - (1 - a) * (1 - a))   -- ease-out
+                radarFrame.BackgroundTransparency = 1 - a * 0.9
+                pStroke.Transparency = 1 - a
+            end
+            pcall(function() scale:Destroy() end)
+        end)
+    end
+    -- rotating sweep arm, accent-colored, bright at center fading to the tip
+    radarSweep = Instance.new("Frame")
+    radarSweep.BackgroundTransparency = 1
+    radarSweep.AnchorPoint = Vector2.new(0.5, 0.5)
+    radarSweep.Position = UDim2.fromScale(0.5, 0.5)
+    radarSweep.Size = UDim2.new(1, -8, 1, -8)
+    radarSweep.Parent = radarFrame
+    local arm = Instance.new("Frame")
+    arm.BorderSizePixel = 0
+    arm.AnchorPoint = Vector2.new(0, 0.5)
+    arm.Position = UDim2.fromScale(0.5, 0.5)
+    arm.Size = UDim2.new(0.5, 0, 0, 1)
+    arm.BackgroundColor3 = themeC("Accent", Color3.fromRGB(200, 183, 247))
+    arm.Parent = radarSweep
+    local ag = Instance.new("UIGradient")
+    ag.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.3), NumberSequenceKeypoint.new(1, 1) })
+    ag.Parent = arm
     for _, horiz in ipairs({ true, false }) do   -- faint crosshair through the middle
         local ln = Instance.new("Frame")
         ln.BorderSizePixel = 0
@@ -1132,6 +1148,10 @@ track(RunService.RenderStepped:Connect(function()
     if not HC.radar then if radarGui then destroyRadar() end return end
     ensureRadar()
     radarFrame.Size = UDim2.fromOffset(HC.radarSize, HC.radarSize)
+    if radarSweep then radarSweep.Rotation = (tick() * 70) % 360 end
+    if radarAccGrad then   -- slow sheen drifting across the accent liner
+        radarAccGrad.Offset = Vector2.new((tick() * 0.2) % 2 - 1, 0)
+    end
     local cam = Workspace.CurrentCamera
     local myM = hcModel(LocalPlayer)
     local myHrp = myM and myM:FindFirstChild("HumanoidRootPart")
@@ -1150,7 +1170,8 @@ track(RunService.RenderStepped:Connect(function()
             if hrp then
                 seen[plr] = true
                 local dot = radarDots[plr]
-                if not (dot and dot.Parent) then
+                local isNew = not (dot and dot.Parent)
+                if isNew then
                     dot = Instance.new("Frame")   -- square + miter border, like nhack's toggle indicator
                     dot.AnchorPoint = Vector2.new(0.5, 0.5)
                     dot.Size = UDim2.fromOffset(5, 5)
@@ -1170,11 +1191,16 @@ track(RunService.RenderStepped:Connect(function()
                 local edge = half - 6
                 local clamped = mag > edge
                 if clamped then x, y = x / mag * edge, y / mag * edge end
+                local isTgt = (plr == tgt)
                 dot.Position = UDim2.fromOffset(half + x, half + y)
-                dot.BackgroundColor3 = (plr == tgt) and themeC("Risky", Color3.fromRGB(255, 70, 80))
+                -- target dot breathes; everyone else stays 5px
+                dot.Size = isTgt and UDim2.fromOffset(5 + (math.sin(tick() * 8) * 0.5 + 0.5) * 3,
+                    5 + (math.sin(tick() * 8) * 0.5 + 0.5) * 3) or UDim2.fromOffset(5, 5)
+                dot.BackgroundColor3 = isTgt and themeC("Risky", Color3.fromRGB(255, 70, 80))
                     or (isKnocked(plr) and themeC("Inactive Text", Color3.fromRGB(131, 120, 162)))
                     or themeC("Text", Color3.fromRGB(240, 240, 242))
                 dot.BackgroundTransparency = clamped and 0.55 or 0   -- rim = out of range, that way
+                if isNew then pcall(radarPing, half + x, half + y, dot.BackgroundColor3) end
             end
         end
     end
@@ -1224,17 +1250,19 @@ local function killfeedAdd(plr, model)
     local e = Instance.new("Frame")
     e.LayoutOrder = _kfN
     e.AutomaticSize = Enum.AutomaticSize.X
-    e.Size = UDim2.fromOffset(0, 19)
+    e.Size = UDim2.fromOffset(0, 0)   -- unfolds to 19px tall
     e.BackgroundTransparency = 1
+    e.ClipsDescendants = true
     e.Parent = kfList
     local stroke, liner1, liner2 = nhackPanel(e)
     stroke.Transparency = 1
     liner1.BackgroundTransparency = 1
     liner2.BackgroundTransparency = 1
+    local sheen = liner2:FindFirstChildOfClass("UIGradient")
     local row = Instance.new("Frame")   -- label row (name accent-coloured => separate labels)
     row.BackgroundTransparency = 1
     row.AutomaticSize = Enum.AutomaticSize.X
-    row.Size = UDim2.new(0, 0, 1, 0)
+    row.Size = UDim2.new(0, 0, 0, 19)
     row.Parent = e
     local rl = Instance.new("UIListLayout")
     rl.FillDirection = Enum.FillDirection.Horizontal
@@ -1255,9 +1283,9 @@ local function killfeedAdd(plr, model)
         labels[#labels + 1] = lbl
         return lbl
     end
-    seg("  x ", "Risky", Color3.fromRGB(255, 70, 80))
-    seg(plr.Name, "Accent", Color3.fromRGB(200, 183, 247))
-    seg(("  -  %s  -  %d studs  "):format(gun, dist), "Text", Color3.fromRGB(240, 240, 242))
+    -- plain text, no glyphs: "name  gun  distance"
+    seg("  " .. plr.Name, "Accent", Color3.fromRGB(200, 183, 247))
+    seg(("  %s  %dm  "):format(gun, dist), "Text", Color3.fromRGB(240, 240, 242))
     -- cap the feed at 6 entries: kill the oldest
     local entries = {}
     for _, c in ipairs(kfList:GetChildren()) do
@@ -1273,20 +1301,33 @@ local function killfeedAdd(plr, model)
         for _, l in ipairs(labels) do l.TextTransparency = a end
     end
     task.spawn(function()
-        for i = 1, 6 do   -- fade in
-            task.wait(0.03)
+        for i = 1, 6 do   -- unfold open + fade in (list reflows as it grows)
+            task.wait(0.025)
             if not e.Parent then return end
-            setFade(1 - i / 6)
+            local a = i / 6
+            e.Size = UDim2.fromOffset(0, math.floor(19 * (1 - (1 - a) * (1 - a)) + 0.5))
+            setFade(1 - a)
+        end
+        if sheen then   -- one accent sheen sweeping the top liner
+            task.spawn(function()
+                for i = 0, 8 do
+                    if not liner2.Parent then return end
+                    sheen.Offset = Vector2.new(-1 + i / 4, 0)
+                    task.wait(0.035)
+                end
+                if sheen.Parent then sheen.Offset = Vector2.new(0, 0) end
+            end)
         end
         local t0 = tick()
         while tick() - t0 < math.max(1, HC.killfeedTime) do
             task.wait(0.1)
             if not e.Parent then return end
         end
-        for i = 1, 8 do   -- fade out
+        for i = 1, 8 do   -- fade out + collapse shut
             task.wait(0.045)
             if not e.Parent then return end
             setFade(i / 8)
+            e.Size = UDim2.fromOffset(0, math.floor(19 * (1 - i / 8) + 0.5))
         end
         pcall(function() e:Destroy() end)
     end)
@@ -1299,8 +1340,7 @@ local function onConfirmedHit(plr, hum, oldHP, newHP)
     local isKill = newHP <= 0.5 and (tick() - (_killT[plr] or 0) > 2)
     if isKill then _killT[plr] = tick() end
     if HC.dmgNumbers then pcall(spawnDmgNumber, model, oldHP - newHP) end
-    if HC.hitmarker then pcall(flashHitmarker, isKill and HC.hitmarkerKill) end
-    if isKill and HC.hitmarkerSound then pcall(playKillSound) end
+    if isKill and HC.killSound then pcall(playKillSound) end
     if isKill and HC.killEffect then
         pcall(spawnKillEffect, model)   -- kill effect replaces the plain hit cham on the killing blow
     elseif HC.hitChams then
@@ -1311,7 +1351,6 @@ end
 HUD.onConfirmedHit = onConfirmedHit
 HUD.destroyRadar = destroyRadar
 HUD.destroyKillfeed = destroyKillfeed
-HUD.destroyHmGui = destroyHmGui
 end
 -- shared synth fire + FX. For shotguns, retarget to the torso (largest flat
 -- area, and head shots trip HC's per-shot damage cap) like witherhook.
@@ -1433,7 +1472,7 @@ local function ensureHumWatch()
         _watchedHumLast = newHP
         if old and newHP < old - 0.01 and (tick() - _shotT < FX_WINDOW) then
             playHitSound()
-            HUD.onConfirmedHit(plr, hum, old, newHP)   -- chams/kill fx/dmg numbers/hitmarker/killfeed, each own-gated
+            HUD.onConfirmedHit(plr, hum, old, newHP)   -- chams/kill fx/dmg numbers/killfeed, each own-gated
         end
     end)
 end
@@ -2592,7 +2631,7 @@ do
         Callback = function(c) HC.outlineColor = c end })
 end
 
--- 6) HUD  -- radar, damage numbers, hitmarker, killfeed, kill effect
+-- 6) HUD  -- radar, damage numbers, killfeed, kill effect
 local HudSub = MainPage:SubPage({ Name = "HUD" })
 do
     local Sec = HudSub:Section({ Name = "Radar", Side = 1 })
@@ -2610,24 +2649,18 @@ do
     Sec2:Slider({ Name = "Scale", Flag = "HC_DmgNumScale", Min = 0.5, Max = 2, Default = 1, Decimals = 2,
         Callback = function(v) HC.dmgNumScale = v end })
 
-    local Sec3 = HudSub:Section({ Name = "Hitmarker", Side = 2 })
-    Sec3:Toggle({ Name = "Hitmarker", Flag = "HC_Hitmarker", Default = false,
-        Callback = function(v) HC.hitmarker = v end })
-    Sec3:Toggle({ Name = "Kill marker (red)", Flag = "HC_HitmarkerKill", Default = true,
-        Callback = function(v) HC.hitmarkerKill = v end })
-    Sec3:Toggle({ Name = "Kill sound", Flag = "HC_KillSound", Default = false,
-        Callback = function(v) HC.hitmarkerSound = v end })
-
-    local Sec4 = HudSub:Section({ Name = "Killfeed", Side = 2 })
-    Sec4:Toggle({ Name = "Killfeed", Flag = "HC_Killfeed", Default = false,
+    local Sec3 = HudSub:Section({ Name = "Killfeed", Side = 2 })
+    Sec3:Toggle({ Name = "Killfeed", Flag = "HC_Killfeed", Default = false,
         Callback = function(v) HC.killfeed = v end })
-    Sec4:Slider({ Name = "Entry lifetime", Flag = "HC_KillfeedTime", Min = 2, Max = 12, Default = 5, Decimals = 0, Suffix = " s",
+    Sec3:Slider({ Name = "Entry lifetime", Flag = "HC_KillfeedTime", Min = 2, Max = 12, Default = 5, Decimals = 0, Suffix = " s",
         Callback = function(v) HC.killfeedTime = v end })
 
-    local Sec5 = HudSub:Section({ Name = "Kill Effect", Side = 2 })
-    Sec5:Toggle({ Name = "Kill effect (dissolve + shockwave)", Flag = "HC_KillFx", Default = false,
+    local Sec4 = HudSub:Section({ Name = "Kill Effect", Side = 2 })
+    Sec4:Toggle({ Name = "Kill effect (dissolve + shockwave)", Flag = "HC_KillFx", Default = false,
         Callback = function(v) HC.killEffect = v end })
-    Sec5:Label({ Name = "Uses the Hit Chams color." })
+    Sec4:Toggle({ Name = "Kill sound", Flag = "HC_KillSound", Default = false,
+        Callback = function(v) HC.killSound = v end })
+    Sec4:Label({ Name = "Uses the Hit Chams color." })
 end
 
 -- 7) Misc
@@ -2854,12 +2887,11 @@ local function hcCleanup()
     HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
     HC.hitChams = false
-    HC.radar, HC.dmgNumbers, HC.hitmarker, HC.killfeed, HC.killEffect = false, false, false, false, false
+    HC.radar, HC.dmgNumbers, HC.killfeed, HC.killEffect, HC.killSound = false, false, false, false, false
     pcall(clearChams)
     pcall(clearTracerHL)
     pcall(HUD.destroyRadar)
     pcall(HUD.destroyKillfeed)
-    pcall(HUD.destroyHmGui)
     voidUnglue()
     pcall(function() RunService:UnbindFromRenderStep("WH_HC_STOMP_RESTORE") end)
     pcall(stompUnglue)         -- stop any stomp desync
