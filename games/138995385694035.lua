@@ -51,15 +51,33 @@ local function getMainEvent() return ReplicatedStorage:FindFirstChild("MainEvent
 -- HC parks character models under workspace.Players.Characters normally, but moves
 -- players who are in a 1v1 into workspace.Players.InBox. Scan every subfolder so the
 -- knocked/dead checks find the model wherever the game put it.
+-- consolidated perf caches -- ONE main-chunk local (this file rides Luau's
+-- 200-locals-per-scope limit; add future cache state as fields, not new locals)
+local PC = {
+    hcm = {},                      -- hcModel memo
+    vis = {},                      -- isVisible memo
+    visParams = nil, visParamsT = 0,
+    tgt = {}, tgtT = 0,            -- getTarget frame cache
+    wbVizT = 0, wbVizOrigin = nil, -- wallbang visualizer throttle
+}
+-- memoized: this gets hammered every frame from targeting/radar/checks, and the raw
+-- folder scan + FindFirstChild-by-name is expensive at 40 players. 0.3s TTL + a
+-- Parent check (a destroyed model on respawn recomputes immediately).
 local function hcModel(plr)
+    local c = PC.hcm[plr]
+    local now = os.clock()
+    if c and now - c.t < 0.3 and c.m and c.m.Parent then return c.m end
+    local m
     local wsp = Workspace:FindFirstChild("Players")
     if wsp then
         for _, folder in ipairs(wsp:GetChildren()) do
-            local m = folder:FindFirstChild(plr.Name)
-            if m and m:IsA("Model") then return m end
+            local f = folder:FindFirstChild(plr.Name)
+            if f and f:IsA("Model") then m = f; break end
         end
     end
-    return plr.Character
+    m = m or plr.Character
+    PC.hcm[plr] = { t = now, m = m }
+    return m
 end
 local function isKnocked(plr)
     local m = hcModel(plr)
@@ -205,28 +223,47 @@ local function visOrigin()
     if mode == "Root" then local r = c and c:FindFirstChild("HumanoidRootPart"); return r and r.Position end
     local h = c and c:FindFirstChild("Head"); return h and h.Position  -- "Head" (default + Tool-Handle fallback)
 end
-local function isVisible(plr)
-    local m = hcModel(plr)
-    local aim = m and (m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Head"))
-    if not aim then return false end
-    local origin = visOrigin(); if not origin then return true end
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
+-- ignore ALL players' bodies (incl. the target -- ray runs to the aim position, so a
+-- clear ray == visible; bodies in between never block). Excluding the target too lets
+-- one shared exclude list / RaycastParams serve every player, rebuilt at 4 Hz instead
+-- of per call (the old per-call rebuild was O(players) allocs, dozens of times a frame).
+function PC.getVisParams()
+    local now = os.clock()
+    if PC.visParams and now - PC.visParamsT < 0.25 then return PC.visParams end
     local ignore = {}
     local lc = LocalPlayer.Character; if lc then ignore[#ignore + 1] = lc end
     local ig = Workspace:FindFirstChild("Ignored"); if ig then ignore[#ignore + 1] = ig end
-    -- ignore OTHER players' bodies so someone standing between us doesn't block the
-    -- LoS check (keep the target m, so "first hit is the target = visible" still holds).
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
             local pm = hcModel(p)
-            if pm and pm ~= m then ignore[#ignore + 1] = pm end
+            if pm then ignore[#ignore + 1] = pm end
         end
     end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = ignore
-    local res = Workspace:Raycast(origin, aim.Position - origin, params)
-    if not res then return true end          -- nothing in the way
-    return res.Instance:IsDescendantOf(m)     -- first hit is the target = visible
+    PC.visParams, PC.visParamsT = params, now
+    return params
+end
+local function isVisible(plr)
+    local now = os.clock()
+    local c = PC.vis[plr]
+    if c and now - c.t < 0.1 then return c.v end
+    local v
+    local m = hcModel(plr)
+    local aim = m and (m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Head"))
+    if not aim then
+        v = false
+    else
+        local origin = visOrigin()
+        if not origin then
+            v = true
+        else
+            v = Workspace:Raycast(origin, aim.Position - origin, PC.getVisParams()) == nil
+        end
+    end
+    PC.vis[plr] = { t = now, v = v }
+    return v
 end
 -- persistent state checks (used for validity + lock-list membership)
 local function passesChecks(plr)
@@ -330,22 +367,35 @@ end
 -- if Auto switch is on), filtered by ALL checks incl. visibility.
 -- ignoreChecks=true skips the checks (validity only) -- used by the target visualizer
 -- so the line/outline keep showing the locked target even when it fails the checks.
+-- Frame-cached (~1-2 frames): radar / visuals / auto-shoot / watchers all call this
+-- every frame -- without the cache each call re-scans the pool (checks + raycasts).
 local function getTarget(ignoreChecks)
-    local locked = liveTargets()
-    local pool
-    if #locked > 0 then pool = locked
-    elseif HC.autoSwitch then pool = Players:GetPlayers()
-    else return nil end
-    local filter = (type(ignoreChecks) == "function") and ignoreChecks   -- custom filter (knife bot)
-        or (ignoreChecks == true and validTarget)                        -- ignore all checks
-        or canEngage                                                     -- all checks (default)
-    local best, bestScore = nil, math.huge
-    for _, plr in ipairs(pool) do
-        if filter(plr) then
-            local s = scorePlayer(plr)
-            if s < bestScore then bestScore = s; best = plr end
+    local key = (type(ignoreChecks) == "function") and ignoreChecks
+        or (ignoreChecks == true and "t") or "d"
+    local now = os.clock()
+    if now - PC.tgtT > 0.02 then table.clear(PC.tgt); PC.tgtT = now end
+    local hit = PC.tgt[key]
+    if hit ~= nil then return hit or nil end   -- false = cached "no target"
+    local function compute()
+        local locked = liveTargets()
+        local pool
+        if #locked > 0 then pool = locked
+        elseif HC.autoSwitch then pool = Players:GetPlayers()
+        else return nil end
+        local filter = (type(ignoreChecks) == "function") and ignoreChecks   -- custom filter (knife bot)
+            or (ignoreChecks == true and validTarget)                        -- ignore all checks
+            or canEngage                                                     -- all checks (default)
+        local best, bestScore = nil, math.huge
+        for _, plr in ipairs(pool) do
+            if filter(plr) then
+                local s = scorePlayer(plr)
+                if s < bestScore then bestScore = s; best = plr end
+            end
         end
+        return best
     end
+    local best = compute()
+    PC.tgt[key] = best or false
     return best
 end
 
@@ -439,7 +489,9 @@ function wallbangOrigin(realOrigin, part)
     table.sort(cands, function(a, b) return a.Magnitude < b.Magnitude end)  -- closest first
     for _, off in ipairs(cands) do
         local origin = realOrigin + off
-        if inAir(origin) and clearFrom(origin) and inRange(origin) then return origin end   -- open air, shootable, in range
+        -- inRange (pure math) first, then the raycast (cheap, rejects most), then the
+        -- overlap query (priciest) -- order matters, this loop can run 200+ candidates
+        if inRange(origin) and clearFrom(origin) and inAir(origin) then return origin end   -- open air, shootable, in range
     end
     return nil                                                -- nothing valid within budget
 end
@@ -455,11 +507,18 @@ function canWallbangPlr(plr)
     if not aim then return false end
     local now = os.clock()
     local c = _wbCache[plr]
-    if c and now - c.t < 0.2 then return c.v end
+    -- a NEGATIVE result means the full candidate search ran dry (the worst case, ~500
+    -- spatial queries) -- cache those 3x longer than positives so a fully-enclosed
+    -- target doesn't re-burn the whole search 5x a second
+    if c and now - c.t < (c.v and 0.2 or 0.6) then return c.v end
     local v = wallbangOrigin(root.Position, aim) ~= nil
     _wbCache[plr] = { t = now, v = v }
     return v
 end
+-- drop per-player cache entries when they leave (all keyed by Player instance)
+track(Players.PlayerRemoving:Connect(function(p)
+    _wbCache[p] = nil; PC.vis[p] = nil; PC.hcm[p] = nil
+end))
 
 -- spoofed shot origin (wallbang / voidshoot) so the tracer FX can start from it, not the muzzle
 local _fhSpoofOrigin, _fhSpoofAt = nil, 0
@@ -2424,7 +2483,17 @@ track(RunService.RenderStepped:Connect(function()
         local lc = LocalPlayer.Character
         local root = lc and lc:FindFirstChild("HumanoidRootPart")
         local part = forceShotPart(char)
-        local origin = (root and part) and wallbangOrigin(root.Position, part) or nil
+        -- the candidate search is way too heavy to run per frame -- 10 Hz, cached between
+        local origin
+        if root and part then
+            if os.clock() - PC.wbVizT >= 0.1 then
+                PC.wbVizT = os.clock()
+                PC.wbVizOrigin = wallbangOrigin(root.Position, part)
+            end
+            origin = PC.wbVizOrigin
+        else
+            PC.wbVizOrigin = nil
+        end
         if origin and (origin - root.Position).Magnitude > 0.5 then
             mk.Position = origin
             mk.Transparency = 0.3

@@ -485,69 +485,105 @@ do
     local GLOW_LIMIT  = 6    -- PointLights are FAR costlier than Highlights (dynamic lighting
                              -- tanks FPS) -- only the closest few get the glow aura
 
+    local function hideObjs(o)
+        o.box.Visible = false; o.solid.Visible = false; o.name.Visible = false
+        o.dist.Visible = false; o.health.Visible = false; o.tracer.Visible = false
+        if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
+        if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
+    end
+
+    local espWasActive = false
+    local chamsTopC, glowTopC, chamsTopT = nil, nil, 0
     track(RunService.RenderStepped:Connect(function()
+        -- ESP off: hide everything ONCE, then the loop is a single cheap check per
+        -- frame instead of a full property sweep over every player
+        if not Esp.enabled then
+            if espWasActive then
+                espWasActive = false
+                for _, o in pairs(objs) do
+                    if o.box then hideObjs(o); o._shown = false end
+                    if o.chams then o.chams.Enabled = false end
+                    if o.glow then pcall(function() o.glow:Destroy() end); o.glow = nil end
+                end
+            end
+            return
+        end
+        espWasActive = true
         local cam = Workspace.CurrentCamera
         local vp = cam.ViewportSize
         local mouse = UserInputService:GetMouseLocation()
         local myHRP = getHRP()
 
-        -- chams render budget: Roblox only draws ~32 Highlights, so each frame
-        -- pick the CHAMS_LIMIT players closest to us and only those get one (the
-        -- rest are disabled). Without this, far/extra players silently fail to
-        -- highlight -- which also looked like "respawned/joined players don't get
-        -- chams" once the cap was already used up by everyone else.
+        -- chams render budget: Roblox only draws ~32 Highlights, so pick the
+        -- CHAMS_LIMIT players closest to us and only those get one (the rest are
+        -- disabled). Without this, far/extra players silently fail to highlight --
+        -- which also looked like "respawned/joined players don't get chams" once
+        -- the cap was already used up by everyone else. WHO gets a highlight only
+        -- needs refreshing a few times a second, not per frame -- the sort +
+        -- alive-scan over every player was measurable at 40 players.
         local chamsTop, glowTop = nil, nil
-        if Esp.enabled and Esp.chams then
-            chamsTop, glowTop = {}, {}
-            local list = {}
-            local myPos = myHRP and myHRP.Position
-            for plr2 in pairs(objs) do
-                if teamOk(plr2, Esp.teamCheck) then
-                    local ch = aliveChar(plr2)
-                    local h2 = ch and ch:FindFirstChild("HumanoidRootPart")
-                    if h2 then
-                        list[#list + 1] = { plr2, myPos and (h2.Position - myPos).Magnitude or 0 }
+        if Esp.chams then
+            local now = os.clock()
+            if not chamsTopC or now - chamsTopT > 0.2 then
+                chamsTopT = now
+                chamsTopC, glowTopC = {}, {}
+                local list = {}
+                local myPos = myHRP and myHRP.Position
+                for plr2 in pairs(objs) do
+                    if teamOk(plr2, Esp.teamCheck) then
+                        local ch = aliveChar(plr2)
+                        local h2 = ch and ch:FindFirstChild("HumanoidRootPart")
+                        if h2 then
+                            list[#list + 1] = { plr2, myPos and (h2.Position - myPos).Magnitude or 0 }
+                        end
                     end
                 end
+                table.sort(list, function(a, b) return a[2] < b[2] end)
+                for i = 1, math.min(#list, CHAMS_LIMIT) do chamsTopC[list[i][1]] = true end
+                for i = 1, math.min(#list, GLOW_LIMIT) do glowTopC[list[i][1]] = true end
             end
-            table.sort(list, function(a, b) return a[2] < b[2] end)
-            for i = 1, math.min(#list, CHAMS_LIMIT) do chamsTop[list[i][1]] = true end
-            for i = 1, math.min(#list, GLOW_LIMIT) do glowTop[list[i][1]] = true end
+            chamsTop, glowTop = chamsTopC, glowTopC
+        else
+            chamsTopC, glowTopC = nil, nil
         end
 
         for plr, o in pairs(objs) do
             if not o.box then continue end
-            -- hide everything first
-            o.box.Visible = false; o.solid.Visible = false; o.name.Visible = false
-            o.dist.Visible = false; o.health.Visible = false; o.tracer.Visible = false
-            if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
-            if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
+            -- hide everything first -- but only if something was drawn last frame
+            -- (spares the full Visible=false sweep for off/inactive players)
+            if o._shown then o._shown = false; hideObjs(o) end
 
-            local active = Esp.enabled and teamOk(plr, Esp.teamCheck)
+            local active = teamOk(plr, Esp.teamCheck)
             local char, hum = nil, nil
             if active then char, hum = aliveChar(plr) end
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
             -- chams: closest 32 get an AlwaysOnTop Highlight + a soft glow aura
             if active and char and Esp.chams and chamsTop and chamsTop[plr] then
+                -- write Instance properties only on actual change -- redundant writes
+                -- still run the full property-invalidation path every frame
                 local h = ensureChams(o, char)
-                h.Enabled = true
-                h.FillColor = Esp.chamsFill
-                h.OutlineColor = Esp.chamsOutline
-                h.FillTransparency = Esp.chamsTransparency
-                h.OutlineTransparency = 0
+                if not h.Enabled then h.Enabled = true end
+                if h.FillColor ~= Esp.chamsFill then h.FillColor = Esp.chamsFill end
+                if h.OutlineColor ~= Esp.chamsOutline then h.OutlineColor = Esp.chamsOutline end
+                if h.FillTransparency ~= Esp.chamsTransparency then h.FillTransparency = Esp.chamsTransparency end
+                if h.OutlineTransparency ~= 0 then h.OutlineTransparency = 0 end
                 if glowTop and glowTop[plr] then
                     local lt = ensureGlow(o, char)
-                    if lt then lt.Enabled = true; lt.Color = Esp.chamsFill end
+                    if lt then
+                        if not lt.Enabled then lt.Enabled = true end
+                        if lt.Color ~= Esp.chamsFill then lt.Color = Esp.chamsFill end
+                    end
                 elseif o.glow then pcall(function() o.glow:Destroy() end); o.glow = nil end
             else
-                if o.chams then o.chams.Enabled = false end
+                if o.chams and o.chams.Enabled then o.chams.Enabled = false end
                 -- destroy (not just disable) the glow light so it fully disappears
                 -- the moment chams is off / the player drops out of the closest set
                 if o.glow then pcall(function() o.glow:Destroy() end); o.glow = nil end
             end
 
             if active and hrp then
+                o._shown = true   -- something below may draw; next frame's hide sweep runs
                 local center, on = cam:WorldToViewportPoint(hrp.Position)
                 local top = cam:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
                 local bot = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
