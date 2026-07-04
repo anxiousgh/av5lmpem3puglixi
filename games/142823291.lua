@@ -88,11 +88,85 @@ local function findMurderer()
     return nil
 end
 
+-- ============================================================
+--  Wallbang -- shoot the murderer through walls.
+--  The server checks the shot ORIGIN sits at our real gun muzzle (small
+--  tolerance) then raycasts origin -> target, so a wall between the muzzle
+--  and the murderer eats the shot. wallbangOrigin() finds an alternate
+--  origin within a stud budget that (a) isn't buried in a wall and (b) has
+--  clear line-of-sight to the target, so the server's ray reaches them.
+--  Ported from the Hood Customs origin-spoof. nil = fully enclosed / out of
+--  budget -> skip the shot rather than fire a blocked (and rejected) one.
+-- ============================================================
+local WB_CAP       = 12     -- hard budget cap (origin-mismatch kick guard); MM2's exact
+                            -- tolerance is unverified -- lower the slider if you get kicked.
+local WB_MAX_RANGE = 5000   -- MM2's gun has no practical range cap
+local wbEnabled = false
+local wbOffset  = 10        -- origin-spoof budget in studs (slider-controlled)
+
+local function wallbangOrigin(realOrigin, part)
+    local targetPos = part.Position
+    local toT = targetPos - realOrigin
+    if toT.Magnitude < 1e-3 then return realOrigin end
+    local fwd = toT.Unit
+    local ignore = {}
+    local lc = LocalPlayer.Character; if lc then ignore[#ignore + 1] = lc end
+    local tchar = part:FindFirstAncestorWhichIsA("Model"); if tchar then ignore[#ignore + 1] = tchar end
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = ignore
+    local op = OverlapParams.new()
+    op.FilterType = Enum.RaycastFilterType.Exclude
+    op.FilterDescendantsInstances = ignore
+    local function clearFrom(from)   -- clear LoS to the target? (walls block)
+        return Workspace:Raycast(from, targetPos - from, rp) == nil
+    end
+    local function inAir(pos)        -- NOT embedded in a solid wall?
+        local ok, parts = pcall(function() return Workspace:GetPartBoundsInRadius(pos, 0.6, op) end)
+        if not ok then return true end
+        for _, p in ipairs(parts) do if p.CanCollide then return false end end
+        return true
+    end
+    local function inRange(pos)
+        return (targetPos - pos).Magnitude <= WB_MAX_RANGE
+    end
+    if clearFrom(realOrigin) and inRange(realOrigin) then return realOrigin end   -- already clear, no spoof
+    local budget = math.min(wbOffset, WB_CAP)
+    -- basis for sideways peeks around cover
+    local up0 = math.abs(fwd.Y) > 0.99 and Vector3.new(1, 0, 0) or Vector3.new(0, 1, 0)
+    local right = fwd:Cross(up0); right = (right.Magnitude > 0 and right.Unit) or Vector3.new(1, 0, 0)
+    local up = right:Cross(fwd).Unit
+    local worldUp = Vector3.new(0, 1, 0)
+    local cands = {}
+    local function add(off) if off.Magnitude <= budget then cands[#cands + 1] = off end end
+    for f = 1, budget, 1 do add(fwd * f) end                  -- straight through the wall
+    for u = 1, budget, 1 do                                   -- up into the air (shoot someone below)
+        add(worldUp * u)
+        add(fwd * math.min(3, budget) + worldUp * u)
+    end
+    for f = 0, budget, 2 do                                   -- peek around cover (every side)
+        for l = 2, budget, 2 do
+            for a = 0, 315, 45 do
+                local rad = math.rad(a)
+                add(fwd * f + (right * math.cos(rad) + up * math.sin(rad)) * l)
+            end
+        end
+    end
+    table.sort(cands, function(a, b) return a.Magnitude < b.Magnitude end)  -- closest valid first
+    for _, off in ipairs(cands) do
+        local origin = realOrigin + off
+        -- inRange (pure math) first, then the raycast, then the overlap query -- cheapest first
+        if inRange(origin) and clearFrom(origin) and inAir(origin) then return origin end
+    end
+    return nil                                                -- nothing valid within budget
+end
+
 local SHOOT_ERR = {
     no_gun      = "You don't have the Gun -- only the Sheriff can shoot.",
     no_murderer = "No player is holding the Knife right now.",
     no_victim   = "The murderer's character isn't loaded.",
     no_my_hrp   = "Your character isn't loaded yet.",
+    no_wb       = "Wallbang: no clear origin to the murderer (too enclosed -- raise the offset).",
 }
 local function shootMurderer()
     local remote = findGunShoot()
@@ -114,6 +188,13 @@ local function shootMurderer()
     local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     local att = hrp and hrp:FindFirstChild("GunRaycastAttachment")
     local muzzle = (att and att.WorldPosition) or (hrp and hrp.Position) or aimPos
+    -- Wallbang: if a wall blocks muzzle -> murderer, spoof the origin to a
+    -- clear-LoS point within budget so the server's ray still reaches them.
+    if wbEnabled then
+        local spoof = wallbangOrigin(muzzle, part)
+        if not spoof then return false, "no_wb" end
+        muzzle = spoof
+    end
     local origin = CFrame.new(muzzle, aimPos)
     pcall(function() remote:FireServer(origin, theirCF) end)
     return true
@@ -355,6 +436,11 @@ SheriffSec:Label({ Name = "Shoot key" }):Keybind({
 SheriffSec:Slider({ Name = "Ping prediction", Flag = "MM2_ShootPredict", Min = 0, Max = 300, Default = 100, Decimals = 0, Suffix = " %",
     Callback = function(v) shootPredict = v / 100 end })
 SheriffSec:Label({ Name = "leads the shot by ping x velocity (0 = off)" })
+SheriffSec:Toggle({ Name = "Wallbang (shoot through walls)", Flag = "MM2_Wallbang", Default = false,
+    Callback = function(v) wbEnabled = v end })
+SheriffSec:Slider({ Name = "Wallbang offset", Flag = "MM2_WallbangOffset", Min = 2, Max = 12, Default = 10, Decimals = 0, Suffix = " studs",
+    Callback = function(v) wbOffset = v end })
+SheriffSec:Label({ Name = "origin-spoof budget; lower it if you get kicked" })
 
 local KnifeSec = Sub:Section({ Name = "Murderer knife", Side = 1 })
 KnifeSec:Button({ Name = "Kill all", Callback = function() knifeKillAll(nil) end })
