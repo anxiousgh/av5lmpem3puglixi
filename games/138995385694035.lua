@@ -86,7 +86,7 @@ local HC = {
     checkVisible = false, visibleOrigin = "Tool Handle",
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
-    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 11,
+    forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 10,
     wbVisualize = false,  -- marker at the spot the wallbang would spoof the origin to
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
@@ -370,14 +370,14 @@ end
 -- spread PRNG check -- sending a non-degenerate aim (real bulletOrigin->target)
 -- makes the server validate spread and KICK for "spoofing spread pattern".
 -- Normal is set to the hit position (not a unit vector) to match exactly.
--- Wallbang ("if possible"): the server only lets us spoof our shot origin by ~10-11 studs
+-- Wallbang ("if possible"): the server only lets us spoof our shot origin by ~10 studs
 -- before "origin mismatch", and it raycasts origin -> hit (blocked LoS = "wallbang" error,
 -- and an origin INSIDE a wall also errors). So a valid spoof origin must be (a) within
 -- budget, (b) in OPEN AIR -- not embedded in a wall -- and (c) have clear LoS to the target.
 -- We gather candidates (straight through the wall, UP into the sky to shoot someone below,
 -- and peeks around cover) and pick the CLOSEST valid one. nil = skip the shot (no error).
--- HARD CAP 11: the server kicks for origin mismatch past this -- never exceed it.
-local WB_HARD_CAP = 11
+-- HARD CAP 10: the server kicks for origin mismatch past this (11 still errored) -- never exceed it.
+local WB_HARD_CAP = 10
 -- The server rejects a shot whose ORIGIN is farther than this from the hit ("range too long").
 -- The origin-spoof (<=WB_HARD_CAP studs) can therefore extend our effective reach: sit up to
 -- WB_HARD_CAP studs past this, and pull the spoofed origin back inside it. 2-stud safety margin.
@@ -1918,7 +1918,7 @@ local function tpShoot()
     if SHARED then SHARED.pause = true end
     local saved = (SHARED and SHARED.realCF) or lhrp.CFrame
     local savedWbOffset = HC.wallbangOffset
-    if method == "Wallbang" or method == "Max Range" then HC.wallbangOffset = 9 end   -- tighter origin-spoof budget for TP-shoot (stay well under the 11-stud mismatch cap)
+    if method == "Wallbang" or method == "Max Range" then HC.wallbangOffset = 9 end   -- tighter origin-spoof budget for TP-shoot (stay well under the 10-stud mismatch cap)
     local function curHRP()
         local c = LocalPlayer.Character
         return c and c:FindFirstChild("HumanoidRootPart")
@@ -2468,7 +2468,7 @@ do
         Callback = function(v) HC.forceHitCooldown = v / 1000 end })
     Sec2:Toggle({ Name = "Wallbang if possible", Flag = "HC_Wallbang", Default = false,
         Callback = function(v) HC.wallbang = v end })
-    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 11, Default = 11, Decimals = 0, Suffix = " studs",
+    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 10, Default = 10, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.wallbangOffset = v end })
     Sec2:Toggle({ Name = "Visualize wallbang spot", Flag = "HC_WbVisualize", Default = false,
         Callback = function(v) HC.wbVisualize = v end })
