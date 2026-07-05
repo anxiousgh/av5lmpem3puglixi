@@ -1704,7 +1704,15 @@ track(RunService.Heartbeat:Connect(function()
     local g = gv()
     local dsOn = HC.asSpoofCheck and g and g.WH and g.WH.desyncIsOn and g.WH.desyncIsOn() and true or false
     if dsOn and PC.dsBurst then return end   -- a burst is already mid-flight
-    if (lhrp.Position - hrp.Position).Magnitude > maxDist then _asWasEngaged = false; return end
+    -- REAL position for the range gate: the desync's spoof ALSO runs on Heartbeat and fires
+    -- before this loop, so lhrp may already sit at the void here -- every target then reads
+    -- out of range and the burst never triggers. Its captured realCF is the truth.
+    local realPos = lhrp.Position
+    if dsOn then
+        local sh = g._WH_DESYNC
+        if sh and sh.realCF then realPos = sh.realCF.Position end
+    end
+    if (realPos - hrp.Position).Magnitude > maxDist then _asWasEngaged = false; return end
     if HC.autoShootVis and char:FindFirstChildOfClass("ForceField") then _asWasEngaged = false; return end
     -- React INSTANTLY the moment a target becomes engageable (new target, or one that just
     -- rushed/teleported into range) so we get the first shot off; only then fall back to the

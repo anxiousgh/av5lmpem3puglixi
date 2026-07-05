@@ -930,13 +930,31 @@ do
         Callback = function(state) enabledToggle:Set(state and true or false) end })
 
     -- cross-module handle (HC auto-shoot's desync burst): read/drive the desync from a
-    -- game module. Set() goes through the UI toggle so flag, visuals and state stay in sync.
+    -- game module. Set() goes through the UI toggles so flag, visuals and state stay in
+    -- sync. Covers BOTH paths -- the heartbeat-spoof Enabled toggle AND RakNet freeze:
+    -- Set(false) remembers which of the two was on, Set(true) restores exactly those.
     do
         local g = getgenv and getgenv()
         if g then
             g.WH = g.WH or {}
-            g.WH.desyncIsOn = function() return Desync.enabled end
-            g.WH.desyncSet = function(on) pcall(function() enabledToggle:Set(on and true or false) end) end
+            local SH = g._WH_DESYNC
+            g.WH.desyncIsOn = function() return (Desync.enabled or (SH and SH.freeze)) and true or false end
+            g.WH.desyncSet = function(on)
+                if on then
+                    local m = SH and SH.burstRestore
+                    if SH then SH.burstRestore = nil end
+                    if m then
+                        if m.enabled then pcall(function() enabledToggle:Set(true) end) end
+                        if m.freeze then pcall(function() freezeToggle:Set(true) end) end
+                    else
+                        pcall(function() enabledToggle:Set(true) end)
+                    end
+                else
+                    if SH then SH.burstRestore = { enabled = Desync.enabled and true or false, freeze = (SH.freeze and true) or false } end
+                    if Desync.enabled then pcall(function() enabledToggle:Set(false) end) end
+                    if SH and SH.freeze then pcall(function() freezeToggle:Set(false) end) end
+                end
+            end
         end
     end
 
