@@ -59,6 +59,7 @@ local PC = {
     visParams = nil, visParamsT = 0,
     tgt = {}, tgtT = 0,            -- getTarget frame cache
     wbVizT = 0, wbVizOrigin = nil, -- wallbang visualizer throttle
+    wbVizPart = nil, wbVizReal = nil, -- ...the part it was computed FOR + our root at compute time
 }
 -- memoized: this gets hammered every frame from targeting/radar/checks, and the raw
 -- folder scan + FindFirstChild-by-name is expensive at 40 players. 0.3s TTL + a
@@ -246,9 +247,13 @@ function PC.getVisParams()
     return params
 end
 local function isVisible(plr)
+    -- ~2-frame memo: collapses the 5 per-frame callers into one raycast without making
+    -- the engage gate laggy. The earlier 0.1s TTL quantized visibility into 100ms
+    -- blocks -- targets blinked in/out of "engageable" and auto shoot fired in stutters.
+    -- The real perf win is the shared params in getVisParams, not a long result cache.
     local now = os.clock()
     local c = PC.vis[plr]
-    if c and now - c.t < 0.1 then return c.v end
+    if c and now - c.t < 0.03 then return c.v end
     local v
     local m = hcModel(plr)
     local aim = m and (m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Head"))
@@ -509,10 +514,16 @@ function canWallbangPlr(plr)
     local c = _wbCache[plr]
     -- a NEGATIVE result means the full candidate search ran dry (the worst case, ~500
     -- spatial queries) -- cache those 3x longer than positives so a fully-enclosed
-    -- target doesn't re-burn the whole search 5x a second
-    if c and now - c.t < (c.v and 0.2 or 0.6) then return c.v end
+    -- target doesn't re-burn the whole search 5x a second. But the cache is only valid
+    -- while BOTH ends stand still: if either of us moved >2 studs the old answer is
+    -- garbage (a 0.6s "can't bang" verdict on a moving fight made targets undroppable
+    -- for over half a second after they became bangable = choppy auto shoot). Static
+    -- standoffs -- the case the cache exists for -- still hit it.
+    if c and now - c.t < (c.v and 0.2 or 0.6)
+        and (root.Position - c.rp).Magnitude < 2
+        and (aim.Position - c.ap).Magnitude < 2 then return c.v end
     local v = wallbangOrigin(root.Position, aim) ~= nil
-    _wbCache[plr] = { t = now, v = v }
+    _wbCache[plr] = { t = now, v = v, rp = root.Position, ap = aim.Position }
     return v
 end
 -- drop per-player cache entries when they leave (all keyed by Player instance)
@@ -2483,18 +2494,27 @@ track(RunService.RenderStepped:Connect(function()
         local lc = LocalPlayer.Character
         local root = lc and lc:FindFirstChild("HumanoidRootPart")
         local part = forceShotPart(char)
-        -- the candidate search is way too heavy to run per frame -- 10 Hz, cached between
-        local origin
+        -- the candidate search is way too heavy to run per frame -- 10 Hz, cached between.
+        -- The "is it a real spoof?" check must compare against the root position AT COMPUTE
+        -- TIME (PC.wbVizReal): with clear LoS the search returns that root position, and
+        -- comparing it to the CURRENT root while running made the stale point trail >0.5
+        -- studs behind -- the marker drew ON our own character. Target switch: hide until
+        -- the next tick rather than recomputing (a flapping target would re-run the full
+        -- search per frame again).
+        local origin, real
         if root and part then
+            if part ~= PC.wbVizPart then PC.wbVizOrigin = nil end
             if os.clock() - PC.wbVizT >= 0.1 then
                 PC.wbVizT = os.clock()
+                PC.wbVizPart = part
+                PC.wbVizReal = root.Position
                 PC.wbVizOrigin = wallbangOrigin(root.Position, part)
             end
-            origin = PC.wbVizOrigin
+            origin, real = PC.wbVizOrigin, PC.wbVizReal
         else
-            PC.wbVizOrigin = nil
+            PC.wbVizOrigin, PC.wbVizPart = nil, nil
         end
-        if origin and (origin - root.Position).Magnitude > 0.5 then
+        if origin and real and (origin - real).Magnitude > 0.5 then
             mk.Position = origin
             mk.Transparency = 0.3
             if wbBG then wbBG.Enabled = true end
