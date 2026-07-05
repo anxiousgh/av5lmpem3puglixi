@@ -512,17 +512,20 @@ track(RunService.RenderStepped:Connect(function()
     elseif _vmHidden then setViewmodelHidden(false) end
 end))
 
--- FREE THE MOUSE in 3rd person: the game locks the cursor (MouseBehavior=LockCenter,
--- icon hidden) for FP aiming and re-locks it LATER in the frame than RenderStepped, so
--- re-assert at RenderPriority.Last to win the fight (same trick the nhack menu uses).
-RunService:BindToRenderStep("WH_PA_MouseFree", Enum.RenderPriority.Last.Value, function()
+-- FREE THE MOUSE in 3rd person: the game re-locks the cursor (MouseBehavior=
+-- LockCurrentPosition, icon hidden) on HEARTBEAT every frame. A RenderStepped/BindToRender
+-- re-assert runs BEFORE that and loses (the old cursor flicker). A Heartbeat connection
+-- made here runs AFTER the game's (we load later in the frame order) and wins cleanly --
+-- verified no flicker. Frees + shows the cursor, but disables mouse camera-look (inherent
+-- to a free cursor), so it's its own toggle.
+track(RunService.Heartbeat:Connect(function()
     if unloaded or not current() then return end
     if not (S.thirdPerson and S.freeMouse) then return end
     if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
         UserInputService.MouseBehavior = Enum.MouseBehavior.Default
     end
     if not UserInputService.MouseIconEnabled then UserInputService.MouseIconEnabled = true end
-end)
+end))
 
 -- ============================================================
 --  UI
@@ -607,8 +610,9 @@ do
         Decimals = 0, Suffix = " studs", Callback = function(v) S.tpZoom = v; if S.thirdPerson then applyThirdPerson() end end })
     SecCam:Toggle({ Name = "Hide hands + gun", Flag = "PA_HideVM", Default = true,
         Callback = function(v) S.hideVM = v; if not v and _vmHidden then setViewmodelHidden(false) end end })
-    SecCam:Toggle({ Name = "Free mouse", Flag = "PA_FreeMouse", Default = true,
+    SecCam:Toggle({ Name = "Free mouse", Flag = "PA_FreeMouse", Default = false,
         Callback = function(v) S.freeMouse = v end })
+    SecCam:Label({ Name = "Free mouse shows the cursor but drops mouse camera-look" })
     SecCam:Label({ Name = "scroll out after enabling" })
 
     local Sec3 = Combat:Section({ Name = "Deploy", Side = 1 })
@@ -629,7 +633,6 @@ local function cleanup()
     S.silent, S.autoDeploy, S.tracerEnabled, S.killSound = false, false, false, false
     if _vmHidden then pcall(function() setViewmodelHidden(false) end) end       -- show the viewmodel
     if S.thirdPerson then S.thirdPerson = false; pcall(applyThirdPerson) end   -- restore first person
-    pcall(function() RunService:UnbindFromRenderStep("WH_PA_MouseFree") end)
     pcall(clearTracerHL)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 end
