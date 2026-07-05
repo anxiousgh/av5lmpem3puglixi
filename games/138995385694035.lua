@@ -135,7 +135,7 @@ local HC = {
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
-    tpShootMethod = "Wallbang", autoTpShoot = false,
+    tpShootMethod = "Wallbang", autoTpShoot = false, autoTpDist = 500,
     -- stomp / reload
     stomp = false, stompTargets = false, stompRadius = 5, stompTeleport = false,
     reload = false, reloadKey = Enum.KeyCode.R, reloadThreshold = 0,
@@ -2217,7 +2217,7 @@ track(RunService.Heartbeat:Connect(function()
     local m = plr.Character or hcModel(plr)
     local thrp = m and m:FindFirstChild("HumanoidRootPart"); if not thrp then return end
     local realPos = PC.realPos(); if not realPos then return end
-    if (realPos - thrp.Position).Magnitude > 500 then return end
+    if (realPos - thrp.Position).Magnitude > HC.autoTpDist then return end
     PC.autoTpsLast = tick()
     tpShoot()
 end))
@@ -2733,6 +2733,8 @@ do
         Callback = function(v) HC.tpShootMethod = (type(v) == "table" and v[1]) or v or "Wallbang" end })
     Sec3:Toggle({ Name = "Auto TPShoot", Flag = "HC_AutoTpShoot", Default = false,
         Callback = function(v) HC.autoTpShoot = v end })
+    Sec3:Slider({ Name = "Auto TPShoot distance", Flag = "HC_AutoTpDist", Min = 100, Max = 2000, Default = 500, Decimals = 0, Suffix = " studs",
+        Callback = function(v) HC.autoTpDist = v end })
     Sec3:Label({ Name = "TP shoot" }):Keybind({
         Name = "TP shoot", Flag = "HC_TpShootKey", Mode = "Hold", Default = Enum.KeyCode.F,
         Callback = function(state) if state then tpShoot() end end })
