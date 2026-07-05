@@ -79,7 +79,7 @@ local S = {
     killSound = false, killSoundId = 102740241606246, soundVolume = 1.0,
 
     -- camera: the game locks first person (CameraMode=LockFirstPerson); this frees it
-    thirdPerson = false, tpZoom = 15,
+    thirdPerson = false, tpZoom = 15, hideVM = true,   -- hideVM = hide the on-screen hands+gun
 }
 
 -- ============================================================
@@ -444,28 +444,47 @@ do
 end
 
 -- ============================================================
---  3RD PERSON  (the game forces CameraMode=LockFirstPerson; free it + allow zoom-out.
---  It only re-locks on (re)deploy, so a re-assert on the Deployed flip / respawn is
---  enough -- no per-frame loop needed.)
+--  3RD PERSON  (the game continuously re-forces CameraMode=LockFirstPerson while
+--  deployed). We win by re-asserting Classic on RenderStepped, which runs BEFORE the
+--  PlayerModule's camera update (RenderPriority.Camera=200) each frame -- so the camera
+--  is computed from OUR mode. Writes only on change to avoid redundant property sets.
 -- ============================================================
 local function applyThirdPerson()
     pcall(function()
         if S.thirdPerson then
-            LocalPlayer.CameraMode = Enum.CameraMode.Classic
-            LocalPlayer.CameraMinZoomDistance = 0.5
-            LocalPlayer.CameraMaxZoomDistance = S.tpZoom
+            if LocalPlayer.CameraMinZoomDistance ~= 0.5 then LocalPlayer.CameraMinZoomDistance = 0.5 end
+            if LocalPlayer.CameraMaxZoomDistance ~= S.tpZoom then LocalPlayer.CameraMaxZoomDistance = S.tpZoom end
+            if LocalPlayer.CameraMode ~= Enum.CameraMode.Classic then LocalPlayer.CameraMode = Enum.CameraMode.Classic end
         else
-            LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
+            if LocalPlayer.CameraMode ~= Enum.CameraMode.LockFirstPerson then
+                LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
+            end
         end
     end)
 end
-track(LocalPlayer:GetAttributeChangedSignal("Deployed"):Connect(function()
-    if S.thirdPerson and LocalPlayer:GetAttribute("Deployed") == true then
-        task.wait(0.1); applyThirdPerson()
+-- hide/show the on-screen viewmodel (hands + gun). The game animates its Transparency
+-- (reload fade) and re-parents a fresh one on equip, so re-hide each frame via
+-- LocalTransparencyModifier (client-only, overrides Transparency -> LTM=1 forces invisible).
+local _vmHidden = false
+local function setViewmodelHidden(hidden)
+    local cam = Workspace.CurrentCamera
+    local vm = cam and cam:FindFirstChild("Viewmodel")
+    if not vm then return end
+    local ltm = hidden and 1 or 0
+    for _, d in ipairs(vm:GetDescendants()) do
+        if d:IsA("BasePart") then
+            if d.LocalTransparencyModifier ~= ltm then d.LocalTransparencyModifier = ltm end
+        elseif d:IsA("Decal") or d:IsA("Texture") then
+            if d.Transparency ~= ltm then d.Transparency = ltm end
+        end
     end
-end))
-track(LocalPlayer.CharacterAdded:Connect(function()
-    if S.thirdPerson then task.wait(0.2); applyThirdPerson() end
+    _vmHidden = hidden
+end
+track(RunService.RenderStepped:Connect(function()
+    if unloaded or not S.thirdPerson then return end
+    applyThirdPerson()
+    if S.hideVM then setViewmodelHidden(true)
+    elseif _vmHidden then setViewmodelHidden(false) end
 end))
 
 -- ============================================================
@@ -528,9 +547,15 @@ do
 
     local SecCam = Combat:Section({ Name = "Camera", Side = 2 })
     SecCam:Toggle({ Name = "3rd person", Flag = "PA_ThirdPerson", Default = false,
-        Callback = function(v) S.thirdPerson = v; applyThirdPerson() end })
+        Callback = function(v)
+            S.thirdPerson = v
+            applyThirdPerson()
+            if not v and _vmHidden then setViewmodelHidden(false) end   -- back to FP: show the viewmodel
+        end })
     SecCam:Slider({ Name = "Zoom out max", Flag = "PA_TpZoom", Min = 5, Max = 40, Default = 15,
         Decimals = 0, Suffix = " studs", Callback = function(v) S.tpZoom = v; if S.thirdPerson then applyThirdPerson() end end })
+    SecCam:Toggle({ Name = "Hide hands + gun", Flag = "PA_HideVM", Default = true,
+        Callback = function(v) S.hideVM = v; if not v and _vmHidden then setViewmodelHidden(false) end end })
     SecCam:Label({ Name = "scroll out after enabling" })
 
     local Sec3 = Combat:Section({ Name = "Deploy", Side = 1 })
@@ -549,6 +574,7 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 local function cleanup()
     unloaded = true
     S.silent, S.autoDeploy, S.tracerEnabled, S.killSound = false, false, false, false
+    if _vmHidden then pcall(function() setViewmodelHidden(false) end) end       -- show the viewmodel
     if S.thirdPerson then S.thirdPerson = false; pcall(applyThirdPerson) end   -- restore first person
     pcall(clearTracerHL)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
