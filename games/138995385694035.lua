@@ -61,6 +61,7 @@ local PC = {
     wbVizT = 0, wbVizOrigin = nil, -- wallbang visualizer throttle
     wbVizPart = nil, wbVizReal = nil, -- ...the part it was computed FOR + our root at compute time
     dsBurst = false,               -- auto-shoot desync burst in flight (off -> shoot -> on)
+    autoTpsLast = 0,               -- last auto TP-shoot burst (inter-burst gap)
 }
 -- memoized: this gets hammered every frame from targeting/radar/checks, and the raw
 -- folder scan + FindFirstChild-by-name is expensive at 40 players. 0.3s TTL + a
@@ -118,7 +119,7 @@ local HC = {
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
-    tpShootMethod = "Wallbang",
+    tpShootMethod = "Wallbang", autoTpShoot = false,
     -- stomp / reload
     stomp = false, stompTargets = false, stompRadius = 5, stompTeleport = false,
     reload = false, reloadKey = Enum.KeyCode.R, reloadThreshold = 0,
@@ -2142,6 +2143,27 @@ local function tpShoot()
     end)
 end
 
+-- ---- Auto TP-shoot: run a full tpShoot burst on the current target whenever they're
+--      within 500 studs of our REAL position. While the desync is spoofing, the live
+--      root may sit at the spoofed spot during Heartbeat -- read the desync's captured
+--      real CFrame (SHARED.realCF, the same return point tpShoot uses). Small gap
+--      between bursts so the return teleport actually lands before the next one. ----
+track(RunService.Heartbeat:Connect(function()
+    if not HC.autoTpShoot or _tpsActive or _stomping then return end
+    if tick() - (PC.autoTpsLast or 0) < 0.5 then return end
+    local plr = tpsPickTarget(); if not plr then return end
+    local m = plr.Character or hcModel(plr)
+    local thrp = m and m:FindFirstChild("HumanoidRootPart"); if not thrp then return end
+    local lc = LocalPlayer.Character
+    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart"); if not lhrp then return end
+    local g = gv()
+    local SHARED = g and g._WH_DESYNC
+    local realPos = (SHARED and SHARED.realCF and SHARED.realCF.Position) or lhrp.Position
+    if (realPos - thrp.Position).Magnitude > 500 then return end
+    PC.autoTpsLast = tick()
+    tpShoot()
+end))
+
 -- ---- Godmode (HC emote): play the hitbox-displacing emote, FREEZE it at its godmode
 --      frame (TimePosition 0.1265, speed 0) every Heartbeat, and re-assert it whenever the
 --      game plays another animation so the pose can't be overridden. Re-applied on respawn. ----
@@ -2630,6 +2652,8 @@ do
     Sec3:Dropdown({ Name = "Method", Flag = "HC_TpShootMethod", Default = "Wallbang", Multi = false,
         Items = { "Wallbang", "Max Range", "Glue", "Inside" },
         Callback = function(v) HC.tpShootMethod = (type(v) == "table" and v[1]) or v or "Wallbang" end })
+    Sec3:Toggle({ Name = "Auto TPShoot", Flag = "HC_AutoTpShoot", Default = false,
+        Callback = function(v) HC.autoTpShoot = v end })
     Sec3:Label({ Name = "TP shoot" }):Keybind({
         Name = "TP shoot", Flag = "HC_TpShootKey", Mode = "Hold", Default = Enum.KeyCode.F,
         Callback = function(state) if state then tpShoot() end end })
@@ -2999,7 +3023,7 @@ local function hcCleanup()
     unloaded = true
     setForceHit(false)
     HC.autoShoot, HC.voidshoot, HC.stomp, HC.stompTargets, HC.reload = false, false, false, false, false
-    HC.asSpoofCheck = false
+    HC.asSpoofCheck, HC.autoTpShoot = false, false
     HC.knifeAura, HC.knifeEquip, HC.antiAfk, HC.forceAfk, HC.godmode = false, false, false, false, false
     HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
