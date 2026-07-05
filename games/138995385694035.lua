@@ -114,7 +114,7 @@ local HC = {
     hitSoundEnabled = true, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
     ammoHud = false,
     autoShoot = false, autoShootDist = 250, autoShootCooldown = 0.15, autoShootVis = true,
-    asSpoofCheck = false,   -- range-gate from the Desync-spoofed pos + burst-shoot through it
+    asSpoofCheck = false,   -- while Desync is on: burst-shoot (desync off -> shoot -> back on)
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
@@ -1695,19 +1695,15 @@ track(RunService.Heartbeat:Connect(function()
     -- or the server errors "range too long"; also honor a tighter user cap.
     local reach = MAX_SHOT_RANGE + ((HC.wallbang and math.min(HC.wallbangOffset, WB_HARD_CAP)) or 0)
     local maxDist = math.min(HC.autoShootDist, reach)
-    -- Desync check: while the universal Desync spoofs our replicated root, range-gate from
-    -- the SPOOFED position (the body everyone walks up to), not our real one. Shots then go
-    -- out through a burst: desync off -> one Heartbeat so the real pos replicates -> shoot ->
+    -- Desync check: while the universal Desync spoofs our replicated root, the range gate
+    -- keeps reading our REAL body (where we actually stand) -- normal targeting, the desync
+    -- just means shots can't validate. So when a target is in range the shot goes out
+    -- through a burst: desync off -> one Heartbeat so the real pos replicates -> shoot ->
     -- desync back on 0.1s later.
     local g = gv()
     local dsOn = HC.asSpoofCheck and g and g.WH and g.WH.desyncIsOn and g.WH.desyncIsOn() and true or false
-    local fromPos = lhrp.Position
-    if dsOn then
-        if PC.dsBurst then return end   -- a burst is already mid-flight
-        local scf = g.WH._serverCF
-        if scf and (os.clock() - (g.WH._serverCFt or 0)) < 0.2 then fromPos = scf.Position end
-    end
-    if (fromPos - hrp.Position).Magnitude > maxDist then _asWasEngaged = false; return end
+    if dsOn and PC.dsBurst then return end   -- a burst is already mid-flight
+    if (lhrp.Position - hrp.Position).Magnitude > maxDist then _asWasEngaged = false; return end
     if HC.autoShootVis and char:FindFirstChildOfClass("ForceField") then _asWasEngaged = false; return end
     -- React INSTANTLY the moment a target becomes engageable (new target, or one that just
     -- rushed/teleported into range) so we get the first shot off; only then fall back to the
@@ -2621,7 +2617,7 @@ do
         Callback = function(v) HC.autoShootCooldown = v / 1000 end })
     Sec:Toggle({ Name = "Skip force-fielded", Flag = "HC_AutoShootVis", Default = true,
         Callback = function(v) HC.autoShootVis = v end })
-    Sec:Toggle({ Name = "Desync check (burst-shoot from spoof)", Flag = "HC_AutoShootDesync", Default = false,
+    Sec:Toggle({ Name = "Desync check", Flag = "HC_AutoShootDesync", Default = false,
         Callback = function(v) HC.asSpoofCheck = v end })
 
     local Sec2 = RageSub:Section({ Name = "Auto Equip", Side = 2 })
