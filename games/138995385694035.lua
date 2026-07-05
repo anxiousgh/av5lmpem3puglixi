@@ -62,6 +62,7 @@ local PC = {
     wbVizPart = nil, wbVizReal = nil, -- ...the part it was computed FOR + our root at compute time
     dsBurst = false,               -- auto-shoot desync burst in flight (off -> shoot -> on)
     autoTpsLast = 0,               -- last auto TP-shoot burst (inter-burst gap)
+    godHum = nil, godPending = false, -- godmode: humanoid the track lives on + one-pending guard
 }
 -- memoized: this gets hammered every frame from targeting/radar/checks, and the raw
 -- folder scan + FindFirstChild-by-name is expensive at 40 players. 0.3s TTL + a
@@ -2219,6 +2220,7 @@ local function godCleanup()
     if _godTrack then pcall(function() _godTrack:Stop(); _godTrack:Destroy() end); _godTrack = nil end
     if _godHB then _godHB:Disconnect(); _godHB = nil end
     if _godAnimConn then _godAnimConn:Disconnect(); _godAnimConn = nil end
+    PC.godHum = nil
 end
 local godApply
 godApply = function()
@@ -2226,13 +2228,26 @@ godApply = function()
     local ch = LocalPlayer.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
     if not hum then return end
+    -- CHEAP re-assert when the track already lives on this humanoid: re-play + re-freeze
+    -- only. The full rebuild below (LoadAnimation + reconnects) is expensive -- and with
+    -- the desync teleporting the root every frame, the humanoid state flaps and the game
+    -- restarts fall/land anims per FRAME; rebuilding on each AnimationPlayed melted FPS.
+    if _godTrack and hum == PC.godHum then
+        pcall(function()
+            if not _godTrack.IsPlaying then _godTrack:Play(0, 1, 1) end
+            _godTrack.TimePosition = GOD_FREEZE
+            _godTrack:AdjustSpeed(0)
+        end)
+        return
+    end
     godCleanup()
+    PC.godHum = hum
     local anim = Instance.new("Animation"); anim.AnimationId = GOD_EMOTE
     local animator = hum:FindFirstChildOfClass("Animator")
     local ok, t = pcall(function()
         return (animator and animator:LoadAnimation(anim)) or hum:LoadAnimation(anim)
     end)
-    if not ok or not t then return end
+    if not ok or not t then PC.godHum = nil; return end
     _godTrack = t
     pcall(function() _godTrack:Play(0, 1, 1) end)
     _godHB = RunService.Heartbeat:Connect(function()
@@ -2244,8 +2259,14 @@ godApply = function()
         end
     end)
     _godAnimConn = hum.AnimationPlayed:Connect(function(newtrack)
-        if HC.godmode and _godTrack and newtrack ~= _godTrack then
-            task.delay(0.02 + math.random() * 0.03, godApply)  -- re-assert over the game's anim
+        -- single pending re-assert, ever -- AnimationPlayed can fire every frame under
+        -- the desync, and stacking a task.delay per fire was the other half of the lag
+        if HC.godmode and _godTrack and newtrack ~= _godTrack and not PC.godPending then
+            PC.godPending = true
+            task.delay(0.02 + math.random() * 0.03, function()
+                PC.godPending = false
+                godApply()   -- re-assert over the game's anim (cheap path above)
+            end)
         end
     end)
 end
