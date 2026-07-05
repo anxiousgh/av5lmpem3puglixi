@@ -281,9 +281,13 @@ end
 --  TARGET HELPERS
 -- ============================================================
 local function myChar() return LocalPlayer.Character end
--- an enemy is "deployed" here = has a live character not spawn-protected
+-- a valid enemy = DEPLOYED (in the round, not sitting in the lobby) AND alive AND not
+-- spawn-protected. The game exposes each player's deploy state as the "Deployed" attribute;
+-- lobby players keep a full-HP character but Deployed=false, so HP alone isn't enough --
+-- without this gate the silent aim fires at people who never spawned in.
 local function aliveEnemy(p)
     if p == LocalPlayer then return nil end
+    if p:GetAttribute("Deployed") ~= true then return nil end   -- lobby / not deployed
     local c = p.Character
     if not c then return nil end
     local hum = c:FindFirstChildOfClass("Humanoid")
