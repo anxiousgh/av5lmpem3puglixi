@@ -1728,12 +1728,26 @@ track(RunService.Heartbeat:Connect(function()
         -- burst: the shot must originate from our REAL position (origin is validated
         -- against what we replicate), so drop the desync, let one physics step carry
         -- the real root out, shoot, then restore the desync after 0.1s.
+        -- ONLY drop the desync for a shot that will actually go out: gun in hand, remote
+        -- present, and a valid origin from the REAL spot (a wallbang origin when Wallbang
+        -- is on, else clear LoS). A blocked/unshootable target must not flap the desync.
+        if not getMainEvent() or not lc:FindFirstChildOfClass("Tool") then return end
+        local okShot
+        if HC.wallbang then
+            okShot = wallbangOrigin(realPos, part) ~= nil
+        else
+            okShot = Workspace:Raycast(realPos, part.Position - realPos, PC.getVisParams()) == nil
+        end
+        if not okShot then _asWasEngaged = false; return end
         PC.dsBurst = true
         task.spawn(function()
             g.WH.desyncSet(false)
             RunService.Heartbeat:Wait()
-            if part.Parent then fireShootAt(part) end
-            task.wait(0.1)
+            if part.Parent then
+                fireShootAt(part)
+                task.wait(0.1)
+            end
+            -- no wait when the shot was skipped (target gone): restore instantly
             if HC.asSpoofCheck and not unloaded then g.WH.desyncSet(true) end
             PC.dsBurst = false
         end)
