@@ -1739,15 +1739,13 @@ track(RunService.Heartbeat:Connect(function()
             okShot = Workspace:Raycast(realPos, part.Position - realPos, PC.getVisParams()) == nil
         end
         if not okShot then _asWasEngaged = false; return end
+        -- desync off and shot out in the SAME tick, zero yields (voidshoot precedent:
+        -- a same-tick origin change validates -- setEnabled(false) has already snapped
+        -- the root back to the real spot). Desync restores 0.1s later.
         PC.dsBurst = true
-        task.spawn(function()
-            g.WH.desyncSet(false)
-            RunService.Heartbeat:Wait()
-            if part.Parent then
-                fireShootAt(part)
-                task.wait(0.1)
-            end
-            -- no wait when the shot was skipped (target gone): restore instantly
+        g.WH.desyncSet(false)
+        fireShootAt(part)
+        task.delay(0.1, function()
             if HC.asSpoofCheck and not unloaded then g.WH.desyncSet(true) end
             PC.dsBurst = false
         end)
