@@ -77,6 +77,9 @@ local S = {
 
     -- kill sound (HC asset) -- plays on a confirmed kill
     killSound = false, killSoundId = 102740241606246, soundVolume = 1.0,
+
+    -- camera: the game locks first person (CameraMode=LockFirstPerson); this frees it
+    thirdPerson = false, tpZoom = 15,
 }
 
 -- ============================================================
@@ -441,6 +444,31 @@ do
 end
 
 -- ============================================================
+--  3RD PERSON  (the game forces CameraMode=LockFirstPerson; free it + allow zoom-out.
+--  It only re-locks on (re)deploy, so a re-assert on the Deployed flip / respawn is
+--  enough -- no per-frame loop needed.)
+-- ============================================================
+local function applyThirdPerson()
+    pcall(function()
+        if S.thirdPerson then
+            LocalPlayer.CameraMode = Enum.CameraMode.Classic
+            LocalPlayer.CameraMinZoomDistance = 0.5
+            LocalPlayer.CameraMaxZoomDistance = S.tpZoom
+        else
+            LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
+        end
+    end)
+end
+track(LocalPlayer:GetAttributeChangedSignal("Deployed"):Connect(function()
+    if S.thirdPerson and LocalPlayer:GetAttribute("Deployed") == true then
+        task.wait(0.1); applyThirdPerson()
+    end
+end))
+track(LocalPlayer.CharacterAdded:Connect(function()
+    if S.thirdPerson then task.wait(0.2); applyThirdPerson() end
+end))
+
+-- ============================================================
 --  UI
 -- ============================================================
 do
@@ -498,6 +526,13 @@ do
     SecFX:Slider({ Name = "Sound volume", Flag = "PA_SoundVol", Min = 0, Max = 300, Default = 100,
         Decimals = 0, Suffix = " %", Callback = function(v) S.soundVolume = v / 100 end })
 
+    local SecCam = Combat:Section({ Name = "Camera", Side = 2 })
+    SecCam:Toggle({ Name = "3rd person", Flag = "PA_ThirdPerson", Default = false,
+        Callback = function(v) S.thirdPerson = v; applyThirdPerson() end })
+    SecCam:Slider({ Name = "Zoom out max", Flag = "PA_TpZoom", Min = 5, Max = 40, Default = 15,
+        Decimals = 0, Suffix = " studs", Callback = function(v) S.tpZoom = v; if S.thirdPerson then applyThirdPerson() end end })
+    SecCam:Label({ Name = "scroll out after enabling" })
+
     local Sec3 = Combat:Section({ Name = "Deploy", Side = 1 })
     Sec3:Toggle({ Name = "Auto deploy on death", Flag = "PA_AutoDeploy", Default = false,
         Callback = function(v) S.autoDeploy = v; if v then tryDeploy() end end })
@@ -514,6 +549,7 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 local function cleanup()
     unloaded = true
     S.silent, S.autoDeploy, S.tracerEnabled, S.killSound = false, false, false, false
+    if S.thirdPerson then S.thirdPerson = false; pcall(applyThirdPerson) end   -- restore first person
     pcall(clearTracerHL)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 end
