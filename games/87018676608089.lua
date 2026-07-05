@@ -42,6 +42,13 @@ local unloaded = false
 local function track(c) conns[#conns + 1] = c; return c end
 local function gv() return (getgenv and getgenv()) or nil end
 
+-- generation guard: a re-exec bumps the token, so any persistent loop left over from a
+-- prior instance (whose teardown didn't run) goes inert instead of fighting this one --
+-- e.g. a leaked 3rd-person loop that would keep forcing the camera / mouse.
+local MYGEN = ((gv() and gv()._WH_PA_gen) or 0) + 1
+if gv() then gv()._WH_PA_gen = MYGEN end
+local function current() local g = gv(); return (g == nil) or g._WH_PA_gen == MYGEN end
+
 -- ---- resolve the hidden shoot remote + the deploy / effect remotes ----
 local ShootRemote do
     local sr = ReplicatedStorage:FindFirstChild("SystemResources")
@@ -81,6 +88,7 @@ local S = {
 
     -- camera: the game locks first person (CameraMode=LockFirstPerson); this frees it
     thirdPerson = false, tpZoom = 15, hideVM = true,   -- hideVM = hide the on-screen hands+gun
+    freeMouse = true,   -- in 3rd person the game hides/locks the cursor -> free + show it
 }
 
 -- ============================================================
@@ -426,7 +434,7 @@ end
 
 local _lastShot = 0
 track(RunService.Heartbeat:Connect(function()
-    if unloaded or not S.silent then return end
+    if unloaded or not current() or not S.silent then return end
     if not isDeployed() then return end
     -- hard floor 1.0s no matter the config: server kicks for rapid fire below the reload
     if os.clock() - _lastShot < math.max(S.cooldown, 1.0) then return end
@@ -443,7 +451,7 @@ end))
 -- ============================================================
 local _lastDeploy = 0
 local function tryDeploy()
-    if unloaded or not S.autoDeploy or not DeployRemote then return end
+    if unloaded or not current() or not S.autoDeploy or not DeployRemote then return end
     if LocalPlayer:GetAttribute("Deployed") == true then return end
     if LocalPlayer:GetAttribute("Shooter_Client_Loaded") ~= true then return end
     local map = Workspace:FindFirstChild("LoadedMap")
@@ -498,11 +506,23 @@ local function setViewmodelHidden(hidden)
     _vmHidden = hidden
 end
 track(RunService.RenderStepped:Connect(function()
-    if unloaded or not S.thirdPerson then return end
+    if unloaded or not current() or not S.thirdPerson then return end
     applyThirdPerson()
     if S.hideVM then setViewmodelHidden(true)
     elseif _vmHidden then setViewmodelHidden(false) end
 end))
+
+-- FREE THE MOUSE in 3rd person: the game locks the cursor (MouseBehavior=LockCenter,
+-- icon hidden) for FP aiming and re-locks it LATER in the frame than RenderStepped, so
+-- re-assert at RenderPriority.Last to win the fight (same trick the nhack menu uses).
+RunService:BindToRenderStep("WH_PA_MouseFree", Enum.RenderPriority.Last.Value, function()
+    if unloaded or not current() then return end
+    if not (S.thirdPerson and S.freeMouse) then return end
+    if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+    end
+    if not UserInputService.MouseIconEnabled then UserInputService.MouseIconEnabled = true end
+end)
 
 -- ============================================================
 --  UI
@@ -587,6 +607,8 @@ do
         Decimals = 0, Suffix = " studs", Callback = function(v) S.tpZoom = v; if S.thirdPerson then applyThirdPerson() end end })
     SecCam:Toggle({ Name = "Hide hands + gun", Flag = "PA_HideVM", Default = true,
         Callback = function(v) S.hideVM = v; if not v and _vmHidden then setViewmodelHidden(false) end end })
+    SecCam:Toggle({ Name = "Free mouse", Flag = "PA_FreeMouse", Default = true,
+        Callback = function(v) S.freeMouse = v end })
     SecCam:Label({ Name = "scroll out after enabling" })
 
     local Sec3 = Combat:Section({ Name = "Deploy", Side = 1 })
@@ -607,6 +629,7 @@ local function cleanup()
     S.silent, S.autoDeploy, S.tracerEnabled, S.killSound = false, false, false, false
     if _vmHidden then pcall(function() setViewmodelHidden(false) end) end       -- show the viewmodel
     if S.thirdPerson then S.thirdPerson = false; pcall(applyThirdPerson) end   -- restore first person
+    pcall(function() RunService:UnbindFromRenderStep("WH_PA_MouseFree") end)
     pcall(clearTracerHL)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 end
