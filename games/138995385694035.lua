@@ -64,6 +64,21 @@ local PC = {
     autoTpsLast = 0,               -- last auto TP-shoot burst (inter-burst gap)
     godHum = nil, godPending = false, -- godmode: humanoid the track lives on + one-pending guard
 }
+-- OUR REAL root position. While the universal Desync is spoofing, the live root (and the
+-- whole character with it) may sit at the void when this runs -- Heartbeat spoof fires
+-- before our loops, and Void randomizes the spot EVERY frame, so any ranking or range
+-- read off the live root reshuffles per frame (wrong "Closest to me" picks, flapping
+-- targets, thumbnail-churned Target Indicator). Every self-position read goes through
+-- here: the desync's captured realCF when it exists, the live root otherwise.
+function PC.realPos()
+    local g = gv()
+    local sh = g and g._WH_DESYNC
+    local rcf = sh and sh.realCF
+    if rcf then return rcf.Position end
+    local lc = LocalPlayer.Character
+    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+    return lhrp and lhrp.Position or nil
+end
 -- memoized: this gets hammered every frame from targeting/radar/checks, and the raw
 -- folder scan + FindFirstChild-by-name is expensive at 40 players. 0.3s TTL + a
 -- Parent check (a destroyed model on respawn recomputes immediately).
@@ -216,17 +231,26 @@ local function isLoadedIn(plr)
         or (m ~= nil and m:FindFirstChild("FULLY_LOADED_CHAR") ~= nil)
 end
 local function visOrigin()
+    -- while the desync is spoofing, the whole character (handle/head/root included) may sit
+    -- at the void when this runs -- shift the chosen part's position back by the real-root
+    -- delta so the LoS ray starts where we actually stand. Camera mode needs no shift.
     local mode = HC.visibleOrigin
     if mode == "Camera" then return Workspace.CurrentCamera.CFrame.Position end
     local c = LocalPlayer.Character
+    local r = c and c:FindFirstChild("HumanoidRootPart")
+    local delta = Vector3.zero
+    if r then
+        local rp = PC.realPos()
+        if rp then delta = rp - r.Position end
+    end
     if mode == "Tool Handle" then
         -- check LoS from where the gun actually is; falls through to Head if unequipped
         local tool = c and c:FindFirstChildOfClass("Tool")
         local handle = tool and (tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart"))
-        if handle then return handle.Position end
+        if handle then return handle.Position + delta end
     end
-    if mode == "Root" then local r = c and c:FindFirstChild("HumanoidRootPart"); return r and r.Position end
-    local h = c and c:FindFirstChild("Head"); return h and h.Position  -- "Head" (default + Tool-Handle fallback)
+    if mode == "Root" then return r and (r.Position + delta) end
+    local h = c and c:FindFirstChild("Head"); return h and (h.Position + delta)  -- "Head" (default + Tool-Handle fallback)
 end
 -- ignore ALL players' bodies (incl. the target -- ray runs to the aim position, so a
 -- clear ray == visible; bodies in between never block). Excluding the target too lets
@@ -323,10 +347,9 @@ local function mouseDist(plr)
         -- off-screen: rank by world distance AFTER anything on screen. math.huge here
         -- meant a target behind the camera could never be picked at all -- auto shoot
         -- sat idle until you physically turned to face them (felt like slow startup).
-        local lc = LocalPlayer.Character
-        local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
-        if not lhrp then return math.huge end
-        return 1e5 + (lhrp.Position - hrp.Position).Magnitude
+        local rp = PC.realPos()
+        if not rp then return math.huge end
+        return 1e5 + (rp - hrp.Position).Magnitude
     end
     return (UIS:GetMouseLocation() - Vector2.new(sp.X, sp.Y)).Magnitude
 end
@@ -341,9 +364,8 @@ local function scorePlayer(plr)
         local hum = char:FindFirstChildOfClass("Humanoid")
         return hum and hum.Health or math.huge
     elseif mode == "Closest to me" then
-        local lc = LocalPlayer.Character
-        local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
-        return lhrp and (lhrp.Position - hrp.Position).Magnitude or math.huge
+        local rp = PC.realPos()   -- REAL spot, never the desync-spoofed root
+        return rp and (rp - hrp.Position).Magnitude or math.huge
     end
     -- "Closest to mouse" (default)
     return mouseDist(plr)
@@ -532,11 +554,12 @@ function canWallbangPlr(plr)
     -- garbage (a 0.6s "can't bang" verdict on a moving fight made targets undroppable
     -- for over half a second after they became bangable = choppy auto shoot). Static
     -- standoffs -- the case the cache exists for -- still hit it.
+    local rp = PC.realPos() or root.Position   -- shots originate from the REAL spot
     if c and now - c.t < (c.v and 0.2 or 0.6)
-        and (root.Position - c.rp).Magnitude < 2
+        and (rp - c.rp).Magnitude < 2
         and (aim.Position - c.ap).Magnitude < 2 then return c.v end
-    local v = wallbangOrigin(root.Position, aim) ~= nil
-    _wbCache[plr] = { t = now, v = v, rp = root.Position, ap = aim.Position }
+    local v = wallbangOrigin(rp, aim) ~= nil
+    _wbCache[plr] = { t = now, v = v, rp = rp, ap = aim.Position }
     return v
 end
 -- drop per-player cache entries when they leave (all keyed by Player instance)
@@ -1730,14 +1753,7 @@ track(RunService.Heartbeat:Connect(function()
     local g = gv()
     local dsOn = HC.asSpoofCheck and g and g.WH and g.WH.desyncIsOn and g.WH.desyncIsOn() and true or false
     if dsOn and PC.dsBurst then return end   -- a burst is already mid-flight
-    -- REAL position for the range gate: the desync's spoof ALSO runs on Heartbeat and fires
-    -- before this loop, so lhrp may already sit at the void here -- every target then reads
-    -- out of range and the burst never triggers. Its captured realCF is the truth.
-    local realPos = lhrp.Position
-    if dsOn then
-        local sh = g._WH_DESYNC
-        if sh and sh.realCF then realPos = sh.realCF.Position end
-    end
+    local realPos = PC.realPos() or lhrp.Position   -- REAL spot, never the desync-spoofed root
     if (realPos - hrp.Position).Magnitude > maxDist then _asWasEngaged = false; return end
     if HC.autoShootVis and char:FindFirstChildOfClass("ForceField") then _asWasEngaged = false; return end
     -- React INSTANTLY the moment a target becomes engageable (new target, or one that just
@@ -1798,7 +1814,7 @@ local function someoneBelow(onlyTarget)
             local char = p.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             if hrp and isKnocked(p) and not isDead(p) then
-                local d = lhrp.Position - hrp.Position
+                local d = (PC.realPos() or lhrp.Position) - hrp.Position
                 if Vector2.new(d.X, d.Z).Magnitude <= HC.stompRadius and d.Y <= 7 and d.Y >= -1 then
                     return true
                 end
@@ -2200,11 +2216,7 @@ track(RunService.Heartbeat:Connect(function()
     local plr = tpsPickTarget(); if not plr then return end
     local m = plr.Character or hcModel(plr)
     local thrp = m and m:FindFirstChild("HumanoidRootPart"); if not thrp then return end
-    local lc = LocalPlayer.Character
-    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart"); if not lhrp then return end
-    local g = gv()
-    local SHARED = g and g._WH_DESYNC
-    local realPos = (SHARED and SHARED.realCF and SHARED.realCF.Position) or lhrp.Position
+    local realPos = PC.realPos(); if not realPos then return end
     if (realPos - thrp.Position).Magnitude > 500 then return end
     PC.autoTpsLast = tick()
     tpShoot()
@@ -2618,8 +2630,9 @@ track(RunService.RenderStepped:Connect(function()
             if os.clock() - PC.wbVizT >= 0.1 then
                 PC.wbVizT = os.clock()
                 PC.wbVizPart = part
-                PC.wbVizReal = root.Position
-                PC.wbVizOrigin = wallbangOrigin(root.Position, part)
+                -- search AND compare from the same REAL spot (never the desync-spoofed root)
+                PC.wbVizReal = PC.realPos() or root.Position
+                PC.wbVizOrigin = wallbangOrigin(PC.wbVizReal, part)
             end
             origin, real = PC.wbVizOrigin, PC.wbVizReal
         else
