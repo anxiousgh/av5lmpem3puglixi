@@ -929,6 +929,17 @@ do
     Sec:Label({ Name = "Toggle key" }):Keybind({ Name = "Desync", Flag = "DesyncKey", Mode = "Toggle",
         Callback = function(state) enabledToggle:Set(state and true or false) end })
 
+    -- cross-module handle (HC auto-shoot's desync burst): read/drive the desync from a
+    -- game module. Set() goes through the UI toggle so flag, visuals and state stay in sync.
+    do
+        local g = getgenv and getgenv()
+        if g then
+            g.WH = g.WH or {}
+            g.WH.desyncIsOn = function() return Desync.enabled end
+            g.WH.desyncSet = function(on) pcall(function() enabledToggle:Set(on and true or false) end) end
+        end
+    end
+
     -- RakNet freeze = the ONLY raknet path, behind its own explicit toggle.
     freezeToggle = Sec:Toggle({ Name = "RakNet freeze", Flag = "DesyncFreeze", Default = false,
         Callback = function(v)

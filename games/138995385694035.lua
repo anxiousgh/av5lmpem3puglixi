@@ -60,6 +60,7 @@ local PC = {
     tgt = {}, tgtT = 0,            -- getTarget frame cache
     wbVizT = 0, wbVizOrigin = nil, -- wallbang visualizer throttle
     wbVizPart = nil, wbVizReal = nil, -- ...the part it was computed FOR + our root at compute time
+    dsBurst = false,               -- auto-shoot desync burst in flight (off -> shoot -> on)
 }
 -- memoized: this gets hammered every frame from targeting/radar/checks, and the raw
 -- folder scan + FindFirstChild-by-name is expensive at 40 players. 0.3s TTL + a
@@ -113,6 +114,7 @@ local HC = {
     hitSoundEnabled = true, hitSoundId = 121566025787365, hitSoundVolume = 1.0,
     ammoHud = false,
     autoShoot = false, autoShootDist = 250, autoShootCooldown = 0.15, autoShootVis = true,
+    asSpoofCheck = false,   -- range-gate from the Desync-spoofed pos + burst-shoot through it
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
@@ -1693,7 +1695,19 @@ track(RunService.Heartbeat:Connect(function()
     -- or the server errors "range too long"; also honor a tighter user cap.
     local reach = MAX_SHOT_RANGE + ((HC.wallbang and math.min(HC.wallbangOffset, WB_HARD_CAP)) or 0)
     local maxDist = math.min(HC.autoShootDist, reach)
-    if (lhrp.Position - hrp.Position).Magnitude > maxDist then _asWasEngaged = false; return end
+    -- Desync check: while the universal Desync spoofs our replicated root, range-gate from
+    -- the SPOOFED position (the body everyone walks up to), not our real one. Shots then go
+    -- out through a burst: desync off -> one Heartbeat so the real pos replicates -> shoot ->
+    -- desync back on 0.1s later.
+    local g = gv()
+    local dsOn = HC.asSpoofCheck and g and g.WH and g.WH.desyncIsOn and g.WH.desyncIsOn() and true or false
+    local fromPos = lhrp.Position
+    if dsOn then
+        if PC.dsBurst then return end   -- a burst is already mid-flight
+        local scf = g.WH._serverCF
+        if scf and (os.clock() - (g.WH._serverCFt or 0)) < 0.2 then fromPos = scf.Position end
+    end
+    if (fromPos - hrp.Position).Magnitude > maxDist then _asWasEngaged = false; return end
     if HC.autoShootVis and char:FindFirstChildOfClass("ForceField") then _asWasEngaged = false; return end
     -- React INSTANTLY the moment a target becomes engageable (new target, or one that just
     -- rushed/teleported into range) so we get the first shot off; only then fall back to the
@@ -1705,7 +1719,20 @@ track(RunService.Heartbeat:Connect(function()
     if HC.autoEquip and HC.autoEquipTool ~= "" then tryEquipNamed(HC.autoEquipTool) end
     local part = forceShotPart(char); if not part then return end
     _asLast = tick()
-    if HC.voidshoot then
+    if dsOn then
+        -- burst: the shot must originate from our REAL position (origin is validated
+        -- against what we replicate), so drop the desync, let one physics step carry
+        -- the real root out, shoot, then restore the desync after 0.1s.
+        PC.dsBurst = true
+        task.spawn(function()
+            g.WH.desyncSet(false)
+            RunService.Heartbeat:Wait()
+            if part.Parent then fireShootAt(part) end
+            task.wait(0.1)
+            if HC.asSpoofCheck and not unloaded then g.WH.desyncSet(true) end
+            PC.dsBurst = false
+        end)
+    elseif HC.voidshoot then
         voidGlue(hrp)
         fireShootAt(part)
         task.delay(0.05, function() if HC.voidshoot then voidUnglue() end end)
@@ -2594,6 +2621,8 @@ do
         Callback = function(v) HC.autoShootCooldown = v / 1000 end })
     Sec:Toggle({ Name = "Skip force-fielded", Flag = "HC_AutoShootVis", Default = true,
         Callback = function(v) HC.autoShootVis = v end })
+    Sec:Toggle({ Name = "Desync check (burst-shoot from spoof)", Flag = "HC_AutoShootDesync", Default = false,
+        Callback = function(v) HC.asSpoofCheck = v end })
 
     local Sec2 = RageSub:Section({ Name = "Auto Equip", Side = 2 })
     Sec2:Toggle({ Name = "Auto equip on shoot", Flag = "HC_AutoEquip", Default = false,
@@ -2762,8 +2791,10 @@ do
         Callback = function(v) HC.forceAfk = v; if v then HC.antiAfk = false end end })
 
     local Sec2 = MiscSub:Section({ Name = "Protection", Side = 2 })
-    Sec2:Toggle({ Name = "Godmode", Flag = "HC_Godmode", Default = false,
+    local godToggle = Sec2:Toggle({ Name = "Godmode", Flag = "HC_Godmode", Default = false,
         Callback = function(v) godSet(v) end })
+    Sec2:Label({ Name = "Godmode key" }):Keybind({ Name = "Godmode", Flag = "HC_GodmodeKey", Mode = "Toggle",
+        Callback = function(state) godToggle:Set(state and true or false) end })
     Sec2:Toggle({ Name = "Force Allow Jump", Flag = "HC_ForceJump", Default = false,
         Callback = function(v) setForceJump(v) end })
 end
@@ -2972,6 +3003,7 @@ local function hcCleanup()
     unloaded = true
     setForceHit(false)
     HC.autoShoot, HC.voidshoot, HC.stomp, HC.stompTargets, HC.reload = false, false, false, false, false
+    HC.asSpoofCheck = false
     HC.knifeAura, HC.knifeEquip, HC.antiAfk, HC.forceAfk, HC.godmode = false, false, false, false, false
     HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
