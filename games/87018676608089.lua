@@ -63,6 +63,7 @@ end
 -- ============================================================
 local S = {
     silent = false,          -- auto-shoot silent aim
+    mode = "Closest to mouse", -- which enemy when several are in range (NO fov -- always shoots)
     maxDist = 1000,          -- world range cap (game Range = 1000)
     cooldown = 1.1,          -- seconds between shots (floored at 1.0 -- server kicks below)
     headshot = true,         -- send IsHeadshot + aim the Head
@@ -319,23 +320,35 @@ local function hasLoS(fromPos, part)
     return res == nil or part:IsDescendantOf(res.Instance.Parent) or res.Instance == part
 end
 
--- closest engageable enemy; onlyPriority restricts to the priority list
+-- best engageable enemy; onlyPriority restricts to the priority list. No FOV cap --
+-- it always picks SOMEONE in range; the mode only decides WHICH when several qualify:
+--   "Closest to mouse"     -> nearest to the crosshair (on-screen first, then off-screen)
+--   "Closest to character" -> nearest in world distance to our own body
 local function pickClosest(onlyPriority)
     local cam = Workspace.CurrentCamera
     if not cam then return nil end
     local origin = cam.CFrame.Position
-    local best, bestPart, bestD = nil, nil, math.huge
+    local mc = myChar()
+    local myHRP = mc and mc:FindFirstChild("HumanoidRootPart")
+    local myPos = myHRP and myHRP.Position
+    local mouse = UserInputService:GetMouseLocation()
+    local best, bestPart, bestScore = nil, nil, math.huge
     for _, p in ipairs(Players:GetPlayers()) do
         if not onlyPriority or isPriority(p) then
             local char, hum = aliveEnemy(p)
             if char and hum then
                 local part = aimPart(char)
                 if part then
-                    local d = (part.Position - origin).Magnitude
-                    if d <= S.maxDist and d < bestD then
-                        if not S.visibleCheck or hasLoS(origin, part) then
-                            bestD, best, bestPart = d, p, part
+                    local d = (part.Position - origin).Magnitude   -- range is validated from the shot origin
+                    if d <= S.maxDist and (not S.visibleCheck or hasLoS(origin, part)) then
+                        local score
+                        if S.mode == "Closest to character" then
+                            score = myPos and (part.Position - myPos).Magnitude or d
+                        else   -- Closest to mouse
+                            local sp, on = cam:WorldToViewportPoint(part.Position)
+                            score = on and (Vector2.new(sp.X, sp.Y) - mouse).Magnitude or (1e5 + d)
                         end
+                        if score < bestScore then bestScore, best, bestPart = score, p, part end
                     end
                 end
             end
@@ -499,13 +512,16 @@ do
         Callback = function(v) S.silent = v end })
     silentToggle:Keybind({ Name = "Toggle key", Flag = "PA_SilentKey", Mode = "Toggle",
         Default = Enum.KeyCode.E, Callback = function() silentToggle:Set(not silentToggle.Value) end })
+    Sec:Dropdown({ Name = "Target", Flag = "PA_Mode", Default = "Closest to mouse", Multi = false,
+        Items = { "Closest to mouse", "Closest to character" },
+        Callback = function(v) S.mode = (type(v) == "table" and v[1]) or v or "Closest to mouse" end })
     Sec:Slider({ Name = "Max distance", Flag = "PA_MaxDist", Min = 50, Max = 1000, Default = 1000,
         Decimals = 0, Suffix = " studs", Callback = function(v) S.maxDist = v end })
     Sec:Toggle({ Name = "Headshots", Flag = "PA_Head", Default = true,
         Callback = function(v) S.headshot = v end })
     Sec:Toggle({ Name = "Visible check (LoS)", Flag = "PA_Vis", Default = false,
         Callback = function(v) S.visibleCheck = v end })
-    Sec:Label({ Name = "no FOV -- shoots the closest enemy anywhere" })
+    Sec:Label({ Name = "no FOV -- always shoots; Target picks who" })
 
     local Sec2 = Combat:Section({ Name = "Behaviour", Side = 2 })
     Sec2:Slider({ Name = "Fire cooldown", Flag = "PA_Cooldown", Min = 1000, Max = 2000, Default = 1100,
@@ -515,16 +531,27 @@ do
         Callback = function(v) S.replicateBullet = v end })
 
     local SecP = Combat:Section({ Name = "Priority targets", Side = 2 })
-    SecP:Textbox({ Name = "Names (comma separated)", Flag = "PA_Priority", Placeholder = "name1, name2",
+    local startNames = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then startNames[#startNames + 1] = p.Name end
+    end
+    local prioDrop = SecP:Dropdown({ Name = "Priority players", Flag = "PA_Priority", Multi = true, Default = {},
+        Items = startNames,
         Callback = function(v)
             local list = {}
-            for frag in tostring(v or ""):gmatch("[^,]+") do
-                frag = frag:gsub("^%s+", ""):gsub("%s+$", ""):lower()
-                if #frag > 0 then list[#list + 1] = frag end
+            if type(v) == "table" then
+                for _, nm in ipairs(v) do list[#list + 1] = tostring(nm):lower() end
             end
             S.priority = list
         end })
     SecP:Label({ Name = "shot first WHILE deployed; else it shoots anyone" })
+    -- keep the option list in sync with who's actually in the server (preserves selections)
+    track(Players.PlayerAdded:Connect(function(p)
+        if p ~= LocalPlayer then pcall(function() prioDrop:Add(p.Name) end) end
+    end))
+    track(Players.PlayerRemoving:Connect(function(p)
+        pcall(function() prioDrop:Remove(p.Name) end)
+    end))
 
     local SecFX = Combat:Section({ Name = "Tracers + Sound", Side = 1 })
     SecFX:Toggle({ Name = "Bullet tracers", Flag = "PA_Tracers", Default = false,
