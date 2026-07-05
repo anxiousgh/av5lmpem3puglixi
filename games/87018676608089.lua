@@ -5,45 +5,26 @@
 --  everyone Neutral -> every other player is a valid target).
 --
 --  Shoot mechanic (decoded + live-validated 2026-07-05):
---    The real damage remote is HIDDEN behind char-code obfuscation in
---    Shooter_Client as SystemResources.BufferCache.RequestActionSync (the
---    "buffer"/"cache" naming is just camouflage -- it's a plain RemoteEvent).
---    The visible RemoteEvents.Shoot is a decoy/effects remote.
+--    The real damage remote is HIDDEN by char-code obfuscation in Shooter_Client
+--    as ReplicatedStorage.SystemResources.BufferCache.RequestActionSync (a plain
+--    RemoteEvent; the visible RemoteEvents.Shoot is a decoy). Its payload is a
+--    TABLE that hands the server the hit outright:
+--        { origin, direction, hitPosition, hitInstance, hitHumanoid, IsHeadshot }
+--    No nonce. Silent aim = direction=(head-origin).Unit with all hit fields on
+--    any enemy: self-consistent, indistinguishable from a legit shot server-side.
+--    ONLY works while DEPLOYED (undeployed = no server weapon = shot dropped).
 --
---    Its payload is a TABLE that hands the server the hit outright:
---        RequestActionSync:FireServer({
---            origin      = camera.CFrame.Position,
---            direction   = camera.CFrame.LookVector,
---            hitPosition = <hit world pos>,
---            hitInstance = <hit BasePart>,   -- named "Head"/"HeadHitbox" => headshot
---            hitHumanoid = <target Humanoid>,
---            IsHeadshot  = <bool>,
---        })
---    No nonce/token. So a SILENT AIM = send direction = (targetHead - origin).Unit
---    with all three hit fields pointing at any enemy: geometrically self-consistent
---    (origin -> direction -> hitPosition all agree), so the server can't distinguish
---    it from a legit shot -- it only differs from where the crosshair actually points.
---    Live test: one payload dropped a target 57 studs away 100->0 without aiming.
+--  Rate limit: the gun is one-shot-then-1.1s-reload (no magazine burst). The
+--    SERVER rate-limits RequestActionSync to that cadence and KICKS for rapid fire
+--    below it -- the check is in a server Script, so there is NO client bypass.
+--    Cooldown is floored at 1.0s.
 --
---    ONLY works while DEPLOYED: an undeployed player has no server-side weapon and
---    the shot is silently dropped (confirmed -- the first test failed purely on this).
+--  Deploy: RemoteEvents.Deploy:FireServer() (no args), gated by the client on attrs
+--    Deployed~=true + Shooter_Client_Loaded==true + workspace.LoadedMap CanDeploy~=
+--    false. Auto-deploy is event-driven off the Deployed attribute -> instant.
 --
---  Deploy (from LobbyGui_Client): RemoteEvents.Deploy:FireServer() with NO args,
---    gated by the client on: LocalPlayer attr "Deployed" ~= true, LoadedMap attr
---    "CanDeploy" ~= false, and attr "Shooter_Client_Loaded" == true. Auto-deploy
---    watches the Deployed attribute and re-fires Deploy when it drops (death/round).
---
---  Cooldown: the gun auto-reloads ReloadDuration=1.1s after each shot (no magazine
---    burst -- rateOfFire/magazineSize aren't populated on these guns, so it's one shot
---    per reload). The SERVER rate-limits the RequestActionSync remote to that cadence
---    and KICKS for "rapid fire" below it -- confirmed live. That check lives in a
---    server Script, so there is NO client-side bypass (the only client-visible kicks
---    are DataService's). The cooldown slider is floored at 1000ms for this reason;
---    ~1.1s is the real cadence, 1.0s is the edge of latency tolerance -> don't go lower.
---
---  Loads the universal shell (ESP + Player movement) AFTER its own page. NOTE:
---    movement exploits (fly/speed/noclip) are HIGHER anti-cheat risk in a competitive
---    FPS than the silent aim -- ESP is the safe part; use movement at your discretion.
+--  Loads the universal shell (ESP + Player movement) after its page. Movement is
+--    higher anti-cheat risk in a competitive FPS -- ESP is the safe part.
 -- ============================================================
 local ctx = ({ ... })[1]
 local Library = ctx.Library
@@ -82,35 +63,243 @@ end
 -- ============================================================
 local S = {
     silent = false,          -- auto-shoot silent aim
-    mode = "Crosshair",      -- "Crosshair" (nearest to aim within FOV) or "Closest" (nearest in range)
-    fov = 250,               -- screen-space radius (px) for Crosshair mode
     maxDist = 1000,          -- world range cap (game Range = 1000)
-    cooldown = 1.1,          -- seconds between shots (gun reload = 1.1s; below is risky)
+    cooldown = 1.1,          -- seconds between shots (floored at 1.0 -- server kicks below)
     headshot = true,         -- send IsHeadshot + aim the Head
     visibleCheck = false,    -- only target enemies with clear line of sight
-    replicateBullet = true,  -- also fire the cosmetic tracer/muzzle so others see a shot
-    autoDeploy = false,      -- re-fire Deploy when we're not deployed
+    replicateBullet = true,  -- fire the game's own tracer/muzzle so OTHERS see a shot
+    autoDeploy = false,      -- re-fire Deploy the instant we're not deployed
+    priority = {},           -- lowercased name fragments; deployed priority targets shot first
+
+    -- tracer FX (ported from HC) -- LOCAL visual you see, drawn muzzle -> hit
+    tracerEnabled = false, tracerStyle = "Standard", tracerColor = Color3.fromRGB(0, 255, 80),
+    tracerThickness = 0.12, tracerLifetime = 0.2, tracerThroughWalls = true,
+
+    -- kill sound (HC asset) -- plays on a confirmed kill
+    killSound = false, killSoundId = 102740241606246, soundVolume = 1.0,
 }
+
+-- ============================================================
+--  TRACER FX  (self-contained port of the HC tracer)
+-- ============================================================
+local _activeTracers, MAX_TRACERS = 0, 12
+local _lastTracerAt, MIN_TRACER_GAP = 0, 0.04
+local _hlModel, _sharedHL
+local function ensureTracerHL()
+    if _hlModel and _hlModel.Parent and _sharedHL and _sharedHL.Parent then return end
+    if _hlModel then pcall(function() _hlModel:Destroy() end) end
+    _hlModel = Instance.new("Model"); _hlModel.Name = "\0_fh"; _hlModel.Parent = Workspace
+    _sharedHL = Instance.new("Highlight")
+    _sharedHL.FillTransparency = 0.2
+    _sharedHL.OutlineColor, _sharedHL.OutlineTransparency = Color3.new(0, 0, 0), 0
+    pcall(function() _sharedHL.Adornee = _hlModel end)
+    _sharedHL.Parent = _hlModel
+end
+local function clearTracerHL()
+    if _hlModel then pcall(function() _hlModel:Destroy() end); _hlModel = nil; _sharedHL = nil end
+end
+local function invisAnchor(pos)
+    local p = Instance.new("Part")
+    p.Anchored, p.CanCollide, p.CanTouch, p.CanQuery, p.CastShadow = true, false, false, false, false
+    p.Size, p.Transparency, p.CFrame = Vector3.new(0.05, 0.05, 0.05), 1, CFrame.new(pos)
+    p.Name = "\0_fh"; p.Parent = Workspace
+    return p
+end
+-- muzzle (barrel tip): the tool attachment furthest from our body, else camera
+local function muzzlePos()
+    local c = LocalPlayer.Character
+    local tool = c and c:FindFirstChildOfClass("Tool")
+    local hrp = c and c:FindFirstChild("HumanoidRootPart")
+    local ref = (hrp and hrp.Position) or (c and c:FindFirstChild("Head") and c.Head.Position)
+    if tool and ref then
+        local best, bestD
+        for _, d in ipairs(tool:GetDescendants()) do
+            if d:IsA("Attachment") then
+                local dd = (d.WorldPosition - ref).Magnitude
+                if not bestD or dd > bestD then bestD, best = dd, d.WorldPosition end
+            end
+        end
+        if best then return best end
+    end
+    local cam = Workspace.CurrentCamera
+    return cam and cam.CFrame.Position or (ref)
+end
+local function spawnTracer(origin, hitPos)
+    if not (S.tracerEnabled and origin and hitPos) then return end
+    local dist = (hitPos - origin).Magnitude
+    if dist < 0.5 then return end
+    local nowT = tick()
+    if nowT - _lastTracerAt < MIN_TRACER_GAP then return end
+    if _activeTracers >= MAX_TRACERS then return end
+    _lastTracerAt, _activeTracers = nowT, _activeTracers + 1
+    task.delay(math.max(1.5, S.tracerLifetime + 1), function()
+        _activeTracers = math.max(0, _activeTracers - 1)
+    end)
+
+    local dir = (hitPos - origin).Unit
+    local col, th = S.tracerColor, S.tracerThickness
+    local TEX = "rbxassetid://446111271"
+    local startPart, endPart = invisAnchor(origin), invisAnchor(origin)
+    local att0 = Instance.new("Attachment", startPart)
+    local att1 = Instance.new("Attachment", endPart)
+    local beams = {}
+    local function mkBeam(width, transp, textured, colSeq)
+        local b = Instance.new("Beam")
+        b.Attachment0, b.Attachment1 = att0, att1
+        b.LightEmission, b.LightInfluence, b.FaceCamera, b.Segments = 1, 0, true, 4
+        b.Width0, b.Width1 = width, width
+        b.Color = colSeq or ColorSequence.new(col)
+        b.Transparency = NumberSequence.new(transp or 0)
+        if textured then pcall(function()
+            b.Texture, b.TextureMode = TEX, Enum.TextureMode.Wrap
+            b.TextureLength, b.TextureSpeed = 4, 12
+        end) end
+        b.Parent = startPart; beams[#beams + 1] = b; return b
+    end
+    local whiteHot = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, col), ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)),
+        ColorSequenceKeypoint.new(1, col) })
+    if S.tracerStyle == "Laser" then
+        mkBeam(th * 3.5, 0.6)
+        mkBeam(th * 1.2, 0, false, whiteHot)
+        mkBeam(th * 0.5, 0, true)
+    elseif S.tracerStyle == "Thin" then
+        mkBeam(th * 1.4, 0.7)
+        mkBeam(th * 0.55, 0.05, true)
+    else
+        local outer = mkBeam(th * 5, nil)
+        outer.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.6), NumberSequenceKeypoint.new(0.5, 0.35),
+            NumberSequenceKeypoint.new(1, 0.6) })
+        mkBeam(th * 2.6, 0.25)
+        mkBeam(th * 1.1, 0.02, true, whiteHot)
+    end
+
+    ensureTracerHL()
+    pcall(function()
+        _sharedHL.DepthMode = S.tracerThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+        _sharedHL.FillColor = col
+    end)
+    local core = Instance.new("Part")
+    core.Anchored, core.CanCollide, core.CanTouch, core.CanQuery, core.CastShadow = true, false, false, false, false
+    core.Material, core.Color = Enum.Material.Neon, col
+    local cth = math.max(th, 0.01)
+    core.Size = Vector3.new(cth, cth, dist)
+    core.CFrame = CFrame.lookAt((origin + hitPos) / 2, hitPos)
+    core.Name = "\0_fh"; core.Parent = (_hlModel and _hlModel.Parent) and _hlModel or Workspace
+
+    pcall(function()
+        local mAtt = Instance.new("Attachment", startPart)
+        local mLight = Instance.new("PointLight"); mLight.Color, mLight.Brightness, mLight.Range = col, 6, 9
+        mLight.Parent = startPart
+        local mp = Instance.new("ParticleEmitter")
+        mp.Color, mp.LightEmission = ColorSequence.new(col), 1
+        mp.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 4), NumberSequenceKeypoint.new(1, 0) })
+        mp.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+        mp.Speed, mp.Lifetime = NumberRange.new(4, 10), NumberRange.new(0.08, 0.18)
+        mp.Rate, mp.SpreadAngle = 0, Vector2.new(35, 35)
+        mp.Parent = mAtt; mp:Emit(10)
+        task.delay(0.12, function() if mLight.Parent then mLight.Brightness = 0 end end)
+    end)
+    local sparks
+    pcall(function()
+        local sAtt = Instance.new("Attachment", endPart)
+        sparks = Instance.new("ParticleEmitter")
+        sparks.Color, sparks.LightEmission = whiteHot, 1
+        sparks.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 2), NumberSequenceKeypoint.new(1, 0) })
+        sparks.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) })
+        sparks.Speed, sparks.Lifetime = NumberRange.new(2, 6), NumberRange.new(0.1, 0.25)
+        sparks.Rate, sparks.SpreadAngle = 220, Vector2.new(20, 20)
+        pcall(function() sparks.Texture = TEX end)
+        sparks.Parent = sAtt
+    end)
+
+    task.spawn(function()
+        for i = 1, 8 do
+            task.wait(0.06 / 8)
+            if not startPart.Parent then break end
+            endPart.CFrame = CFrame.new(origin + dir * (dist * (i / 8)))
+        end
+        if endPart.Parent then endPart.CFrame = CFrame.new(hitPos) end
+        if sparks then pcall(function() sparks.Rate = 0 end) end
+        if startPart.Parent then
+            local flash = invisAnchor(hitPos)
+            flash.Transparency, flash.Material, flash.Color = 0, Enum.Material.Neon, col
+            flash.Shape, flash.Size = Enum.PartType.Ball, Vector3.new(0.6, 0.6, 0.6)
+            local light = Instance.new("PointLight"); light.Color, light.Brightness, light.Range = col, 5, 10
+            light.Parent = flash
+            pcall(function()
+                local att = Instance.new("Attachment", flash)
+                local pe = Instance.new("ParticleEmitter")
+                pe.Color, pe.LightEmission = whiteHot, 1
+                pe.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, th * 3), NumberSequenceKeypoint.new(1, 0) })
+                pe.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+                pe.Speed, pe.Lifetime = NumberRange.new(6, 16), NumberRange.new(0.15, 0.35)
+                pe.Rate, pe.SpreadAngle = 0, Vector2.new(180, 180)
+                pcall(function() pe.Texture = TEX end)
+                pe.Parent = att; pe:Emit(18)
+            end)
+            task.spawn(function()
+                for i = 1, 10 do
+                    task.wait(0.22 / 10)
+                    if not flash.Parent then return end
+                    local p = i / 10; local s = 0.6 + p * 2.6
+                    flash.Size, flash.Transparency, light.Brightness = Vector3.new(s, s, s), p, 5 * (1 - p)
+                end
+                if flash.Parent then flash:Destroy() end
+            end)
+        end
+        for i = 1, 8 do
+            task.wait(S.tracerLifetime / 8)
+            if not startPart.Parent then break end
+            local a = i / 8
+            for _, b in ipairs(beams) do if b.Parent then b.Transparency = NumberSequence.new(a) end end
+        end
+        pcall(function() if startPart.Parent then startPart:Destroy() end end)
+        pcall(function() if endPart.Parent then endPart:Destroy() end end)
+        pcall(function() if core.Parent then core:Destroy() end end)
+    end)
+end
+
+-- ---- kill sound (HC asset, played on a confirmed kill) ----
+local function playKillSound()
+    if not S.killSound or not S.killSoundId or S.killSoundId == 0 then return end
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local s = Instance.new("Sound")
+    s.SoundId = "rbxassetid://" .. tostring(S.killSoundId)
+    s.Volume = math.clamp(S.soundVolume, 0, 5)
+    s.Parent = pg or Workspace
+    s:Play()
+    task.delay(5, function() if s and s.Parent then s:Destroy() end end)
+end
 
 -- ============================================================
 --  TARGET HELPERS
 -- ============================================================
 local function myChar() return LocalPlayer.Character end
+-- an enemy is "deployed" here = has a live character not spawn-protected
 local function aliveEnemy(p)
     if p == LocalPlayer then return nil end
     local c = p.Character
     if not c then return nil end
     local hum = c:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return nil end
-    if c:FindFirstChild("SpawnProtection") then return nil end   -- can't damage protected spawns
+    if c:FindFirstChild("SpawnProtection") then return nil end
     return c, hum
 end
 local function aimPart(char)
     if S.headshot then return char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart") end
     return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
 end
+local function isPriority(p)
+    if #S.priority == 0 then return false end
+    local nm, dn = p.Name:lower(), (p.DisplayName or ""):lower()
+    for _, frag in ipairs(S.priority) do
+        if nm == frag or dn == frag or nm:find(frag, 1, true) or dn:find(frag, 1, true) then return true end
+    end
+    return false
+end
 
--- shared LoS params (exclude our own character; a clear ray to the target = visible)
 local _visParams
 local function visParams()
     if not _visParams then
@@ -124,43 +313,40 @@ local function visParams()
 end
 local function hasLoS(fromPos, part)
     local res = Workspace:Raycast(fromPos, part.Position - fromPos, visParams())
-    -- clear, or the first thing hit belongs to the target
     return res == nil or part:IsDescendantOf(res.Instance.Parent) or res.Instance == part
 end
 
--- pick the best enemy to shoot given the current mode
-local function bestTarget()
+-- closest engageable enemy; onlyPriority restricts to the priority list
+local function pickClosest(onlyPriority)
     local cam = Workspace.CurrentCamera
     if not cam then return nil end
     local origin = cam.CFrame.Position
-    local mouse = UserInputService:GetMouseLocation()
-    local best, bestPart, bestScore = nil, nil, math.huge
+    local best, bestPart, bestD = nil, nil, math.huge
     for _, p in ipairs(Players:GetPlayers()) do
-        local char, hum = aliveEnemy(p)
-        if char and hum then
-            local part = aimPart(char)
-            if part then
-                local dist = (part.Position - origin).Magnitude
-                if dist <= S.maxDist then
-                    local ok, score = true, nil
-                    if S.mode == "Crosshair" then
-                        local sp, onScreen = cam:WorldToViewportPoint(part.Position)
-                        if onScreen then
-                            local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
-                            if d <= S.fov then score = d else ok = false end
-                        else
-                            ok = false
+        if not onlyPriority or isPriority(p) then
+            local char, hum = aliveEnemy(p)
+            if char and hum then
+                local part = aimPart(char)
+                if part then
+                    local d = (part.Position - origin).Magnitude
+                    if d <= S.maxDist and d < bestD then
+                        if not S.visibleCheck or hasLoS(origin, part) then
+                            bestD, best, bestPart = d, p, part
                         end
-                    else                       -- "Closest": nearest in range, any direction
-                        score = dist
                     end
-                    if ok and S.visibleCheck and not hasLoS(origin, part) then ok = false end
-                    if ok and score < bestScore then bestScore, best, bestPart = score, p, part end
                 end
             end
         end
     end
     return best, bestPart
+end
+-- priority-first: shoot a DEPLOYED priority target if one exists, else anyone
+local function bestTarget()
+    if #S.priority > 0 then
+        local p, part = pickClosest(true)
+        if p then return p, part end
+    end
+    return pickClosest(false)
 end
 
 -- ============================================================
@@ -172,20 +358,6 @@ local function isDeployed()
         and myChar():FindFirstChildOfClass("Tool") ~= nil
 end
 
-local function muzzleWorld()
-    -- the viewmodel muzzle (what the real client sends) if present, else the tool handle
-    local cam = Workspace.CurrentCamera
-    local vm = cam and cam:FindFirstChild("Viewmodel")
-    local wa = vm and vm:FindFirstChild("WeaponAttachment")
-    local ma = wa and wa:FindFirstChild("MuzzleAttachment")
-    if ma then return ma.WorldCFrame end
-    local c = myChar()
-    local tool = c and c:FindFirstChildOfClass("Tool")
-    local handle = tool and tool:FindFirstChild("Handle")
-    if handle then return handle.CFrame end
-    return cam and cam.CFrame or nil
-end
-
 local function fireAt(part)
     if not ShootRemote or not part then return end
     local char = part:FindFirstAncestorWhichIsA("Model")
@@ -193,7 +365,7 @@ local function fireAt(part)
     if not hum then return end
     local cam = Workspace.CurrentCamera
     local origin = cam.CFrame.Position
-    local dir = (part.Position - origin).Unit          -- silent aim: point exactly at the target
+    local dir = (part.Position - origin).Unit
     local head = S.headshot and (part.Name == "Head" or part.Name == "HeadHitbox")
     pcall(function()
         ShootRemote:FireServer({
@@ -205,15 +377,30 @@ local function fireAt(part)
             IsHeadshot  = head and true or false,
         })
     end)
-    -- cosmetic: let other clients see a real tracer/muzzle flash along the same ray
+    -- our own local energy tracer (muzzle -> hit)
+    spawnTracer(muzzlePos(), part.Position)
+    -- game's replicated tracer/muzzle so OTHER players see a shot along the same ray
     if S.replicateBullet then
-        local mw = muzzleWorld()
+        local mw = muzzlePos()
         if mw and FakeBulletRemote then
-            local mdir = (part.Position - mw.Position)
+            local mdir = (part.Position - mw)
             mdir = (mdir.Magnitude > 1e-3) and mdir.Unit or dir
-            pcall(function() FakeBulletRemote:FireServer(mw, mdir) end)
+            pcall(function() FakeBulletRemote:FireServer(CFrame.new(mw, part.Position), mdir) end)
         end
         if MuzzleRemote then pcall(function() MuzzleRemote:FireServer() end) end
+    end
+    -- confirmed-kill watcher: one-shot-kill game, so if the target dies right after
+    -- our shot the server accepted it -> play the kill sound (skips rejected shots)
+    if S.killSound then
+        local hpBefore = hum.Health
+        task.spawn(function()
+            local t0 = os.clock()
+            while os.clock() - t0 < 0.5 do
+                if hum.Health <= 0 then playKillSound(); return end
+                task.wait()
+            end
+            if hpBefore > 0 and hum.Health <= 0 then playKillSound() end
+        end)
     end
 end
 
@@ -221,32 +408,37 @@ local _lastShot = 0
 track(RunService.Heartbeat:Connect(function()
     if unloaded or not S.silent then return end
     if not isDeployed() then return end
-    -- hard floor at 1.0s no matter what a loaded config says: the server kicks for
-    -- rapid fire below the ~1.1s reload and there's no client bypass
+    -- hard floor 1.0s no matter the config: server kicks for rapid fire below the reload
     if os.clock() - _lastShot < math.max(S.cooldown, 1.0) then return end
     local plr, part = bestTarget()
     if not plr or not part then return end
     _lastShot = os.clock()
     fireAt(part)
-    -- publish for the shared Target Indicator widget
     local g = gv()
     if g and g.WH then g.WH.currentTarget = plr; g.WH.currentTargetT = os.clock() end
 end))
 
 -- ============================================================
---  AUTO DEPLOY  (re-fire Deploy whenever we drop out of the deployed state)
+--  AUTO DEPLOY  (event-driven -> fires the instant we drop out of deployed)
 -- ============================================================
 local _lastDeploy = 0
-track(RunService.Heartbeat:Connect(function()
+local function tryDeploy()
     if unloaded or not S.autoDeploy or not DeployRemote then return end
     if LocalPlayer:GetAttribute("Deployed") == true then return end
     if LocalPlayer:GetAttribute("Shooter_Client_Loaded") ~= true then return end
     local map = Workspace:FindFirstChild("LoadedMap")
-    if map and map:GetAttribute("CanDeploy") == false then return end   -- round still starting
-    if os.clock() - _lastDeploy < 0.6 then return end                   -- match the client's 0.2s debounce w/ margin
+    if map and map:GetAttribute("CanDeploy") == false then return end
+    if os.clock() - _lastDeploy < 0.12 then return end   -- tiny anti-double-fire only
     _lastDeploy = os.clock()
     pcall(function() DeployRemote:FireServer() end)
-end))
+end
+-- the instant the game clears our Deployed flag (death / round reset)
+track(LocalPlayer:GetAttributeChangedSignal("Deployed"):Connect(tryDeploy))
+-- ...and the instant a starting round opens deploying (CanDeploy true while we're out)
+do
+    local map = Workspace:FindFirstChild("LoadedMap")
+    if map then track(map:GetAttributeChangedSignal("CanDeploy"):Connect(tryDeploy)) end
+end
 
 -- ============================================================
 --  UI
@@ -260,29 +452,56 @@ do
         Callback = function(v) S.silent = v end })
     silentToggle:Keybind({ Name = "Toggle key", Flag = "PA_SilentKey", Mode = "Toggle",
         Default = Enum.KeyCode.E, Callback = function() silentToggle:Set(not silentToggle.Value) end })
-    Sec:Dropdown({ Name = "Target", Flag = "PA_Mode", Default = "Crosshair", Multi = false,
-        Items = { "Crosshair", "Closest" },
-        Callback = function(v) S.mode = (type(v) == "table" and v[1]) or v or "Crosshair" end })
-    Sec:Slider({ Name = "FOV (Crosshair mode)", Flag = "PA_Fov", Min = 30, Max = 1000, Default = 250,
-        Decimals = 0, Suffix = " px", Callback = function(v) S.fov = v end })
     Sec:Slider({ Name = "Max distance", Flag = "PA_MaxDist", Min = 50, Max = 1000, Default = 1000,
         Decimals = 0, Suffix = " studs", Callback = function(v) S.maxDist = v end })
     Sec:Toggle({ Name = "Headshots", Flag = "PA_Head", Default = true,
         Callback = function(v) S.headshot = v end })
+    Sec:Toggle({ Name = "Visible check (LoS)", Flag = "PA_Vis", Default = false,
+        Callback = function(v) S.visibleCheck = v end })
+    Sec:Label({ Name = "no FOV -- shoots the closest enemy anywhere" })
 
     local Sec2 = Combat:Section({ Name = "Behaviour", Side = 2 })
     Sec2:Slider({ Name = "Fire cooldown", Flag = "PA_Cooldown", Min = 1000, Max = 2000, Default = 1100,
         Decimals = 0, Suffix = " ms", Callback = function(v) S.cooldown = v / 1000 end })
     Sec2:Label({ Name = "server kicks for rapid fire below ~1.1s (no bypass)" })
-    Sec2:Toggle({ Name = "Visible check (LoS)", Flag = "PA_Vis", Default = false,
-        Callback = function(v) S.visibleCheck = v end })
     Sec2:Toggle({ Name = "Replicate bullet (visual)", Flag = "PA_FakeBullet", Default = true,
         Callback = function(v) S.replicateBullet = v end })
 
+    local SecP = Combat:Section({ Name = "Priority targets", Side = 2 })
+    SecP:Textbox({ Name = "Names (comma separated)", Flag = "PA_Priority", Placeholder = "name1, name2",
+        Callback = function(v)
+            local list = {}
+            for frag in tostring(v or ""):gmatch("[^,]+") do
+                frag = frag:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+                if #frag > 0 then list[#list + 1] = frag end
+            end
+            S.priority = list
+        end })
+    SecP:Label({ Name = "shot first WHILE deployed; else it shoots anyone" })
+
+    local SecFX = Combat:Section({ Name = "Tracers + Sound", Side = 1 })
+    SecFX:Toggle({ Name = "Bullet tracers", Flag = "PA_Tracers", Default = false,
+        Callback = function(v) S.tracerEnabled = v; if not v then clearTracerHL() end end })
+    SecFX:Dropdown({ Name = "Tracer style", Flag = "PA_TracerStyle", Default = "Standard", Multi = false,
+        Items = { "Standard", "Laser", "Thin" },
+        Callback = function(v) S.tracerStyle = (type(v) == "table" and v[1]) or v or "Standard" end })
+    SecFX:Label({ Name = "Tracer color" }):Colorpicker({ Flag = "PA_TracerColor", Default = Color3.fromRGB(0, 255, 80),
+        Callback = function(c) S.tracerColor = c end })
+    SecFX:Toggle({ Name = "Through walls", Flag = "PA_TracerWalls", Default = true,
+        Callback = function(v) S.tracerThroughWalls = v end })
+    SecFX:Slider({ Name = "Size", Flag = "PA_TracerSize", Min = 0.02, Max = 1, Default = 0.12,
+        Decimals = 2, Suffix = " studs", Callback = function(v) S.tracerThickness = v end })
+    SecFX:Slider({ Name = "Lifetime", Flag = "PA_TracerLife", Min = 0.05, Max = 1, Default = 0.2,
+        Decimals = 2, Suffix = " s", Callback = function(v) S.tracerLifetime = v end })
+    SecFX:Toggle({ Name = "Kill sound", Flag = "PA_KillSound", Default = false,
+        Callback = function(v) S.killSound = v end })
+    SecFX:Slider({ Name = "Sound volume", Flag = "PA_SoundVol", Min = 0, Max = 300, Default = 100,
+        Decimals = 0, Suffix = " %", Callback = function(v) S.soundVolume = v / 100 end })
+
     local Sec3 = Combat:Section({ Name = "Deploy", Side = 1 })
     Sec3:Toggle({ Name = "Auto deploy on death", Flag = "PA_AutoDeploy", Default = false,
-        Callback = function(v) S.autoDeploy = v end })
-    Sec3:Label({ Name = "re-deploys the moment a round/respawn lets you" })
+        Callback = function(v) S.autoDeploy = v; if v then tryDeploy() end end })
+    Sec3:Label({ Name = "instant -- re-deploys the frame you can" })
 end
 
 -- universal shell AFTER our page (so "Pistol Arena" stays the first tab): ESP +
@@ -294,7 +513,8 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     unloaded = true
-    S.silent, S.autoDeploy = false, false
+    S.silent, S.autoDeploy, S.tracerEnabled, S.killSound = false, false, false, false
+    pcall(clearTracerHL)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 end
 do
