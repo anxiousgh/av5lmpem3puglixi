@@ -318,7 +318,15 @@ local function mouseDist(plr)
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return math.huge end
     local sp, on = Workspace.CurrentCamera:WorldToViewportPoint(hrp.Position)
-    if not on then return math.huge end
+    if not on then
+        -- off-screen: rank by world distance AFTER anything on screen. math.huge here
+        -- meant a target behind the camera could never be picked at all -- auto shoot
+        -- sat idle until you physically turned to face them (felt like slow startup).
+        local lc = LocalPlayer.Character
+        local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+        if not lhrp then return math.huge end
+        return 1e5 + (lhrp.Position - hrp.Position).Magnitude
+    end
     return (UIS:GetMouseLocation() - Vector2.new(sp.X, sp.Y)).Magnitude
 end
 
@@ -434,8 +442,9 @@ end
 -- budget, (b) in OPEN AIR -- not embedded in a wall -- and (c) have clear LoS to the target.
 -- We gather candidates (straight through the wall, UP into the sky to shoot someone below,
 -- and peeks around cover) and pick the CLOSEST valid one. nil = skip the shot (no error).
--- HARD CAP 10: the server kicks for origin mismatch past this (11 still errored) -- never exceed it.
-local WB_HARD_CAP = 10
+-- HARD CAP 11 (vampire raised it back 2026-07-05; a 2026-07-04 live test saw 11 trip
+-- "origin mismatch" -- if the error returns, drop to 10).
+local WB_HARD_CAP = 11
 -- The server rejects a shot whose ORIGIN is farther than this from the hit ("range too long").
 -- The origin-spoof (<=WB_HARD_CAP studs) can therefore extend our effective reach: sit up to
 -- WB_HARD_CAP studs past this, and pull the spoofed origin back inside it. 2-stud safety margin.
@@ -1627,7 +1636,21 @@ track(UIS.InputBegan:Connect(function(input, gpe)
     local char = plr.Character; if not char then return end
     local part = forceShotPart(char); if not part then return end
     _fhLast = tick()
-    fireShootAt(part)
+    -- while the Desync check is armed and the desync is spoofing, a raw shot's origin
+    -- can never validate (server has us at the void) -- run the same burst as auto shoot
+    local g = gv()
+    if HC.asSpoofCheck and g and g.WH and g.WH.desyncIsOn and g.WH.desyncIsOn() then
+        if PC.dsBurst then return end
+        PC.dsBurst = true
+        g.WH.desyncSet(false)
+        fireShootAt(part)
+        task.delay(0.1, function()
+            if HC.asSpoofCheck and not unloaded then g.WH.desyncSet(true) end
+            PC.dsBurst = false
+        end)
+    else
+        fireShootAt(part)
+    end
 end))
 
 -- ============================================================
@@ -1636,7 +1659,7 @@ end))
 -- ============================================================
 local _asLast = 0
 local _asLastTarget, _asWasEngaged = nil, false
-local AS_FRESH_GAP = 0.05   -- minimum gap for a FRESH engagement (new target / just entered range)
+local AS_FRESH_GAP = 0.02   -- minimum gap for a FRESH engagement (new target / just entered range)
 local function tryEquipNamed(name)
     if name == "" then return end
     local lc = LocalPlayer.Character
@@ -1694,7 +1717,9 @@ track(RunService.Heartbeat:Connect(function()
     -- Effective reach is the gun's max shot range; Wallbang extends it by the origin-spoof budget
     -- (fireShootAt pulls the shot origin back within range so it validates). Never exceed the reach
     -- or the server errors "range too long"; also honor a tighter user cap.
-    local reach = MAX_SHOT_RANGE + ((HC.wallbang and math.min(HC.wallbangOffset, WB_HARD_CAP)) or 0)
+    -- range extender capped at +10 studs (the origin-spoof budget may be 11, but reach
+    -- only extends 10 -- vampire's spec)
+    local reach = MAX_SHOT_RANGE + ((HC.wallbang and math.min(HC.wallbangOffset, WB_HARD_CAP, 10)) or 0)
     local maxDist = math.min(HC.autoShootDist, reach)
     -- Desync check: while the universal Desync spoofs our replicated root, the range gate
     -- keeps reading our REAL body (where we actually stand) -- normal targeting, the desync
@@ -2622,7 +2647,7 @@ do
         Callback = function(v) HC.forceHitCooldown = v / 1000 end })
     Sec2:Toggle({ Name = "Wallbang if possible", Flag = "HC_Wallbang", Default = false,
         Callback = function(v) HC.wallbang = v end })
-    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 10, Default = 10, Decimals = 0, Suffix = " studs",
+    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 11, Default = 11, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.wallbangOffset = v end })
     Sec2:Toggle({ Name = "Visualize wallbang spot", Flag = "HC_WbVisualize", Default = false,
         Callback = function(v) HC.wbVisualize = v end })
