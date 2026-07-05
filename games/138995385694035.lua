@@ -115,7 +115,6 @@ local HC = {
     autoShoot = false, autoShootDist = 250, autoShootCooldown = 0.15, autoShootVis = true,
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
-    fakePos = false,   -- replication re-rooted onto the target: others see us AT them
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
     tpShootMethod = "Wallbang",
     -- stomp / reload
@@ -2323,43 +2322,6 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
---  FAKE POS -- the knife bot's PhysicsRepRootPart re-root as a standalone toggle:
---  replication is rooted onto the target's HRP, so the server (and everyone else)
---  sees us AT the target while the local character walks around freely. Follows the
---  same target resolution as the knife bot (checks minus visibility). _WH_HC_SENT
---  keeps fireShootAt's origin at the fake spot (voidshoot's contract), so force hit /
---  auto shoot validate point-blank instead of tripping "origin mismatch".
---  State/detach live on PC -- this chunk rides the 200-locals limit, no new locals.
--- ============================================================
-PC.fpAttached = false
-function PC.fakePosDetach()
-    if not PC.fpAttached then return end
-    PC.fpAttached = false
-    local lc = LocalPlayer.Character
-    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
-    if lhrp and sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", lhrp) end) end
-    local g = gv(); if g then g._WH_HC_SENT = nil end
-end
-track(RunService.Heartbeat:Connect(function()
-    -- knife aura already runs this exact re-root itself; stomp / TP shoot need the REAL
-    -- position replicating for their own spoofs to validate -- stand down for all three
-    if not HC.fakePos or HC.knifeAura or _stomping or _tpsActive then PC.fakePosDetach(); return end
-    local lc = LocalPlayer.Character
-    local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
-    local tHrp = knifeTargetHrp()
-    if not lhrp or not tHrp then PC.fakePosDetach(); return end
-    local tPos = tHrp.Position
-    if tPos ~= tPos or tPos.Magnitude > 1e6 then return end
-    pcall(function() lhrp:SetNetworkOwner(LocalPlayer) end)
-    if sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", tHrp) end) end
-    PC.fpAttached = true
-    local fakeCF = CFrame.new(tPos)
-    local g = gv()
-    if g then g._WH_HC_SENT = fakeCF end
-    if g and g.WH and g.WH.markServerCF then g.WH.markServerCF(fakeCF) end   -- Server Pos clone follows
-end))
-
 -- ---- KNIFE REACH: resize [Knife]/Handle/HITBOX_PART (max 13 -- above trips HC's
 --      anti-cheat). Re-applied on Heartbeat so it survives respawn/re-equip. The
 --      visualizer puts a Highlight on the (resized) hitbox so you see the real reach. ----
@@ -2632,10 +2594,6 @@ do
         Callback = function(v) HC.autoShootCooldown = v / 1000 end })
     Sec:Toggle({ Name = "Skip force-fielded", Flag = "HC_AutoShootVis", Default = true,
         Callback = function(v) HC.autoShootVis = v end })
-
-    local SecFP = RageSub:Section({ Name = "Fake Pos", Side = 1 })
-    SecFP:Toggle({ Name = "Fake pos (appear on target)", Flag = "HC_FakePos", Default = false,
-        Callback = function(v) HC.fakePos = v end })
 
     local Sec2 = RageSub:Section({ Name = "Auto Equip", Side = 2 })
     Sec2:Toggle({ Name = "Auto equip on shoot", Flag = "HC_AutoEquip", Default = false,
@@ -3014,8 +2972,6 @@ local function hcCleanup()
     unloaded = true
     setForceHit(false)
     HC.autoShoot, HC.voidshoot, HC.stomp, HC.stompTargets, HC.reload = false, false, false, false, false
-    HC.fakePos = false
-    pcall(PC.fakePosDetach)    -- undo the fake-pos physics-rep desync
     HC.knifeAura, HC.knifeEquip, HC.antiAfk, HC.forceAfk, HC.godmode = false, false, false, false, false
     HC.knifeReach, HC.knifeReachVis = false, false
     HC.targetLine, HC.targetOutline, HC.ammoHud, HC.wbVisualize = false, false, false, false
