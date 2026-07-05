@@ -33,12 +33,17 @@
 --    "CanDeploy" ~= false, and attr "Shooter_Client_Loaded" == true. Auto-deploy
 --    watches the Deployed attribute and re-fires Deploy when it drops (death/round).
 --
---  Cooldown: the gun auto-reloads ReloadDuration=1.1s after each shot, so ~1.1s is
---    the legit fire cadence. Firing faster is the obvious tell -> default gate 1100ms.
+--  Cooldown: the gun auto-reloads ReloadDuration=1.1s after each shot (no magazine
+--    burst -- rateOfFire/magazineSize aren't populated on these guns, so it's one shot
+--    per reload). The SERVER rate-limits the RequestActionSync remote to that cadence
+--    and KICKS for "rapid fire" below it -- confirmed live. That check lives in a
+--    server Script, so there is NO client-side bypass (the only client-visible kicks
+--    are DataService's). The cooldown slider is floored at 1000ms for this reason;
+--    ~1.1s is the real cadence, 1.0s is the edge of latency tolerance -> don't go lower.
 --
---  Deliberately does NOT load the universal shell: movement exploits (fly/speed/
---  noclip) are high-risk in a competitive FPS and weren't requested. Silent aim +
---  auto-deploy are the whole module.
+--  Loads the universal shell (ESP + Player movement) AFTER its own page. NOTE:
+--    movement exploits (fly/speed/noclip) are HIGHER anti-cheat risk in a competitive
+--    FPS than the silent aim -- ESP is the safe part; use movement at your discretion.
 -- ============================================================
 local ctx = ({ ... })[1]
 local Library = ctx.Library
@@ -216,7 +221,9 @@ local _lastShot = 0
 track(RunService.Heartbeat:Connect(function()
     if unloaded or not S.silent then return end
     if not isDeployed() then return end
-    if os.clock() - _lastShot < S.cooldown then return end
+    -- hard floor at 1.0s no matter what a loaded config says: the server kicks for
+    -- rapid fire below the ~1.1s reload and there's no client bypass
+    if os.clock() - _lastShot < math.max(S.cooldown, 1.0) then return end
     local plr, part = bestTarget()
     if not plr or not part then return end
     _lastShot = os.clock()
@@ -264,9 +271,9 @@ do
         Callback = function(v) S.headshot = v end })
 
     local Sec2 = Combat:Section({ Name = "Behaviour", Side = 2 })
-    Sec2:Slider({ Name = "Fire cooldown", Flag = "PA_Cooldown", Min = 200, Max = 2000, Default = 1100,
+    Sec2:Slider({ Name = "Fire cooldown", Flag = "PA_Cooldown", Min = 1000, Max = 2000, Default = 1100,
         Decimals = 0, Suffix = " ms", Callback = function(v) S.cooldown = v / 1000 end })
-    Sec2:Label({ Name = "gun reload = 1100ms; below that is faster than legit" })
+    Sec2:Label({ Name = "server kicks for rapid fire below ~1.1s (no bypass)" })
     Sec2:Toggle({ Name = "Visible check (LoS)", Flag = "PA_Vis", Default = false,
         Callback = function(v) S.visibleCheck = v end })
     Sec2:Toggle({ Name = "Replicate bullet (visual)", Flag = "PA_FakeBullet", Default = true,
@@ -277,6 +284,10 @@ do
         Callback = function(v) S.autoDeploy = v end })
     Sec3:Label({ Name = "re-deploys the moment a round/respawn lets you" })
 end
+
+-- universal shell AFTER our page (so "Pistol Arena" stays the first tab): ESP +
+-- Player movement etc. Movement is higher anti-cheat risk here than the silent aim.
+pcall(function() ctx.load("games/universal.lua")(ctx) end)
 
 -- ============================================================
 --  Teardown
