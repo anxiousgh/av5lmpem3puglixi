@@ -623,7 +623,6 @@ do
         Callback = function(v) S.killerEsp = v end })
     PSec:Toggle({ Name = "Survivor ESP", Flag = "VD_SurvEsp", Default = false,
         Callback = function(v) S.survEsp = v end })
-    PSec:Label({ Name = "red = killer, green = survivors (through walls)" })
 
     local OSec = Vis:Section({ Name = "Objectives", Side = 2 })
     OSec:Toggle({ Name = "Generator ESP (live %)", Flag = "VD_GenEsp", Default = false,
@@ -632,7 +631,6 @@ do
         Callback = function(v) S.genHideDone = v end })
     OSec:Toggle({ Name = "Hooks / Pallets / Vaults", Flag = "VD_ObjEsp", Default = false,
         Callback = function(v) S.objEsp = v end })
-    OSec:Label({ Name = "orange gen = regressing, green = done" })
 
     local Game = Page:SubPage({ Name = "Gameplay" })
     local SSec = Game:Section({ Name = "Skill checks", Side = 1 })
@@ -649,19 +647,14 @@ do
         Decimals = 0, Suffix = " %", Callback = function(v) S.missChance = v end })
     SSec:Slider({ Name = "Reaction time", Flag = "VD_ReactMs", Min = 0, Max = 300, Default = 150,
         Decimals = 0, Suffix = " ms", Callback = function(v) S.reactMs = v end })
-    SSec:Label({ Name = "miss = presses just before the zone (never 2 in a row)" })
-    SSec:Label({ Name = "reaction time also delays checks that spawn near the zone" })
 
     local VSec = Game:Section({ Name = "Vaulting", Side = 2 })
     VSec:Toggle({ Name = "Always fast vault", Flag = "VD_FastVault", Default = false,
         Callback = function(v) S.fastVault = v end })
-    VSec:Label({ Name = "every vault = running vault, any angle, any speed" })
 
     local KPSec = Game:Section({ Name = "Playing killer", Side = 1 })
     KPSec:Toggle({ Name = "Gen repair alerts", Flag = "VD_RepairAlert", Default = false,
         Callback = function(v) S.repairAlert = v end })
-    KPSec:Label({ Name = "notifies when a gen goes under repair (+distance)" })
-    KPSec:Label({ Name = "gen ESP also shows a live 'N repairing' tag" })
 
     local KSec = Game:Section({ Name = "Killer intel", Side = 2 })
     KSec:Toggle({ Name = "Chase warning", Flag = "VD_ChaseWarn", Default = false,
