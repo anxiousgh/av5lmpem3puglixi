@@ -98,6 +98,7 @@ local Movement = {}
 
 do  -- WalkSpeed
     local active, value, conn = false, 50, nil
+    local saved = nil   -- the game's speed, captured when we take over
     local function enforce()
         if not active then return end
         local hum = getHum()
@@ -105,15 +106,26 @@ do  -- WalkSpeed
     end
     function Movement.setWalkSpeedValue(v) value = v; enforce() end
     function Movement.setWalkSpeed(on)
+        local was = active
         active = on
         if conn then conn:Disconnect(); conn = nil end
-        if on then conn = RunService.Heartbeat:Connect(enforce)
-        else local hum = getHum(); if hum then pcall(function() hum.WalkSpeed = 16 end) end end
+        if on then
+            if not was then local hum = getHum(); saved = hum and hum.WalkSpeed or nil end
+            conn = RunService.Heartbeat:Connect(enforce)
+        elseif was then
+            -- restore what the game had, and ONLY if we had actually hijacked
+            -- it -- config autoload fires callbacks with `false` on injection,
+            -- which must never touch game-managed values
+            local hum = getHum()
+            if hum then pcall(function() hum.WalkSpeed = saved or 16 end) end
+            saved = nil
+        end
     end
 end
 
 do  -- JumpPower / JumpHeight
     local active, value, conn = false, 50, nil
+    local savedPower, savedHeight, savedState = nil, nil, nil
     local function enforce()
         if not active then return end
         local hum = getHum(); if not hum then return end
@@ -129,12 +141,29 @@ do  -- JumpPower / JumpHeight
     end
     function Movement.setJumpValue(v) value = v; enforce() end
     function Movement.setJump(on)
+        local was = active
         active = on
         if conn then conn:Disconnect(); conn = nil end
-        if on then conn = RunService.Heartbeat:Connect(enforce)
-        else local hum = getHum(); if hum then pcall(function()
-            if hum.UseJumpPower then hum.JumpPower = 50 else hum.JumpHeight = 7.2 end
-        end) end end
+        if on then
+            if not was then
+                local hum = getHum()
+                if hum then
+                    savedPower, savedHeight = hum.JumpPower, hum.JumpHeight
+                    pcall(function() savedState = hum:GetStateEnabled(Enum.HumanoidStateType.Jumping) end)
+                end
+            end
+            conn = RunService.Heartbeat:Connect(enforce)
+        elseif was then
+            -- restore the game's values (VD keeps survivors at JumpPower 0),
+            -- and ONLY if we had actually hijacked them -- config autoload
+            -- fires callbacks with `false` on injection
+            local hum = getHum()
+            if hum then pcall(function()
+                if savedState ~= nil then hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, savedState) end
+                if hum.UseJumpPower then hum.JumpPower = savedPower or 50 else hum.JumpHeight = savedHeight or 7.2 end
+            end) end
+            savedPower, savedHeight, savedState = nil, nil, nil
+        end
     end
 end
 
