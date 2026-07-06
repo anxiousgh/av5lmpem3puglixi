@@ -94,6 +94,7 @@ local PAL = {
     text    = T["Text"] or Color3.fromRGB(240, 240, 242),
     bg      = T["Background"] or Color3.fromRGB(22, 22, 25),
     outline = T["Outline"] or Color3.fromRGB(62, 57, 77),
+    border  = T["Border"] or Color3.fromRGB(10, 10, 12),
 }
 local ESP_FONT = (Library and Library.Font) or Font.fromEnum(Enum.Font.Code)
 local function hex(c)
@@ -110,8 +111,12 @@ local S = {
     objEsp        = false,   -- hooks / pallets / vaults
     autoSkill     = false,
     skillMode     = "Legit", -- "Legit" rides the needle, "Instant" snaps it
-    skillHumanize = 25,      -- max extra reaction delay (ms) in Legit mode
+    humanizeMin   = 10,      -- Legit: random extra reaction delay range (ms)
+    humanizeMax   = 40,
+    missChance    = 5,       -- Legit: % of checks pressed JUST before the zone (fail)
+    reactMs       = 150,     -- Legit: never press within this long of a check appearing
     chaseWarn     = false,
+    repairAlert   = false,   -- killer side: notify when a gen starts being repaired
 }
 
 local pool = {}   -- [Instance] = { hl=?, bb=?, lbl=?, used=bool }
@@ -132,27 +137,21 @@ local function getEsp(key, adornee, withHl)
         e.bb.Size = UDim2.fromOffset(240, 22)
         e.bb.AlwaysOnTop = true
         e.bb.StudsOffset = Vector3.new(0, 3.2, 0)
-        -- label styled like a menu element: snug dark box, thin purple outline,
-        -- mono font, white text with theme-colored tags via rich text
+        -- label styled like the menu: mono font, white text with theme-colored
+        -- rich-text tags, dark glyph outline for readability (no box)
         e.lbl = Instance.new("TextLabel")
         e.lbl.AnchorPoint = Vector2.new(0.5, 0.5)
         e.lbl.Position = UDim2.fromScale(0.5, 0.5)
         e.lbl.Size = UDim2.new()
         e.lbl.AutomaticSize = Enum.AutomaticSize.XY
-        e.lbl.BackgroundColor3 = PAL.bg
-        e.lbl.BackgroundTransparency = 0.15
-        e.lbl.BorderSizePixel = 0
+        e.lbl.BackgroundTransparency = 1
         e.lbl.RichText = true
         e.lbl.FontFace = ESP_FONT
         e.lbl.TextSize = 12
         e.lbl.TextColor3 = PAL.text
         e.lbl.TextStrokeTransparency = 1
-        local pad = Instance.new("UIPadding")
-        pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 5), UDim.new(0, 5)
-        pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 2), UDim.new(0, 2)
-        pad.Parent = e.lbl
-        local stroke = Instance.new("UIStroke")
-        stroke.Color = PAL.outline
+        local stroke = Instance.new("UIStroke")   -- Contextual = outlines the glyphs
+        stroke.Color = PAL.border
         stroke.Thickness = 1
         stroke.Parent = e.lbl
         e.lbl.Parent = e.bb
@@ -229,32 +228,68 @@ local function stepGenEsp()
                 if e.hl then e.hl.FillTransparency = 0.85 end
                 local dist = hrp and (('<font color="%s"> %dm</font>')
                     :format(HEX.muted, math.floor((root.Position - hrp.Position).Magnitude + 0.5))) or ""
+                local nrep = gen:GetAttribute("PlayersRepairingCount") or 0
                 e.lbl.Text = done and (('<font color="%s">GEN DONE</font>'):format(HEX.muted) .. dist)
-                    or (('<font color="%s"><b>GEN %d%%</b></font>%s%s'):format(
+                    or (('<font color="%s"><b>GEN %d%%</b></font>%s%s%s'):format(
                         HEX.accent, math.floor(prog + 0.5),
-                        regress and ((' <font color="%s">REGRESSING</font>'):format(HEX.killer)) or "", dist))
+                        regress and ((' <font color="%s">REGRESSING</font>'):format(HEX.killer)) or "",
+                        nrep > 0 and ((' <font color="%s">%d repairing</font>'):format(HEX.killer, nrep)) or "", dist))
             end
         end
     end
 end
 
 -- ---------- hooks / pallets / vaults ----------
-local OBJ_FOLDERS = { { "Hooks", "HOOK", "killer" }, { "Pallets", "PALLET", "accent" }, { "Vaults", "VAULT", "muted" } }
+-- Map layouts differ per map: some group objects in folders (Pallets/Vaults/
+-- Hooks), others scatter named models around the map (Palletwrong +
+-- PrimaryPartPallet, Window + VaultTrigger, Hook + HookPoint). Scan for BOTH,
+-- cached and rescanned every 3s so a map change re-detects everything.
+local OBJ_STYLE = { HOOK = "killer", PALLET = "accent", VAULT = "muted" }
+local FOLDER_KIND = { Hooks = "HOOK", Pallets = "PALLET", Vaults = "VAULT", Windows = "VAULT" }
+local function classify(name)
+    local n = name:lower()
+    if n:find("pallet") then return "PALLET" end
+    if n:find("window") or n:find("vault") then return "VAULT" end
+    if n:find("hook") then return "HOOK" end
+    return nil
+end
+local objCache, lastObjScan = {}, -10
+local function getObjects()
+    local now = os.clock()
+    if now - lastObjScan < 3 then return objCache end
+    lastObjScan = now
+    objCache = {}
+    local seen = {}
+    local function add(kind, obj)
+        if seen[obj] then return end
+        seen[obj] = true
+        local root = obj:IsA("BasePart") and obj
+            or obj:FindFirstChild("HookPoint")
+            or obj:FindFirstChild("PrimaryPartPallet")
+            or obj:FindFirstChild("VaultTrigger", true)
+            or obj:FindFirstChild("RootPart")
+            or obj:FindFirstChildWhichIsA("BasePart", true)
+        if root then objCache[#objCache + 1] = { kind = kind, obj = obj, root = root } end
+    end
+    local map = workspace:FindFirstChild("Map")
+    if not map then return objCache end
+    for _, d in ipairs(map:GetDescendants()) do
+        if d:IsA("Folder") and FOLDER_KIND[d.Name] then
+            for _, obj in ipairs(d:GetChildren()) do add(FOLDER_KIND[d.Name], obj) end
+        elseif d:IsA("Model") then
+            local kind = classify(d.Name)
+            if kind then add(kind, d) end
+        end
+    end
+    return objCache
+end
 local function stepObjEsp()
     if not S.objEsp then return end
-    for _, spec in ipairs(OBJ_FOLDERS) do
-        local f = getMapFolder(spec[1])
-        if f then
-            for _, obj in ipairs(f:GetChildren()) do
-                local root = obj:IsA("BasePart") and obj
-                    or obj:FindFirstChild("RootPart")
-                    or obj:FindFirstChildWhichIsA("BasePart")
-                if root then
-                    local e = getEsp(obj, root, false)
-                    e.lbl.Text = ('<font color="%s">%s</font>'):format(HEX[spec[3]], spec[2])
-                    e.bb.StudsOffset = Vector3.new(0, 1.6, 0)
-                end
-            end
+    for _, it in ipairs(getObjects()) do
+        if it.obj.Parent and it.root.Parent then   -- broken pallets etc. vanish mid-cache
+            local e = getEsp(it.obj, it.root, false)
+            e.lbl.Text = ('<font color="%s">%s</font>'):format(HEX[OBJ_STYLE[it.kind]], it.kind)
+            e.bb.StudsOffset = Vector3.new(0, 1.6, 0)
         end
     end
 end
@@ -312,6 +347,7 @@ do
 
     local lastRot, lastT, vel = nil, nil, 0
     local armed, armedGoal, targetRel = true, nil, nil
+    local checkSeenAt, willMiss, lastWasMiss = nil, false, false
     local lastInstant = 0
 
     track(RunService.RenderStepped:Connect(function()
@@ -319,24 +355,26 @@ do
         local check, line, goal = findCheck()
         if not check then
             lastRot, lastT, vel, armed, armedGoal, targetRel = nil, nil, 0, true, nil, nil
+            checkSeenAt, willMiss = nil, false
             return
         end
+        local now = os.clock()
+        checkSeenAt = checkSeenAt or now
         -- goal jumped -> a fresh check inside the same visible session
         if armedGoal ~= nil and math.abs(goal.Rotation - armedGoal) > 5 then
-            armed, targetRel = true, nil
+            armed, targetRel, willMiss, checkSeenAt = true, nil, false, now
         end
         armedGoal = goal.Rotation
 
         if S.skillMode == "Instant" then
-            if os.clock() - lastInstant < 0.1 then return end
-            lastInstant = os.clock()
+            if now - lastInstant < 0.1 then return end
+            lastInstant = now
             pcall(function() line.Rotation = goal.Rotation + 109 end)   -- mid-zone
             pressSpace()
             return
         end
 
         -- ---- Legit: ride the game's own needle, press inside the zone ----
-        local now = os.clock()
         if lastRot ~= nil and lastT ~= nil and now > lastT then
             local d = (line.Rotation - lastRot + 540) % 360 - 180   -- signed shortest delta
             local v = d / (now - lastT)
@@ -347,24 +385,51 @@ do
         if not armed or math.abs(vel) < 20 then return end
         local dir = vel >= 0 and 1 or -1
 
-        -- press spot: random angle in the early half of the zone (relative to
-        -- travel direction), re-rolled per check so timing never looks scripted
+        -- per-check roll: miss this one? (never twice in a row unless 100%)
+        -- a miss = press a few degrees BEFORE the zone, like a rushed human
         if not targetRel then
-            targetRel = dir == 1 and math.random(ZONE_LO + 2, ZONE_LO + 8)
-                or math.random(ZONE_HI - 8, ZONE_HI - 2)
+            willMiss = (S.missChance >= 100 or not lastWasMiss)
+                and math.random(100) <= S.missChance
+            if willMiss then
+                targetRel = dir == 1 and (ZONE_LO - math.random(2, 7))
+                    or (ZONE_HI + math.random(2, 7))
+            else
+                -- random spot in the early half of the zone (travel direction),
+                -- re-rolled per check so timing never looks scripted
+                targetRel = dir == 1 and math.random(ZONE_LO + 2, ZONE_LO + 8)
+                    or math.random(ZONE_HI - 8, ZONE_HI - 2)
+            end
         end
 
+        -- human reaction gate: never press within reactMs of the check appearing
+        if (now - checkSeenAt) < (S.reactMs / 1000) then return end
+
         local rel = (line.Rotation - goal.Rotation) % 360
-        if rel < ZONE_LO or rel > ZONE_HI then return end             -- not in zone yet
+        local inZone = rel >= ZONE_LO and rel <= ZONE_HI
+
+        if willMiss then
+            -- press in the [target, zone edge) window just before the zone;
+            -- no humanize delay here or the press could slip INTO the zone
+            local preZone = dir == 1 and (rel >= targetRel and rel < ZONE_LO)
+                or (rel <= targetRel and rel > ZONE_HI)
+            if preZone or inZone then   -- inZone = frame skipped past the window; press anyway (turns into a hit)
+                armed, lastWasMiss = false, not inZone
+                pressSpace()
+            end
+            return
+        end
+
+        if not inZone then return end
         local passed = (dir == 1 and rel >= targetRel) or (dir == -1 and rel <= targetRel)
         if not passed then return end
-        armed = false
+        armed, lastWasMiss = false, false
 
-        -- humanized reaction: small random delay, capped so the needle can't
-        -- leave the zone before the press lands
+        -- humanized reaction: random extra delay in [min, max], capped so the
+        -- needle can't leave the zone before the press lands
+        local hMin = math.max(math.min(S.humanizeMin, S.humanizeMax), 0)
+        local hMax = math.max(S.humanizeMin, S.humanizeMax, 0)
         local remain = (dir == 1 and (ZONE_HI - rel) or (rel - ZONE_LO)) / math.abs(vel)
-        local delay = math.min(math.random(0, math.max(S.skillHumanize, 0)) / 1000,
-            math.max(remain - 0.03, 0))
+        local delay = math.min(math.random(hMin, hMax) / 1000, math.max(remain - 0.03, 0))
         if delay > 0.001 then
             task.delay(delay, function()
                 if S.autoSkill then pressSpace() end
@@ -422,6 +487,28 @@ do
     end)
 end
 
+-- ---------- killer side: gen repair alerts ----------
+-- Notify the moment a gen's PlayersRepairingCount goes 0 -> N, with distance,
+-- so a killer knows exactly which gen to pressure. Polled on the intel tick.
+local repairCounts = {}   -- [gen] = last seen count
+local function stepRepairAlert()
+    if not S.repairAlert then return end
+    local gens = getMapFolder("Generators") or getMapFolder("Gens")
+    if not gens then return end
+    local hrp = myHRP()
+    for _, gen in ipairs(gens:GetChildren()) do
+        local n = gen:GetAttribute("PlayersRepairingCount") or 0
+        if n > 0 and (repairCounts[gen] or 0) == 0 and not gen:GetAttribute("Completed") then
+            local root = gen:FindFirstChild("RootPart") or gen:FindFirstChildWhichIsA("BasePart")
+            local dist = (hrp and root) and (math.floor((root.Position - hrp.Position).Magnitude + 0.5) .. "m") or "?"
+            pcall(function()
+                Library:Notification(("Gen being repaired -- %s away (%d on it)"):format(dist, n), 4, PAL.accent)
+            end)
+        end
+        repairCounts[gen] = n
+    end
+end
+
 local intelLabels = {}   -- filled in the UI block below
 local wasChased = false
 local lastIntel = 0
@@ -447,6 +534,8 @@ track(RunService.Heartbeat:Connect(function()
     -- labels only need a few updates a second; SetText at 60 Hz is wasted work
     if os.clock() - lastIntel < 0.25 then return end
     lastIntel = os.clock()
+
+    stepRepairAlert()
 
     if intelLabels.killer then
         local hrp = myHRP()
@@ -510,10 +599,22 @@ do
     SSec:Dropdown({ Name = "Mode", Flag = "VD_SkillMode", Default = "Legit", Multi = false,
         Items = { "Legit", "Instant" },
         Callback = function(v) S.skillMode = (type(v) == "table" and v[1]) or v or "Legit" end })
-    SSec:Slider({ Name = "Humanize", Flag = "VD_SkillHumanize", Min = 0, Max = 80, Default = 25,
-        Decimals = 0, Suffix = " ms", Callback = function(v) S.skillHumanize = v end })
-    SSec:Label({ Name = "legit: waits for the needle, random press spot" })
-    SSec:Label({ Name = "instant: snaps the needle, finishes immediately" })
+    SSec:Slider({ Name = "Humanize min", Flag = "VD_HumanizeMin", Min = 0, Max = 100, Default = 10,
+        Decimals = 0, Suffix = " ms", Callback = function(v) S.humanizeMin = v end })
+    SSec:Slider({ Name = "Humanize max", Flag = "VD_HumanizeMax", Min = 0, Max = 150, Default = 40,
+        Decimals = 0, Suffix = " ms", Callback = function(v) S.humanizeMax = v end })
+    SSec:Slider({ Name = "Miss chance", Flag = "VD_MissChance", Min = 0, Max = 100, Default = 5,
+        Decimals = 0, Suffix = " %", Callback = function(v) S.missChance = v end })
+    SSec:Slider({ Name = "Reaction time", Flag = "VD_ReactMs", Min = 0, Max = 300, Default = 150,
+        Decimals = 0, Suffix = " ms", Callback = function(v) S.reactMs = v end })
+    SSec:Label({ Name = "miss = presses just before the zone (never 2 in a row)" })
+    SSec:Label({ Name = "reaction time also delays checks that spawn near the zone" })
+
+    local KPSec = Game:Section({ Name = "Playing killer", Side = 1 })
+    KPSec:Toggle({ Name = "Gen repair alerts", Flag = "VD_RepairAlert", Default = false,
+        Callback = function(v) S.repairAlert = v end })
+    KPSec:Label({ Name = "notifies when a gen goes under repair (+distance)" })
+    KPSec:Label({ Name = "gen ESP also shows a live 'N repairing' tag" })
 
     local KSec = Game:Section({ Name = "Killer intel", Side = 2 })
     KSec:Toggle({ Name = "Chase warning", Flag = "VD_ChaseWarn", Default = false,
@@ -532,7 +633,8 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 --  Teardown
 -- ============================================================
 local function cleanup()
-    S.killerEsp, S.survEsp, S.genEsp, S.objEsp, S.autoSkill, S.chaseWarn = false, false, false, false, false, false
+    S.killerEsp, S.survEsp, S.genEsp, S.objEsp, S.autoSkill, S.chaseWarn, S.repairAlert =
+        false, false, false, false, false, false, false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, e in pairs(pool) do
         if e.hl then pcall(function() e.hl:Destroy() end) end
