@@ -108,7 +108,9 @@ local S = {
     survEsp       = false,
     genEsp        = false,
     genHideDone   = true,
-    objEsp        = false,   -- hooks / pallets / vaults
+    hookEsp       = false,
+    palletEsp     = false,
+    vaultEsp      = false,   -- windows
     autoSkill     = false,
     skillMode     = "Legit", -- "Legit" rides the needle, "Instant" snaps it
     humanizeMin   = 10,      -- Legit: random extra reaction delay range (ms)
@@ -302,9 +304,10 @@ local function getObjects()
     return objCache
 end
 local function stepObjEsp()
-    if not S.objEsp then return end
+    local kindOn = { HOOK = S.hookEsp, PALLET = S.palletEsp, VAULT = S.vaultEsp }
+    if not (S.hookEsp or S.palletEsp or S.vaultEsp) then return end
     for _, it in ipairs(getObjects()) do
-        if it.obj.Parent and it.root.Parent then   -- broken pallets etc. vanish mid-cache
+        if kindOn[it.kind] and it.obj.Parent and it.root.Parent then   -- broken pallets etc. vanish mid-cache
             local e = getEsp(it.obj, it.root, false)
             e.lbl.Text = ('<font color="%s">%s</font>'):format(HEX[OBJ_STYLE[it.kind]], it.kind)
             e.bb.StudsOffset = Vector3.new(0, 1.6, 0)
@@ -663,8 +666,12 @@ do
         Callback = function(v) S.genEsp = v end })
     OSec:Toggle({ Name = "Hide completed gens", Flag = "VD_GenHideDone", Default = true,
         Callback = function(v) S.genHideDone = v end })
-    OSec:Toggle({ Name = "Hooks / Pallets / Vaults", Flag = "VD_ObjEsp", Default = false,
-        Callback = function(v) S.objEsp = v end })
+    OSec:Toggle({ Name = "Hook ESP", Flag = "VD_HookEsp", Default = false,
+        Callback = function(v) S.hookEsp = v end })
+    OSec:Toggle({ Name = "Pallet ESP", Flag = "VD_PalletEsp", Default = false,
+        Callback = function(v) S.palletEsp = v end })
+    OSec:Toggle({ Name = "Window ESP", Flag = "VD_VaultEsp", Default = false,
+        Callback = function(v) S.vaultEsp = v end })
 
     local Game = Page:SubPage({ Name = "Gameplay" })
     local SSec = Game:Section({ Name = "Skill checks", Side = 1 })
@@ -708,8 +715,8 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 --  Teardown
 -- ============================================================
 local function cleanup()
-    S.killerEsp, S.survEsp, S.genEsp, S.objEsp, S.autoSkill, S.chaseWarn, S.repairAlert, S.fastVault =
-        false, false, false, false, false, false, false, false
+    S.killerEsp, S.survEsp, S.genEsp, S.hookEsp, S.palletEsp, S.vaultEsp = false, false, false, false, false, false
+    S.autoSkill, S.chaseWarn, S.repairAlert, S.fastVault = false, false, false, false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, e in pairs(pool) do
         if e.hl then pcall(function() e.hl:Destroy() end) end
