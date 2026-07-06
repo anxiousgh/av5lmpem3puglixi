@@ -43,15 +43,25 @@ local RED   = Color3.fromRGB(255, 60, 60)
 local GREEN = Color3.fromRGB(90, 220, 120)
 local GREY  = Color3.fromRGB(200, 200, 200)
 
-local function isSkinwalker(npc)
-    return npc:GetAttribute("Skinwalker") == true
+-- observed live: Skinwalker=true and Fake=true are separate anomaly flags
+-- (a visitor can carry either); both mean "not a real patient"
+local function anomalyType(npc)
+    local sw = npc:GetAttribute("Skinwalker") == true
+    local fake = npc:GetAttribute("Fake") == true
+    if sw and fake then return "SKINWALKER+FAKE" end
+    if sw then return "SKINWALKER" end
+    if fake then return "FAKE" end
+    return nil
 end
 
 local function revealNames(npc)
-    local a = npc:GetAttribute("CameraEffect")
-    local b = npc:GetAttribute("CameraEffect2")
-    if a and b then return a .. "+" .. b end
-    return a or b
+    local parts = {}
+    for _, k in ipairs({ "CameraEffect", "CameraEffect2", "PhotoEffect", "PhotoEffect2" }) do
+        local v = npc:GetAttribute(k)
+        if v and v ~= "" then parts[#parts + 1] = tostring(v) end
+    end
+    if #parts == 0 then return nil end
+    return table.concat(parts, "+")
 end
 
 -- ============================================================
@@ -98,23 +108,27 @@ local function makeEsp(npc)
     esp[npc] = { hl = hl, bb = bb, label = label, alerted = false }
 end
 
-local function alertIfSkinwalker(npc)
+local function alertIfAnomaly(npc)
     local e = esp[npc]
     if not e or e.alerted then return end
-    if AH.alert and isSkinwalker(npc) then
+    local kind = anomalyType(npc)
+    if AH.alert and kind then
         e.alerted = true
         pcall(function()
-            Library:Notification("SKINWALKER: " .. npc.Name, 5, Library.Theme["Risky"])
+            Library:Notification(kind .. ": " .. npc.Name, 5, Library.Theme["Risky"])
         end)
     end
 end
 
 local function hookNpc(npc)
     makeEsp(npc)
-    alertIfSkinwalker(npc)
-    -- the attribute can land after the tag does -> watch for it
+    alertIfAnomaly(npc)
+    -- the attributes can land after the tag does -> watch for them
     track(npc:GetAttributeChangedSignal("Skinwalker"):Connect(function()
-        alertIfSkinwalker(npc)
+        alertIfAnomaly(npc)
+    end))
+    track(npc:GetAttributeChangedSignal("Fake"):Connect(function()
+        alertIfAnomaly(npc)
     end))
     track(npc.AncestryChanged:Connect(function(_, parent)
         if not parent then dropEsp(npc) end
@@ -134,18 +148,18 @@ track(RunService.Heartbeat:Connect(function()
         elseif not AH.esp then
             if e.hl.Enabled then e.hl.Enabled = false; e.bb.Enabled = false end
         else
-            local walker = isSkinwalker(npc)
-            local show = walker or AH.showSafe
+            local kind = anomalyType(npc)
+            local show = kind ~= nil or AH.showSafe
             e.hl.Enabled = show
             e.bb.Enabled = show
             if show then
-                local col = walker and RED or GREEN
+                local col = kind and RED or GREEN
                 e.hl.FillColor = col; e.hl.OutlineColor = col
                 e.label.TextColor3 = col
-                if walker then
+                if kind then
                     local extra = revealNames(npc)
                     local room = npc:GetAttribute("DesignatedRoom")
-                    e.label.Text = "SKINWALKER  " .. npc.Name
+                    e.label.Text = kind .. "  " .. npc.Name
                         .. (room and ("  [" .. tostring(room) .. "]") or "")
                         .. (extra and ("\n" .. extra) or "")
                     e.bb.Size = UDim2.fromOffset(220, extra and 44 or 34)
@@ -169,11 +183,11 @@ do
         Callback = function(v) AH.esp = v end })
     Sec:Toggle({ Name = "Also show safe visitors", Flag = "AH_EspSafe", Default = true,
         Callback = function(v) AH.showSafe = v end })
-    Sec:Label({ Name = "red = skinwalker (server tells the client)" })
+    Sec:Label({ Name = "red = skinwalker / fake (server tells the client)" })
     Sec:Label({ Name = "read-only: no remotes fired, nothing replicates" })
 
     local Sec2 = Main:Section({ Name = "Alerts", Side = 2 })
-    Sec2:Toggle({ Name = "Notify when a skinwalker spawns", Flag = "AH_Alert", Default = true,
+    Sec2:Toggle({ Name = "Notify when an anomaly spawns", Flag = "AH_Alert", Default = true,
         Callback = function(v) AH.alert = v end })
 end
 
