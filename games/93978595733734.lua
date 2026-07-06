@@ -119,6 +119,7 @@ local S = {
     reactMs       = 150,     -- Legit: never press within this long of a check appearing
     chaseWarn     = false,
     antiChase     = false,   -- while chased: keep resetting the killer's BloodLust
+    autoUnhook    = false,   -- hooked: rescue-spoof our own hook + self-unhook rolls
     repairAlert   = false,   -- killer side: notify when a gen starts being repaired
     fastVault     = false,   -- every vault counts as a running (fast) vault
 }
@@ -587,6 +588,39 @@ local function stepAntiChase(kc)
     end
 end
 
+-- auto free from hook: the rescue path (UnHookEvent fired at a hook's tagged
+-- "UnhookPoint") is what teammates use and has no chance roll -- fire it at
+-- OUR OWN hook the moment we're hooked. If the server rejects self-rescue,
+-- fall back to SelfUnHookEvent attempts (the "free yourself" roll) as well.
+local lastHookTry, hookTries = 0, 0
+local function stepAutoUnhook()
+    local c = LocalPlayer.Character
+    if not (S.autoUnhook and c and c:GetAttribute("IsHooked")) then
+        hookTries = 0
+        return
+    end
+    if os.clock() - lastHookTry < 0.35 then return end
+    lastHookTry = os.clock()
+    hookTries = hookTries + 1
+    local Carry = game:GetService("ReplicatedStorage").Remotes.Carry
+    local hrp = c:FindFirstChild("HumanoidRootPart")
+    local best, bd = nil, nil
+    if hrp then
+        for _, pt in ipairs(game:GetService("CollectionService"):GetTagged("UnhookPoint")) do
+            if pt:IsA("BasePart") and pt:IsDescendantOf(workspace) then
+                local d = (pt.Position - hrp.Position).Magnitude
+                if not bd or d < bd then best, bd = pt, d end
+            end
+        end
+    end
+    if best and bd < 20 then
+        pcall(function() Carry.UnHookEvent:FireServer(best) end)
+    end
+    if hookTries > 3 then   -- rescue path didn't take within ~1s; add roll attempts
+        pcall(function() Carry.SelfUnHookEvent:FireServer() end)
+    end
+end
+
 local intelLabels = {}   -- filled in the UI block below
 local wasChased = false
 local lastIntel = 0
@@ -609,6 +643,7 @@ track(RunService.Heartbeat:Connect(function()
     end
     if chased and kc then stepAntiChase(kc) end
     wasChased = chased
+    stepAutoUnhook()
 
     -- labels only need a few updates a second; SetText at 60 Hz is wasted work
     if os.clock() - lastIntel < 0.25 then return end
@@ -710,6 +745,10 @@ do
     VSec:Toggle({ Name = "Always fast vault", Flag = "VD_FastVault", Default = false,
         Callback = function(v) S.fastVault = v end })
 
+    local HSec = Game:Section({ Name = "Hook", Side = 2 })
+    HSec:Toggle({ Name = "Auto free from hook", Flag = "VD_AutoUnhook", Default = false,
+        Callback = function(v) S.autoUnhook = v end })
+
     local KPSec = Game:Section({ Name = "Playing killer", Side = 1 })
     KPSec:Toggle({ Name = "Gen repair alerts", Flag = "VD_RepairAlert", Default = false,
         Callback = function(v) S.repairAlert = v end })
@@ -735,7 +774,8 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     S.killerEsp, S.survEsp, S.genEsp, S.hookEsp, S.palletEsp, S.vaultEsp = false, false, false, false, false, false
-    S.autoSkill, S.chaseWarn, S.antiChase, S.repairAlert, S.fastVault = false, false, false, false, false
+    S.autoSkill, S.chaseWarn, S.antiChase, S.autoUnhook, S.repairAlert, S.fastVault =
+        false, false, false, false, false, false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, e in pairs(pool) do
         if e.hl then pcall(function() e.hl:Destroy() end) end
