@@ -205,8 +205,25 @@ local function stepPlayerEsp()
                 else
                     local hum = c:FindFirstChildOfClass("Humanoid")
                     local hp = hum and (math.floor(hum.Health + 0.5) .. "hp ") or ""
-                    e.lbl.Text = ('%s <font color="%s">%s%dm</font>')
-                        :format(p.Name, HEX.muted, hp, dist)
+                    -- live state straight off replicated character attrs --
+                    -- exactly what a killer wants to see through walls
+                    local st = ""
+                    local hookProg = c:GetAttribute("HookedProgress")
+                    if c:GetAttribute("Knocked") then
+                        st = (' <font color="%s">KNOCKED</font>'):format(HEX.killer)
+                    elseif hookProg and hookProg < 100 then
+                        st = (' <font color="%s">HOOKED %d%%</font>'):format(HEX.killer, hookProg)
+                    elseif (c:GetAttribute("repairing") or 0) > 0 then
+                        st = (' <font color="%s">REPAIRING</font>'):format(HEX.accent)
+                    elseif (c:GetAttribute("healing") or 0) > 0 then
+                        st = (' <font color="%s">HEALING</font>'):format(HEX.accent)
+                    elseif c:GetAttribute("IsRunning") then
+                        st = (' <font color="%s">RUNNING</font>'):format(HEX.muted)
+                    end
+                    local hooks = c:GetAttribute("HookCount") or 0
+                    local hk = hooks > 0 and ((' <font color="%s">%dx hooked</font>'):format(HEX.muted, hooks)) or ""
+                    e.lbl.Text = ('%s%s%s <font color="%s">%s%dm</font>')
+                        :format(p.Name, st, hk, HEX.muted, hp, dist)
                 end
             end
         end
@@ -609,6 +626,23 @@ track(RunService.Heartbeat:Connect(function()
             intelLabels.gens:SetText("Generators: " .. done .. "/" .. total .. " done")
         end
     end
+
+    -- killer-side summary: what every survivor is doing right now
+    if intelLabels.survs then
+        local total, knocked, hooked, repairing = 0, 0, 0, 0
+        for _, p in ipairs(Players:GetPlayers()) do
+            local c = isSurvivor(p) and p.Character
+            if c then
+                total = total + 1
+                if c:GetAttribute("Knocked") then knocked = knocked + 1 end
+                local hprog = c:GetAttribute("HookedProgress")
+                if hprog and hprog < 100 then hooked = hooked + 1 end
+                if (c:GetAttribute("repairing") or 0) > 0 then repairing = repairing + 1 end
+            end
+        end
+        intelLabels.survs:SetText(("Survivors: %d   down: %d   hooked: %d   repairing: %d")
+            :format(total, knocked, hooked, repairing))
+    end
 end))
 
 -- ============================================================
@@ -655,6 +689,7 @@ do
     local KPSec = Game:Section({ Name = "Playing killer", Side = 1 })
     KPSec:Toggle({ Name = "Gen repair alerts", Flag = "VD_RepairAlert", Default = false,
         Callback = function(v) S.repairAlert = v end })
+    intelLabels.survs = KPSec:Label({ Name = "Survivors: -" })
 
     local KSec = Game:Section({ Name = "Killer intel", Side = 2 })
     KSec:Toggle({ Name = "Chase warning", Flag = "VD_ChaseWarn", Default = false,
