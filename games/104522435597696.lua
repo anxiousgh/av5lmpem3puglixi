@@ -39,6 +39,8 @@ local AH = {
     alert = true,
     cureMonitor = true,
     cureNotify = true,
+    autoTreat = false,   -- assist mode: fire in-range treatment prompts in order
+    treatRange = 16,     -- studs from your real position a prompt must be to fire
 }
 local knownCures = {}   -- [patientName] = "Herbs" / "Bandages (SURGERY)" (filled by the cure helper below)
 
@@ -278,6 +280,204 @@ track(CollectionService:GetInstanceRemovedSignal("NPC"):Connect(function(npc)
 end))
 
 -- ============================================================
+--  AUTO TREAT (assist mode) -- decoded live 2026-07-07:
+--  the whole treatment loop is driven by ProximityPrompts; firing them
+--  advances server state directly (a full manual cycle fired ZERO game
+--  RemoteEvents -- the analyzer "minigame" is pure client cosmetic). BUT
+--  the server validates your REAL position per prompt (huge MaxActivation
+--  Distance + no LoS still failed from across the map), so we can only fire
+--  a station you're physically near. This mode watches every room with an
+--  in-bed patient and fires the correct next prompt whenever it's within
+--  `treatRange` of you -- you walk the room, it does analyze -> process ->
+--  pick the RIGHT cure (from the illness->cure map) -> apply, no clicking.
+--  Medical cures come from the central supply items, Emergency from the
+--  room's own Medicine cabinet; we match cure prompts by ActionText either
+--  way. (Full auto-walk + auto check-in = next iteration on this engine.)
+-- ============================================================
+local gameLib
+pcall(function() gameLib = require(game.ReplicatedStorage:WaitForChild("Lib")) end)
+
+-- ordered non-cure steps; whichever is enabled + in range fires next
+local STEP_ORDER = { "Sleep Patient", "Analyze Sample", "Inspect", "Process Results" }
+local STEP_SET = {}
+for _, s in ipairs(STEP_ORDER) do STEP_SET[s] = true end
+
+local fireCd = {}       -- [pp] = os.clock() of last fire (0.6s debounce)
+local PROMPT_CD = 0.6
+
+local function ppWorldPos(pp)
+    local p = pp.Parent
+    if not p then return nil end
+    if p:IsA("BasePart") then return p.Position end
+    if p:IsA("Attachment") then return p.WorldPosition end
+    if p:IsA("Model") then return (p:GetPivot()).Position end
+    local b = p:FindFirstChildWhichIsA("BasePart", true)
+    return b and b.Position
+end
+
+local function myPos()
+    local ch = LocalPlayer.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    return hrp and hrp.Position
+end
+
+local function tryFire(pp, pos, range)
+    if not pp or not pp.Enabled then return false end
+    local wp = ppWorldPos(pp)
+    if not (wp and pos) or (wp - pos).Magnitude > range then return false end
+    local last = fireCd[pp]
+    if last and os.clock() - last < PROMPT_CD then return false end
+    fireCd[pp] = os.clock()
+    pcall(fireproximityprompt, pp)
+    return true
+end
+
+-- close the cosmetic circle minigame the analyzer opens locally, so you
+-- aren't left with a locked mouse / hidden CoreGui (server already advanced)
+local function closeMinigameSoon()
+    task.delay(0.2, function()
+        if gameLib and CollectionService:HasTag(LocalPlayer, "InMinigame") then
+            pcall(function() gameLib.HeartMinigameComplete(true) end)
+            pcall(function() gameLib.EndCircleMinigame() end)
+        end
+    end)
+end
+
+-- needed cure display-names for the room's current report (via the map)
+local function neededCures(mg)
+    local mon = mg:FindFirstChild("Monitor")
+    local rep = mon and mon:FindFirstChild("Screen")
+    rep = rep and rep:FindFirstChild("UI")
+    rep = rep and rep:FindFirstChild("Report")
+    local illL = rep and rep:FindFirstChild("illnesses")
+    if not (illL and illL:IsA("TextLabel")) then return {} end
+    local list = {}
+    for line in illL.Text:gmatch("[^\n]+") do
+        local name = line:gsub("%s*%->.*$", ""):gsub("^%s*%-%s*", ""):gsub("^%s+", ""):gsub("%s+$", "")
+        local cure = cureFor(name)
+        if cure then list[#list + 1] = cure end
+    end
+    return list
+end
+
+-- find an enabled prompt anywhere in `room` whose ActionText == want, in range
+local function findPromptInRoom(room, want, pos, range)
+    for _, d in ipairs(room:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Enabled and d.ActionText == want then
+            local wp = ppWorldPos(d)
+            if wp and pos and (wp - pos).Magnitude <= range then return d end
+        end
+    end
+    return nil
+end
+
+local function heldCureNames()
+    local held = {}
+    local ch = LocalPlayer.Character
+    if ch then
+        for _, c in ipairs(ch:GetChildren()) do if c:IsA("Tool") then held[c.Name] = true end end
+    end
+    for _, c in ipairs(LocalPlayer.Backpack:GetChildren()) do if c:IsA("Tool") then held[c.Name] = true end end
+    return held
+end
+
+local function roomHasApply(room)
+    for _, d in ipairs(room:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Enabled and d.ActionText == "Apply Treatment" then return true end
+    end
+    return false
+end
+
+-- union of cures every ready-to-treat patient needs right now (report shown +
+-- Apply enabled). Used to grab cures from central supply, which is nowhere near
+-- the beds -- so cure-grabbing must be DECOUPLED from being near the Apply prompt.
+local function globalNeededCures()
+    local need = {}
+    for _, folder in ipairs(workspace.Rooms:GetChildren()) do
+        for _, room in ipairs(folder:GetChildren()) do
+            local mg = room:FindFirstChild("Minigame")
+            if mg and roomHasApply(room) then
+                for _, c in ipairs(neededCures(mg)) do need[c] = true end
+            end
+        end
+    end
+    return need
+end
+
+-- every enabled cure prompt (room cabinets + central supply items)
+local function eachCurePrompt(fn)
+    local supply = workspace:FindFirstChild("Model")
+    local items = supply and supply:FindFirstChild("Items")
+    if items then
+        for _, it in ipairs(items:GetChildren()) do
+            local pp = it:FindFirstChild("PP")
+            if pp and pp:IsA("ProximityPrompt") and pp.Enabled then fn(it.Name, pp) end
+        end
+    end
+    for _, folder in ipairs(workspace.Rooms:GetChildren()) do
+        for _, room in ipairs(folder:GetChildren()) do
+            local cab = room:FindFirstChild("Minigame")
+            cab = cab and cab:FindFirstChild("Medicine")
+            if cab then
+                for _, d in ipairs(cab:GetDescendants()) do
+                    if d:IsA("ProximityPrompt") and d.Enabled then fn(d.ActionText, d) end
+                end
+            end
+        end
+    end
+end
+
+track(RunService.Heartbeat:Connect(function()
+    if not AH.autoTreat then return end
+    local pos = myPos()
+    if not pos then return end
+    local range = AH.treatRange
+
+    -- 1) GRAB cures: whenever you're near a supply/cabinet cure a waiting
+    -- patient needs and you aren't already holding it. One grab per tick.
+    local need = globalNeededCures()
+    if next(need) then
+        local held = heldCureNames()
+        local grabbed = false
+        eachCurePrompt(function(name, pp)
+            if grabbed or not need[name] or held[name] then return end
+            if tryFire(pp, pos, range) then grabbed = true end
+        end)
+        if grabbed then return end
+    end
+
+    -- 2) per room: ordered analyze/process steps, then Apply when you hold a
+    -- needed cure (or the room lists none). One action per tick, calm + clear.
+    for _, folder in ipairs(workspace.Rooms:GetChildren()) do
+        for _, room in ipairs(folder:GetChildren()) do
+            local mg = room:FindFirstChild("Minigame")
+            if mg then
+                local acted = false
+                for _, want in ipairs(STEP_ORDER) do
+                    local pp = findPromptInRoom(room, want, pos, range)
+                    if pp and tryFire(pp, pos, range) then
+                        if want == "Analyze Sample" or want == "Inspect" then closeMinigameSoon() end
+                        acted = true
+                        break
+                    end
+                end
+                if not acted then
+                    local apply = findPromptInRoom(room, "Apply Treatment", pos, range)
+                    if apply then
+                        local cures = neededCures(mg)
+                        local held = heldCureNames()
+                        local haveOne = (#cures == 0)
+                        for _, c in ipairs(cures) do if held[c] then haveOne = true break end end
+                        if haveOne and tryFire(apply, pos, range) then acted = true end
+                    end
+                end
+                if acted then return end
+            end
+        end
+    end
+end))
+
+-- ============================================================
 --  UI  (Animal Hospital page first -> first tab; universal loads after)
 -- ============================================================
 do
@@ -302,6 +502,16 @@ do
     Sec3:Toggle({ Name = "Notify illness -> cure", Flag = "AH_CureNotify", Default = true,
         Callback = function(v) AH.cureNotify = v end })
     Sec3:Label({ Name = "reads the server-written DNA report; cure also on ESP" })
+
+    local AutoPage = Page:SubPage({ Name = "Auto Treat" })
+    local ASec = AutoPage:Section({ Name = "Assist (you walk)", Side = 1 })
+    ASec:Toggle({ Name = "Auto treat rooms in range", Flag = "AH_AutoTreat", Default = false,
+        Callback = function(v) AH.autoTreat = v end })
+    ASec:Slider({ Name = "Reach", Flag = "AH_TreatRange", Min = 8, Max = 24, Default = 16,
+        Decimals = 0, Suffix = " studs", Callback = function(v) AH.treatRange = v end })
+    ASec:Label({ Name = "walk a patient's room; it runs analyze -> process ->" })
+    ASec:Label({ Name = "right cure -> apply on nearby stations. no clicking." })
+    ASec:Label({ Name = "server checks real pos, so you must be near the station" })
 end
 
 -- universal shell after our page (movement + generic ESP). Horror game,
@@ -313,6 +523,7 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     AH.esp = false
+    AH.autoTreat = false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for npc in pairs(esp) do dropEsp(npc) end
     pcall(function() if espGui then espGui:Destroy() end end)
