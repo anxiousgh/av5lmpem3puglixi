@@ -262,7 +262,11 @@ task.spawn(function()
         pcall(function() plr.CharacterAdded:Wait() end)
     end
     task.wait(1)
+    -- world/lighting controls must NOT apply during autoload (a config saves
+    -- every flag, including lighting values captured in some other game)
+    Library.__autoloading = true
     pcall(function() if Library.RunAutoload then Library.RunAutoload() end end)
+    Library.__autoloading = nil
 end)
 
 Library:Notification("wrath.cc Loaded", 3, Library.Theme["Accent"])

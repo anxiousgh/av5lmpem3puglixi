@@ -1395,8 +1395,10 @@ do
     end
 
     local locked = false
+    local dirty = false   -- did WE ever write to Lighting this session?
     local function setProp(prop, value)
         desired[prop] = value
+        dirty = true
         pcall(function() Lighting[prop] = value end)
     end
 
@@ -1413,8 +1415,15 @@ do
     -- default. Without this guard that would create Atmosphere/Sky/Clouds and
     -- shove the world to the defaults on every game. Nothing applies until the
     -- user actually touches a control.
+    -- also ignore the autoload window (loader sets Library.__autoloading):
+    -- a config stores EVERY flag, so autoload would otherwise re-apply lighting
+    -- values saved from a different game on every injection
     local ready = false
-    local function gated(fn) return function(...) if ready then fn(...) end end end
+    local function gated(fn)
+        return function(...)
+            if ready and not Library.__autoloading then fn(...) end
+        end
+    end
 
     -- Atmosphere / Sky / Clouds are made lazily on first use; we destroy only the
     -- ones WE created (pre-existing ones are left alone on unload).
@@ -1500,7 +1509,12 @@ do
     function World.cleanup()
         locked = false
         if weather.part then pcall(function() weather.part:Destroy() end); weather.part = nil end
-        for prop, value in pairs(original) do pcall(function() Lighting[prop] = value end) end
+        -- only restore Lighting if we actually wrote to it -- otherwise unload/
+        -- re-injection would shove in a stale injection-time snapshot
+        if dirty then
+            for prop, value in pairs(original) do pcall(function() Lighting[prop] = value end) end
+            dirty = false
+        end
         for _, inst in pairs(mine) do pcall(function() inst:Destroy() end) end
     end
 
