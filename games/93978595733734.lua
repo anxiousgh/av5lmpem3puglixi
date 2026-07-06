@@ -117,6 +117,7 @@ local S = {
     reactMs       = 150,     -- Legit: never press within this long of a check appearing
     chaseWarn     = false,
     repairAlert   = false,   -- killer side: notify when a gen starts being repaired
+    fastVault     = false,   -- every vault counts as a running (fast) vault
 }
 
 local pool = {}   -- [Instance] = { hl=?, bb=?, lbl=?, used=bool }
@@ -441,6 +442,47 @@ do
 end
 
 -- ============================================================
+--  ALWAYS FAST VAULT
+--  A fast vault normally needs, at the moment of the vault: the sprint flag
+--  (SurvivorActions.startVault reads getSprintFlag/"Sprinting"), facing the
+--  window within 40 deg, and velocity > 15.25 (both checked in
+--  SurvivorAnimationsController._onVaultAnimation). All three are CLIENT
+--  decided -- the client then just informs the server via
+--  fastvault:FireServer. So hook the two survivor modules:
+--   - startVault: shadow getSprintFlag with `true` for the duration of the call
+--   - _isFacingStraightEnough: return true + backdate characterspeed
+--  Hook originals are kept in getgenv so re-executing never stacks wrappers.
+-- ============================================================
+pcall(function()
+    local Modules = game:GetService("ReplicatedStorage"):WaitForChild("Modules", 5)
+    local SA = require(Modules.Survivors.SurvivorActions)
+    local AC = require(Modules.Survivors.SurvivorAnimationsController)
+
+    local g = (getgenv and getgenv()) or {}
+    g.__VD_VAULT_ORIG = g.__VD_VAULT_ORIG or {}
+    local H = g.__VD_VAULT_ORIG
+    H.startVault = H.startVault or SA.startVault
+    H.facing = H.facing or AC._isFacingStraightEnough
+
+    SA.startVault = function(p1, p2)
+        if not S.fastVault then return H.startVault(p1, p2) end
+        local prev = rawget(p1, "getSprintFlag")
+        p1.getSprintFlag = function() return true end
+        local ok, err = pcall(H.startVault, p1, p2)
+        p1.getSprintFlag = prev   -- nil removes the shadow again
+        if not ok then error(err, 0) end
+    end
+
+    AC._isFacingStraightEnough = function(self, ...)
+        if S.fastVault then
+            self.characterspeed = 100   -- pass the > 15.25 speed gate
+            return true                 -- pass the 40-degree facing gate
+        end
+        return H.facing(self, ...)
+    end
+end)
+
+-- ============================================================
 --  KILLER INTEL  -- live readout of the killer's attributes + chase warning
 -- ============================================================
 local warnGui, warnLbl
@@ -610,6 +652,11 @@ do
     SSec:Label({ Name = "miss = presses just before the zone (never 2 in a row)" })
     SSec:Label({ Name = "reaction time also delays checks that spawn near the zone" })
 
+    local VSec = Game:Section({ Name = "Vaulting", Side = 2 })
+    VSec:Toggle({ Name = "Always fast vault", Flag = "VD_FastVault", Default = false,
+        Callback = function(v) S.fastVault = v end })
+    VSec:Label({ Name = "every vault = running vault, any angle, any speed" })
+
     local KPSec = Game:Section({ Name = "Playing killer", Side = 1 })
     KPSec:Toggle({ Name = "Gen repair alerts", Flag = "VD_RepairAlert", Default = false,
         Callback = function(v) S.repairAlert = v end })
@@ -633,8 +680,8 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 --  Teardown
 -- ============================================================
 local function cleanup()
-    S.killerEsp, S.survEsp, S.genEsp, S.objEsp, S.autoSkill, S.chaseWarn, S.repairAlert =
-        false, false, false, false, false, false, false
+    S.killerEsp, S.survEsp, S.genEsp, S.objEsp, S.autoSkill, S.chaseWarn, S.repairAlert, S.fastVault =
+        false, false, false, false, false, false, false, false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, e in pairs(pool) do
         if e.hl then pcall(function() e.hl:Destroy() end) end
