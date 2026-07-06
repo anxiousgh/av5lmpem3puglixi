@@ -4,18 +4,24 @@
 -- try to write the values back (re-set the moment they change).
 --
 -- RANGE-CHECK BYPASS: the server validates trigger distance against the
--- prompt's REAL range (engine-side, plus whatever the game adds), so a far
--- trigger silently fails. When you trigger a prompt beyond its real range,
--- this script teleports you to it, waits one network step so the new
--- position replicates, re-fires the prompt, and teleports you back.
--- Others see you blink there for ~0.2s; teleport anti-cheats may flag it.
+-- prompt's REAL range (engine-side, plus whatever the game adds), reading
+-- your REPLICATED character position. When you trigger a prompt beyond its
+-- real range, this script makes the server see you at the prompt for ~0.2s,
+-- re-fires it, then restores. Two modes:
+--   "rep" (default) — knife-bot re-root: SetNetworkOwner + PhysicsRepRootPart
+--         onto the prompt's parent part. Your local character NEVER moves —
+--         no camera jump, no fall, no snap-back. Needs sethiddenproperty.
+--   "tp"  — classic teleport-fire-return (fallback when "rep" unavailable).
+-- Either way the SERVER sees a position blink; movement anti-cheats may
+-- still flag it, and other players see you flicker at the prompt.
 --
 -- Re-executing tears down the previous instance first.
 
-local BYPASS = true       -- tp-fire-return on out-of-range triggers
+local BYPASS = true       -- act on out-of-range triggers at all
+local MODE = "rep"        -- "rep" | "tp" (auto-falls back to "tp" if rep fails)
 local REPL_WAIT = 0.08    -- seconds at the prompt before firing (replication)
-local RETURN_WAIT = 0.08  -- seconds after firing before returning
-local STAND_OFF = 2.5     -- studs to stand back from the prompt
+local RETURN_WAIT = 0.08  -- seconds after firing before restoring
+local STAND_OFF = 2.5     -- studs to stand back from the prompt (tp mode)
 
 local prev = getgenv()._WH_InfPPRange
 if prev and prev.unload then
@@ -73,6 +79,56 @@ local function promptPos(prompt)
     return nil
 end
 
+-- server-side BasePart to root our replication onto (rep mode)
+local function promptPart(prompt)
+    local p = prompt.Parent
+    if not p then return nil end
+    if p:IsA("BasePart") then return p end
+    if p:IsA("Attachment") then
+        local pp = p.Parent
+        return (pp and pp:IsA("BasePart")) and pp or nil
+    end
+    if p:IsA("Model") then
+        return p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return nil
+end
+
+-- knife-bot mechanism: replication rooted onto `part`, so the server (and
+-- everyone else) sees us there while the local character never moves
+local function repBypass(prompt, hrp)
+    if not sethiddenproperty then return false end
+    local part = promptPart(prompt)
+    if not part then return false end
+    pcall(function() hrp:SetNetworkOwner(lp) end)
+    if not pcall(sethiddenproperty, hrp, "PhysicsRepRootPart", part) then
+        return false
+    end
+    pcall(function()
+        task.wait(REPL_WAIT)
+        fireproximityprompt(prompt) -- re-fires Triggered; busy flag eats it
+        task.wait(RETURN_WAIT)
+    end)
+    pcall(sethiddenproperty, hrp, "PhysicsRepRootPart", hrp) -- detach: root back onto ourselves
+    return true
+end
+
+local function tpBypass(prompt, hrp, pos)
+    local savedCF = hrp.CFrame
+    pcall(function()
+        local back = (hrp.Position - pos).Unit
+        hrp.CFrame = CFrame.lookAt(pos + back * STAND_OFF, pos)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        task.wait(REPL_WAIT)
+        fireproximityprompt(prompt)
+        task.wait(RETURN_WAIT)
+    end)
+    pcall(function()
+        hrp.CFrame = savedCF
+        hrp.AssemblyLinearVelocity = Vector3.zero
+    end)
+end
+
 local function onTriggered(prompt, player)
     if not BYPASS or state.busy or player ~= lp then return end
     local char = lp.Character
@@ -86,23 +142,10 @@ local function onTriggered(prompt, player)
     if dist <= math.max(range - 1, 4) then return end
 
     state.busy = true
-    local savedCF = hrp.CFrame
-    local ok = pcall(function()
-        local back = (hrp.Position - pos).Unit
-        hrp.CFrame = CFrame.lookAt(pos + back * STAND_OFF, pos)
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        task.wait(REPL_WAIT)
-        fireproximityprompt(prompt) -- re-fires Triggered; busy flag eats it
-        task.wait(RETURN_WAIT)
-    end)
-    pcall(function()
-        hrp.CFrame = savedCF
-        hrp.AssemblyLinearVelocity = Vector3.zero
-    end)
-    state.busy = false
-    if not ok then
-        warn("[inf-prompt-range] bypass failed for", prompt:GetFullName())
+    if MODE ~= "rep" or not repBypass(prompt, hrp) then
+        tpBypass(prompt, hrp, pos)
     end
+    state.busy = false
 end
 
 for _, inst in ipairs(game:GetDescendants()) do
@@ -116,5 +159,11 @@ function state.unload()
         pcall(function() c:Disconnect() end)
     end
     state.conns = {}
+    -- if unloaded mid-bypass, make sure replication is rooted back on us
+    local char = lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp and sethiddenproperty then
+        pcall(sethiddenproperty, hrp, "PhysicsRepRootPart", hrp)
+    end
     getgenv()._WH_InfPPRange = nil
 end
