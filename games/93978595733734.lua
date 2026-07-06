@@ -118,6 +118,7 @@ local S = {
     missChance    = 5,       -- Legit: % of checks pressed JUST before the zone (fail)
     reactMs       = 150,     -- Legit: never press within this long of a check appearing
     chaseWarn     = false,
+    antiChase     = false,   -- while chased: keep resetting the killer's BloodLust
     repairAlert   = false,   -- killer side: notify when a gen starts being repaired
     fastVault     = false,   -- every vault counts as a running (fast) vault
 }
@@ -571,6 +572,21 @@ local function stepRepairAlert()
     end
 end
 
+-- anti-chase: BloodLust makes the killer faster the longer a chase lasts; the
+-- game ships a resetbloodlustremote -- keep firing it while WE are the chase
+-- target so the stacks never build
+local lastBlReset = 0
+local function stepAntiChase(kc)
+    if not S.antiChase then return end
+    if os.clock() - lastBlReset < 0.5 then return end
+    lastBlReset = os.clock()
+    if (kc:GetAttribute("BloodLust") or 0) > 0 then
+        pcall(function()
+            game:GetService("ReplicatedStorage").Remotes.Mechanics.resetbloodlustremote:FireServer()
+        end)
+    end
+end
+
 local intelLabels = {}   -- filled in the UI block below
 local wasChased = false
 local lastIntel = 0
@@ -591,6 +607,7 @@ track(RunService.Heartbeat:Connect(function()
     else
         warnGui.Enabled = false
     end
+    if chased and kc then stepAntiChase(kc) end
     wasChased = chased
 
     -- labels only need a few updates a second; SetText at 60 Hz is wasted work
@@ -701,6 +718,8 @@ do
     local KSec = Game:Section({ Name = "Killer intel", Side = 2 })
     KSec:Toggle({ Name = "Chase warning", Flag = "VD_ChaseWarn", Default = false,
         Callback = function(v) S.chaseWarn = v end })
+    KSec:Toggle({ Name = "Anti-chase (reset bloodlust)", Flag = "VD_AntiChase", Default = false,
+        Callback = function(v) S.antiChase = v end })
     intelLabels.killer = KSec:Label({ Name = "Killer: -" })
     intelLabels.dist   = KSec:Label({ Name = "Distance: -" })
     intelLabels.chase  = KSec:Label({ Name = "Chasing: -" })
@@ -716,7 +735,7 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 -- ============================================================
 local function cleanup()
     S.killerEsp, S.survEsp, S.genEsp, S.hookEsp, S.palletEsp, S.vaultEsp = false, false, false, false, false, false
-    S.autoSkill, S.chaseWarn, S.repairAlert, S.fastVault = false, false, false, false
+    S.autoSkill, S.chaseWarn, S.antiChase, S.repairAlert, S.fastVault = false, false, false, false, false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, e in pairs(pool) do
         if e.hl then pcall(function() e.hl:Destroy() end) end
