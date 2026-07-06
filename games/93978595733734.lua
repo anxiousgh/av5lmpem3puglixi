@@ -83,16 +83,35 @@ end
 -- ============================================================
 --  ESP POOLS  -- one Highlight + BillboardGui per tracked instance
 -- ============================================================
+-- ---------- GUI-matched theme ----------
+-- Colors + font come straight from the menu library so the ESP reads as part
+-- of the same UI: lavender accent, muted purple, "Risky" red, mono Code font.
+local T = (Library and Library.Theme) or {}
+local PAL = {
+    killer  = T["Risky"] or Color3.fromRGB(255, 70, 80),
+    accent  = T["Accent"] or Color3.fromRGB(200, 183, 247),
+    muted   = T["Inactive Text"] or Color3.fromRGB(131, 120, 162),
+    text    = T["Text"] or Color3.fromRGB(240, 240, 242),
+    bg      = T["Background"] or Color3.fromRGB(22, 22, 25),
+    outline = T["Outline"] or Color3.fromRGB(62, 57, 77),
+}
+local ESP_FONT = (Library and Library.Font) or Font.fromEnum(Enum.Font.Code)
+local function hex(c)
+    return string.format("#%02X%02X%02X",
+        math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+local HEX = { killer = hex(PAL.killer), accent = hex(PAL.accent), muted = hex(PAL.muted) }
+
 local S = {
-    killerEsp   = false,
-    survEsp     = false,
-    genEsp      = false,
-    genHideDone = true,
-    objEsp      = false,   -- hooks / pallets / vaults
-    autoSkill   = false,
-    skillLeadMs = 40,
-    skillOffset = 8,
-    chaseWarn   = false,
+    killerEsp     = false,
+    survEsp       = false,
+    genEsp        = false,
+    genHideDone   = true,
+    objEsp        = false,   -- hooks / pallets / vaults
+    autoSkill     = false,
+    skillMode     = "Legit", -- "Legit" rides the needle, "Instant" snaps it
+    skillHumanize = 25,      -- max extra reaction delay (ms) in Legit mode
+    chaseWarn     = false,
 }
 
 local pool = {}   -- [Instance] = { hl=?, bb=?, lbl=?, used=bool }
@@ -110,15 +129,32 @@ local function getEsp(key, adornee, withHl)
         end
         e.bb = Instance.new("BillboardGui")
         e.bb.Name = "\0"
-        e.bb.Size = UDim2.fromOffset(220, 28)
+        e.bb.Size = UDim2.fromOffset(240, 22)
         e.bb.AlwaysOnTop = true
         e.bb.StudsOffset = Vector3.new(0, 3.2, 0)
+        -- label styled like a menu element: snug dark box, thin purple outline,
+        -- mono font, white text with theme-colored tags via rich text
         e.lbl = Instance.new("TextLabel")
-        e.lbl.BackgroundTransparency = 1
-        e.lbl.Size = UDim2.fromScale(1, 1)
-        e.lbl.Font = Enum.Font.GothamBold
-        e.lbl.TextSize = 13
-        e.lbl.TextStrokeTransparency = 0.35
+        e.lbl.AnchorPoint = Vector2.new(0.5, 0.5)
+        e.lbl.Position = UDim2.fromScale(0.5, 0.5)
+        e.lbl.Size = UDim2.new()
+        e.lbl.AutomaticSize = Enum.AutomaticSize.XY
+        e.lbl.BackgroundColor3 = PAL.bg
+        e.lbl.BackgroundTransparency = 0.15
+        e.lbl.BorderSizePixel = 0
+        e.lbl.RichText = true
+        e.lbl.FontFace = ESP_FONT
+        e.lbl.TextSize = 12
+        e.lbl.TextColor3 = PAL.text
+        e.lbl.TextStrokeTransparency = 1
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 5), UDim.new(0, 5)
+        pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 2), UDim.new(0, 2)
+        pad.Parent = e.lbl
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = PAL.outline
+        stroke.Thickness = 1
+        stroke.Parent = e.lbl
         e.lbl.Parent = e.bb
         pcall(function() e.bb.Parent = espParent() end)
         pool[key] = e
@@ -146,15 +182,8 @@ local function sweepPool()
     end
 end
 
-local RED    = Color3.fromRGB(255, 60, 60)
-local GREEN  = Color3.fromRGB(90, 255, 120)
-local CYAN   = Color3.fromRGB(120, 200, 255)
-local ORANGE = Color3.fromRGB(255, 170, 60)
-local YELLOW = Color3.fromRGB(255, 230, 90)
-
 local function paint(e, col)
     if e.hl then e.hl.FillColor = col; e.hl.OutlineColor = col end
-    e.lbl.TextColor3 = col
 end
 
 -- ---------- players ----------
@@ -167,15 +196,18 @@ local function stepPlayerEsp()
             local root = c and c:FindFirstChild("HumanoidRootPart")
             if want and root then
                 local e = getEsp(p, c, true)
-                local col = isKiller(p) and RED or GREEN
-                paint(e, col)
+                paint(e, isKiller(p) and PAL.killer or PAL.accent)
                 local dist = hrp and math.floor((root.Position - hrp.Position).Magnitude + 0.5) or 0
-                local tag = isKiller(p)
-                    and ((p:GetAttribute("SelectedKiller") or "KILLER") .. "  " .. p.Name)
-                    or p.Name
-                local hum = c:FindFirstChildOfClass("Humanoid")
-                local hp = hum and (math.floor(hum.Health + 0.5) .. "hp  ") or ""
-                e.lbl.Text = tag .. "  |  " .. (isSurvivor(p) and hp or "") .. dist .. "m"
+                if isKiller(p) then
+                    local kname = tostring(p:GetAttribute("SelectedKiller") or "KILLER"):upper()
+                    e.lbl.Text = ('<font color="%s"><b>%s</b></font> %s <font color="%s">%dm</font>')
+                        :format(HEX.killer, kname, p.Name, HEX.muted, dist)
+                else
+                    local hum = c:FindFirstChildOfClass("Humanoid")
+                    local hp = hum and (math.floor(hum.Health + 0.5) .. "hp ") or ""
+                    e.lbl.Text = ('%s <font color="%s">%s%dm</font>')
+                        :format(p.Name, HEX.muted, hp, dist)
+                end
             end
         end
     end
@@ -193,19 +225,21 @@ local function stepGenEsp()
             local prog, done, regress = genProgress(gen)
             if not (done and S.genHideDone) then
                 local e = getEsp(gen, root, true)
-                local col = done and GREEN or (regress and ORANGE or CYAN)
-                paint(e, col)
+                paint(e, done and PAL.muted or (regress and PAL.killer or PAL.accent))
                 if e.hl then e.hl.FillTransparency = 0.85 end
-                local dist = hrp and ("  " .. math.floor((root.Position - hrp.Position).Magnitude + 0.5) .. "m") or ""
-                e.lbl.Text = done and ("GEN DONE" .. dist)
-                    or (string.format("GEN %d%%%s%s", math.floor(prog + 0.5), regress and " (REGRESSING)" or "", dist))
+                local dist = hrp and (('<font color="%s"> %dm</font>')
+                    :format(HEX.muted, math.floor((root.Position - hrp.Position).Magnitude + 0.5))) or ""
+                e.lbl.Text = done and (('<font color="%s">GEN DONE</font>'):format(HEX.muted) .. dist)
+                    or (('<font color="%s"><b>GEN %d%%</b></font>%s%s'):format(
+                        HEX.accent, math.floor(prog + 0.5),
+                        regress and ((' <font color="%s">REGRESSING</font>'):format(HEX.killer)) or "", dist))
             end
         end
     end
 end
 
 -- ---------- hooks / pallets / vaults ----------
-local OBJ_FOLDERS = { { "Hooks", "HOOK", RED }, { "Pallets", "PALLET", YELLOW }, { "Vaults", "VAULT", CYAN } }
+local OBJ_FOLDERS = { { "Hooks", "HOOK", "killer" }, { "Pallets", "PALLET", "accent" }, { "Vaults", "VAULT", "muted" } }
 local function stepObjEsp()
     if not S.objEsp then return end
     for _, spec in ipairs(OBJ_FOLDERS) do
@@ -217,8 +251,7 @@ local function stepObjEsp()
                     or obj:FindFirstChildWhichIsA("BasePart")
                 if root then
                     local e = getEsp(obj, root, false)
-                    e.lbl.TextColor3 = spec[3]
-                    e.lbl.Text = spec[2]
+                    e.lbl.Text = ('<font color="%s">%s</font>'):format(HEX[spec[3]], spec[2])
                     e.bb.StudsOffset = Vector3.new(0, 1.6, 0)
                 end
             end
@@ -269,19 +302,40 @@ local function findCheck()
 end
 
 do
+    -- deactivate any lingering standalone vd-autoskill.lua instance (it snaps
+    -- the needle and finishes every check instantly) -- this page owns it now
+    if getgenv then getgenv().__VD_AUTOSKILL = (getgenv().__VD_AUTOSKILL or 0) + 1 end
+
+    -- success zone (decoded from the game's Skillcheck script): a press lands
+    -- when (Line.Rotation - Goal.Rotation) % 360 is inside [102, 116]
+    local ZONE_LO, ZONE_HI = 102, 116
+
     local lastRot, lastT, vel = nil, nil, 0
-    local armed, armedGoal = true, nil
+    local armed, armedGoal, targetRel = true, nil, nil
+    local lastInstant = 0
+
     track(RunService.RenderStepped:Connect(function()
         if not S.autoSkill then return end
         local check, line, goal = findCheck()
         if not check then
-            lastRot, lastT, vel, armed, armedGoal = nil, nil, 0, true, nil
+            lastRot, lastT, vel, armed, armedGoal, targetRel = nil, nil, 0, true, nil, nil
             return
         end
         -- goal jumped -> a fresh check inside the same visible session
-        if armedGoal ~= nil and math.abs(goal.Rotation - armedGoal) > 5 then armed = true end
+        if armedGoal ~= nil and math.abs(goal.Rotation - armedGoal) > 5 then
+            armed, targetRel = true, nil
+        end
         armedGoal = goal.Rotation
 
+        if S.skillMode == "Instant" then
+            if os.clock() - lastInstant < 0.1 then return end
+            lastInstant = os.clock()
+            pcall(function() line.Rotation = goal.Rotation + 109 end)   -- mid-zone
+            pressSpace()
+            return
+        end
+
+        -- ---- Legit: ride the game's own needle, press inside the zone ----
         local now = os.clock()
         if lastRot ~= nil and lastT ~= nil and now > lastT then
             local d = (line.Rotation - lastRot + 540) % 360 - 180   -- signed shortest delta
@@ -292,11 +346,30 @@ do
 
         if not armed or math.abs(vel) < 20 then return end
         local dir = vel >= 0 and 1 or -1
-        -- degrees Line still has to travel to reach Goal (+offset into the zone)
-        local ahead = ((goal.Rotation - line.Rotation) * dir) % 360 + S.skillOffset
-        local timeTo = ahead / math.abs(vel)
-        if timeTo <= (S.skillLeadMs / 1000) then
-            armed = false
+
+        -- press spot: random angle in the early half of the zone (relative to
+        -- travel direction), re-rolled per check so timing never looks scripted
+        if not targetRel then
+            targetRel = dir == 1 and math.random(ZONE_LO + 2, ZONE_LO + 8)
+                or math.random(ZONE_HI - 8, ZONE_HI - 2)
+        end
+
+        local rel = (line.Rotation - goal.Rotation) % 360
+        if rel < ZONE_LO or rel > ZONE_HI then return end             -- not in zone yet
+        local passed = (dir == 1 and rel >= targetRel) or (dir == -1 and rel <= targetRel)
+        if not passed then return end
+        armed = false
+
+        -- humanized reaction: small random delay, capped so the needle can't
+        -- leave the zone before the press lands
+        local remain = (dir == 1 and (ZONE_HI - rel) or (rel - ZONE_LO)) / math.abs(vel)
+        local delay = math.min(math.random(0, math.max(S.skillHumanize, 0)) / 1000,
+            math.max(remain - 0.03, 0))
+        if delay > 0.001 then
+            task.delay(delay, function()
+                if S.autoSkill then pressSpace() end
+            end)
+        else
             pressSpace()
         end
     end))
@@ -315,9 +388,9 @@ do
     warnLbl.BackgroundTransparency = 1
     warnLbl.Size = UDim2.new(1, 0, 0, 34)
     warnLbl.Position = UDim2.new(0, 0, 0, 90)
-    warnLbl.Font = Enum.Font.GothamBlack
+    warnLbl.FontFace = ESP_FONT
     warnLbl.TextSize = 26
-    warnLbl.TextColor3 = RED
+    warnLbl.TextColor3 = PAL.killer
     warnLbl.TextStrokeTransparency = 0.2
     warnLbl.Text = "!!  YOU ARE BEING CHASED  !!"
     warnLbl.Parent = warnGui
@@ -364,7 +437,7 @@ track(RunService.Heartbeat:Connect(function()
         warnGui.Enabled = true
         warnLbl.TextTransparency = 0.15 + 0.35 * (0.5 + 0.5 * math.sin(os.clock() * 7))
         if not wasChased then
-            pcall(function() Library:Notification("The killer is chasing YOU", 3, RED) end)
+            pcall(function() Library:Notification("The killer is chasing YOU", 3, PAL.killer) end)
         end
     else
         warnGui.Enabled = false
@@ -434,12 +507,13 @@ do
     local SSec = Game:Section({ Name = "Skill checks", Side = 1 })
     SSec:Toggle({ Name = "Auto skill check", Flag = "VD_AutoSkill", Default = false,
         Callback = function(v) S.autoSkill = v end })
-    SSec:Slider({ Name = "Lead time", Flag = "VD_SkillLead", Min = 0, Max = 150, Default = 40,
-        Decimals = 0, Suffix = " ms", Callback = function(v) S.skillLeadMs = v end })
-    SSec:Slider({ Name = "Zone offset", Flag = "VD_SkillOffset", Min = 0, Max = 30, Default = 8,
-        Decimals = 0, Suffix = " deg", Callback = function(v) S.skillOffset = v end })
-    SSec:Label({ Name = "auto-presses Space when the needle hits the zone" })
-    SSec:Label({ Name = "outcome is client-decided -- no remote spoofing" })
+    SSec:Dropdown({ Name = "Mode", Flag = "VD_SkillMode", Default = "Legit", Multi = false,
+        Items = { "Legit", "Instant" },
+        Callback = function(v) S.skillMode = (type(v) == "table" and v[1]) or v or "Legit" end })
+    SSec:Slider({ Name = "Humanize", Flag = "VD_SkillHumanize", Min = 0, Max = 80, Default = 25,
+        Decimals = 0, Suffix = " ms", Callback = function(v) S.skillHumanize = v end })
+    SSec:Label({ Name = "legit: waits for the needle, random press spot" })
+    SSec:Label({ Name = "instant: snaps the needle, finishes immediately" })
 
     local KSec = Game:Section({ Name = "Killer intel", Side = 2 })
     KSec:Toggle({ Name = "Chase warning", Flag = "VD_ChaseWarn", Default = false,
