@@ -37,7 +37,10 @@ local AH = {
     esp = false,
     showSafe = true,
     alert = true,
+    cureMonitor = true,
+    cureNotify = true,
 }
+local knownCures = {}   -- [patientName] = "Herbs" / "Bandages (SURGERY)" (filled by the cure helper below)
 
 local RED   = Color3.fromRGB(255, 60, 60)
 local GREEN = Color3.fromRGB(90, 220, 120)
@@ -164,11 +167,114 @@ track(RunService.Heartbeat:Connect(function()
                         .. (extra and ("\n" .. extra) or "")
                     e.bb.Size = UDim2.fromOffset(220, extra and 44 or 34)
                 else
+                    local cure = knownCures[npc.Name]
                     e.label.Text = npc.Name .. "  (safe)"
+                        .. (cure and ("\n-> " .. cure) or "")
+                    e.bb.Size = UDim2.fromOffset(220, cure and 44 or 34)
                 end
             end
         end
     end
+end))
+
+-- ============================================================
+--  CURE HELPER -- decoded live 2026-07-07: when the analyzer minigame
+--  finishes, the SERVER writes the DNA report straight onto the room
+--  monitor (Rooms.*.RoomN.Minigame.Monitor.Screen.UI.Report: `race` =
+--  patient name, `illnesses` = "- Stomach Ache\n- ..."). No client script
+--  touches those labels (pure property replication), so the illness is
+--  client-knowable the moment the report lands -- and the full
+--  illness -> cure map ships in ReplicatedStorage.Data.IllnessesAndCures
+--  (11 illnesses, HealedWith + Surgery flag). We parse the report, append
+--  " -> cure" onto its lines, notify, and tag the patient's ESP label.
+--  Idle monitors hold placeholder text with no live patient name in
+--  `race`, so reports are gated on the name matching a tagged NPC.
+-- ============================================================
+local notifiedCure = {} -- [patientName .. "|" .. cures] = true
+
+local IC
+pcall(function()
+    IC = require(game.ReplicatedStorage:WaitForChild("Data"):WaitForChild("IllnessesAndCures"))
+end)
+
+local function cureFor(illnessName)
+    if not IC then return nil end
+    local okI, ill = pcall(IC.GetIllnessByName, illnessName)
+    if not okI or not ill then return nil end
+    local cureName = ill.HealedWith
+    local surgery = false
+    pcall(function()
+        local cure = IC.GetCureForIllness(ill)
+        surgery = (cure and cure.Surgery) == true
+    end)
+    if not cureName or cureName == "Nothing" then return nil end
+    return tostring(cureName), surgery
+end
+
+local function processReport(illLabel)
+    if not (AH.cureMonitor or AH.cureNotify) then return end
+    local report = illLabel.Parent
+    local raceL = report and report:FindFirstChild("race")
+    local patient = (raceL and raceL:IsA("TextLabel")) and raceL.Text or ""
+    if patient == "" then return end
+    local live = false
+    for _, npc in ipairs(CollectionService:GetTagged("NPC")) do
+        if npc.Name == patient then live = true break end
+    end
+    if not live then return end
+    if illLabel.Text:find("->", 1, true) then return end -- already annotated (our write)
+
+    local lines, cures = {}, {}
+    for line in illLabel.Text:gmatch("[^\n]+") do
+        local name = line:gsub("^%s*%-%s*", ""):gsub("%s+$", "")
+        local cure, surgery = cureFor(name)
+        if cure then
+            local tag = cure .. (surgery and " (SURGERY)" or "")
+            cures[#cures + 1] = tag
+            lines[#lines + 1] = line .. "  -> " .. tag
+        else
+            lines[#lines + 1] = line
+        end
+    end
+    if #cures == 0 then return end
+
+    knownCures[patient] = table.concat(cures, ", ")
+    if AH.cureMonitor then
+        pcall(function() illLabel.Text = table.concat(lines, "\n") end)
+    end
+    local key = patient .. "|" .. knownCures[patient]
+    if AH.cureNotify and not notifiedCure[key] then
+        notifiedCure[key] = true
+        pcall(function()
+            Library:Notification(patient .. ": " .. knownCures[patient], 6, Library.Theme["Accent"])
+        end)
+    end
+end
+
+local function hookReport(illLabel)
+    track(illLabel:GetPropertyChangedSignal("Text"):Connect(function()
+        processReport(illLabel)
+    end))
+    -- the patient name can land after the illness list -> watch it too
+    local raceL = illLabel.Parent and illLabel.Parent:FindFirstChild("race")
+    if raceL and raceL:IsA("TextLabel") then
+        track(raceL:GetPropertyChangedSignal("Text"):Connect(function()
+            processReport(illLabel)
+        end))
+    end
+    processReport(illLabel)
+end
+
+for _, d in ipairs(workspace:GetDescendants()) do
+    if d:IsA("TextLabel") and d.Name == "illnesses" then hookReport(d) end
+end
+track(workspace.DescendantAdded:Connect(function(d)
+    if d:IsA("TextLabel") and d.Name == "illnesses" then task.defer(hookReport, d) end
+end))
+
+-- patient left -> forget their cure (names recycle across visitors)
+track(CollectionService:GetInstanceRemovedSignal("NPC"):Connect(function(npc)
+    knownCures[npc.Name] = nil
 end))
 
 -- ============================================================
@@ -189,6 +295,13 @@ do
     local Sec2 = Main:Section({ Name = "Alerts", Side = 2 })
     Sec2:Toggle({ Name = "Notify when an anomaly spawns", Flag = "AH_Alert", Default = true,
         Callback = function(v) AH.alert = v end })
+
+    local Sec3 = Main:Section({ Name = "Cure Helper", Side = 2 })
+    Sec3:Toggle({ Name = "Cure on DNA report", Flag = "AH_CureMonitor", Default = true,
+        Callback = function(v) AH.cureMonitor = v end })
+    Sec3:Toggle({ Name = "Notify illness -> cure", Flag = "AH_CureNotify", Default = true,
+        Callback = function(v) AH.cureNotify = v end })
+    Sec3:Label({ Name = "reads the server-written DNA report; cure also on ESP" })
 end
 
 -- universal shell after our page (movement + generic ESP). Horror game,
