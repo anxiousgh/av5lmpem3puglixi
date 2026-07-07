@@ -377,6 +377,23 @@ local REBUILD = 3.0
 local TICK = 0.15   -- ~6.7 Hz engine tick (was every frame -> the lag)
 local lastTick = 0
 
+-- the game's real cure names (from IllnessesAndCures) -- cure pickups are
+-- scattered across MANY tiny "Items" folders each under a generic "Model"
+-- (workspace has 258 Models named "Model"), so path-guessing failed. Instead
+-- we recognise a cure prompt by its ActionText matching this set.
+local CURE_SET = {}
+do
+    local ok = pcall(function()
+        local reg = debug.getupvalues(IC.GetCureForIllness)[1]
+        for name in pairs(reg) do CURE_SET[name] = true end
+    end)
+    if not ok or not next(CURE_SET) then
+        for _, n in ipairs({ "Antibiotics","Bandages","Coffee","Cough Syrup","Eye Drops",
+            "Herbs","IV Drops","Maple Syrup","Medicine","Medkit","Ointment","Organ",
+            "RunCola","Scalpel","Scissors","Thermo","Transplant" }) do CURE_SET[n] = true end
+    end
+end
+
 local function rebuildIndex()
     idx.rooms, idx.cures = {}, {}
     for _, folder in ipairs(workspace.Rooms:GetChildren()) do
@@ -395,27 +412,15 @@ local function rebuildIndex()
                     end
                 end
                 idx.rooms[#idx.rooms + 1] = rec
-                -- Emergency room medicine cabinet = its own cure shelf
-                local cab = mg:FindFirstChild("Medicine")
-                if cab then
-                    for _, d in ipairs(cab:GetDescendants()) do
-                        if d:IsA("ProximityPrompt") then
-                            idx.cures[#idx.cures + 1] = { pp = d, name = d.ActionText, wp = ppWorldPos(d) }
-                        end
-                    end
-                end
             end
         end
     end
-    -- central supply shelves (Medical cures live here, far from the beds)
-    local supply = workspace:FindFirstChild("Model")
-    local items = supply and supply:FindFirstChild("Items")
-    if items then
-        for _, it in ipairs(items:GetChildren()) do
-            local pp = it:FindFirstChild("PP")
-            if pp and pp:IsA("ProximityPrompt") then
-                idx.cures[#idx.cures + 1] = { pp = pp, name = it.Name, wp = ppWorldPos(pp) }
-            end
+    -- ALL cure pickups in one pass, matched by ActionText (robust to the
+    -- scattered "Items"/"Medicine" containers). Covers central shelves AND
+    -- the Emergency room cabinets alike.
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and CURE_SET[d.ActionText] then
+            idx.cures[#idx.cures + 1] = { pp = d, name = d.ActionText, wp = ppWorldPos(d) }
         end
     end
     idx.built = os.clock()
