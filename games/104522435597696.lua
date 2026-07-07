@@ -351,6 +351,27 @@ local function heldCureNames()
     return held
 end
 
+-- locate a cure Tool by name; returns (tool, isEquipped)
+local function findCureTool(name)
+    local ch = LocalPlayer.Character
+    if ch then
+        for _, c in ipairs(ch:GetChildren()) do
+            if c:IsA("Tool") and c.Name == name then return c, true end
+        end
+    end
+    for _, c in ipairs(LocalPlayer.Backpack:GetChildren()) do
+        if c:IsA("Tool") and c.Name == name then return c, false end
+    end
+    return nil
+end
+
+-- Apply Treatment needs the cure HELD in hand, not just in the backpack
+local function equipCure(tool)
+    local ch = LocalPlayer.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if hum and tool.Parent ~= ch then pcall(function() hum:EquipTool(tool) end) end
+end
+
 -- cure display-names a room's current report calls for (via the illness->cure map)
 local function neededCuresFrom(illL)
     if not (illL and illL.Parent) then return {} end
@@ -476,12 +497,25 @@ track(RunService.Heartbeat:Connect(function()
             end
         end
         for _, s in ipairs(r.steps) do
-            if s.action == "Apply Treatment" and s.pp.Parent and s.pp.Enabled then
+            if s.action == "Apply Treatment" and s.pp.Parent and s.pp.Enabled
+                and s.wp and (s.wp - pos).Magnitude <= range then
                 local cures = neededCuresFrom(r.illL)
-                local held = heldCureNames()
-                local haveOne = (#cures == 0)
-                for _, c in ipairs(cures) do if held[c] then haveOne = true break end end
-                if haveOne and tryFire(s.pp, s.wp, pos, range) then return end
+                if #cures == 0 then
+                    if tryFire(s.pp, s.wp, pos, range) then return end
+                else
+                    -- for each cure this patient still needs and we're carrying:
+                    -- equip it (Apply needs it in hand), then apply once held.
+                    for _, cure in ipairs(cures) do
+                        local tool, equipped = findCureTool(cure)
+                        if tool then
+                            if not equipped then
+                                equipCure(tool)   -- equip this tick; apply on the next
+                                return
+                            end
+                            if tryFire(s.pp, s.wp, pos, range) then return end
+                        end
+                    end
+                end
             end
         end
     end
