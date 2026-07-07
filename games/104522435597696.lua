@@ -426,7 +426,8 @@ local function rebuildIndex()
                 local ui = screen and screen:FindFirstChild("UI")
                 local report = ui and ui:FindFirstChild("Report")
                 local illL = report and report:FindFirstChild("illnesses")
-                local rec = { mg = mg, illL = illL, steps = {} }
+                local raceL = report and report:FindFirstChild("race")
+                local rec = { mg = mg, illL = illL, raceL = raceL, steps = {} }
                 for _, d in ipairs(mg:GetDescendants()) do
                     if d:IsA("ProximityPrompt") and STEP_WANT[d.ActionText] then
                         rec.steps[#rec.steps + 1] = { pp = d, action = d.ActionText, wp = ppWorldPos(d) }
@@ -445,6 +446,27 @@ local function rebuildIndex()
         end
     end
     idx.built = os.clock()
+end
+
+local function isLivePatient(name)
+    if not name or name == "" then return false end
+    for _, npc in ipairs(CollectionService:GetTagged("NPC")) do
+        if npc.Name == name and npc:GetAttribute("IsPatient") then return true end
+    end
+    return false
+end
+
+-- results are "in" once the server has written the real patient name onto the
+-- monitor's race label (before processing it shows a placeholder / old name)
+local function resultsReady(r)
+    return r.raceL ~= nil and isLivePatient(r.raceL.Text)
+end
+
+local function roomActionEnabled(r, name)
+    for _, s in ipairs(r.steps) do
+        if s.action == name and s.pp.Parent and s.pp.Enabled then return true end
+    end
+    return false
 end
 
 -- union of cures every ready-to-treat patient needs (report shown + Apply
@@ -489,10 +511,17 @@ track(RunService.Heartbeat:Connect(function()
     -- 2) per-room ordered steps, then Apply once you hold a needed cure.
     for _, r in ipairs(idx.rooms) do
         for _, want in ipairs(STEP_ORDER) do
-            for _, s in ipairs(r.steps) do
-                if s.action == want and tryFire(s.pp, s.wp, pos, range) then
-                    if want == "Analyze Sample" or want == "Inspect" then closeMinigameSoon() end
-                    return
+            -- Inspect only matters to REVEAL results: skip it once the results
+            -- are in, or once "Process Results" is already the pending step.
+            -- (Without this it re-fires forever -- Inspect stays enabled.)
+            local skip = (want == "Inspect")
+                and (resultsReady(r) or roomActionEnabled(r, "Process Results"))
+            if not skip then
+                for _, s in ipairs(r.steps) do
+                    if s.action == want and tryFire(s.pp, s.wp, pos, range) then
+                        if want == "Analyze Sample" or want == "Inspect" then closeMinigameSoon() end
+                        return
+                    end
                 end
             end
         end
