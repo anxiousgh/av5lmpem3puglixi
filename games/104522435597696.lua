@@ -42,6 +42,7 @@ local AH = {
     autoTreat = false,   -- assist mode: fire in-range treatment prompts in order
     treatRange = 16,     -- studs from your real position a prompt must be to fire
     autoHeartbeat = false, -- auto-pass the heartbeat scan minigame
+    thirdPerson = false,   -- unlock the forced first-person camera
 }
 local knownCures = {}   -- [patientName] = "Herbs" / "Bandages (SURGERY)" (filled by the cure helper below)
 
@@ -580,6 +581,33 @@ do
 end
 
 -- ============================================================
+--  Third person  (game sets CameraMode = LockFirstPerson; max zoom is
+--  already 20, so unlocking the mode is enough -- we raise it anyway)
+-- ============================================================
+local _camOrig
+local function camWatch(prop, want)
+    track(LocalPlayer:GetPropertyChangedSignal(prop):Connect(function()
+        if AH.thirdPerson then LocalPlayer[prop] = want end
+    end))
+end
+camWatch("CameraMode", Enum.CameraMode.Classic)        -- game re-locks on respawn
+camWatch("CameraMaxZoomDistance", 128)
+local function setThirdPerson(on)
+    AH.thirdPerson = on
+    if on then
+        _camOrig = _camOrig or {
+            mode = LocalPlayer.CameraMode,
+            max  = LocalPlayer.CameraMaxZoomDistance,
+        }
+        LocalPlayer.CameraMode = Enum.CameraMode.Classic
+        LocalPlayer.CameraMaxZoomDistance = 128
+    elseif _camOrig then
+        LocalPlayer.CameraMode = _camOrig.mode
+        LocalPlayer.CameraMaxZoomDistance = _camOrig.max
+    end
+end
+
+-- ============================================================
 --  UI  (Animal Hospital page first -> first tab; universal loads after)
 -- ============================================================
 do
@@ -593,6 +621,10 @@ do
         Callback = function(v) AH.showSafe = v end })
     Sec:Label({ Name = "red = skinwalker / fake (server tells the client)" })
     Sec:Label({ Name = "read-only: no remotes fired, nothing replicates" })
+
+    local CamSec = Main:Section({ Name = "Camera", Side = 1 })
+    CamSec:Toggle({ Name = "Third person", Flag = "AH_ThirdPerson", Default = false,
+        Callback = setThirdPerson })
 
     local Sec2 = Main:Section({ Name = "Alerts", Side = 2 })
     Sec2:Toggle({ Name = "Notify when an anomaly spawns", Flag = "AH_Alert", Default = true,
@@ -646,6 +678,7 @@ local function cleanup()
     AH.esp = false
     AH.autoTreat = false
     AH.autoHeartbeat = false
+    pcall(function() setThirdPerson(false) end)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for npc in pairs(esp) do dropEsp(npc) end
     pcall(function() if espGui then espGui:Destroy() end end)
