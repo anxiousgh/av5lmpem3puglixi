@@ -41,6 +41,7 @@ local AH = {
     cureNotify = true,
     autoTreat = false,   -- assist mode: fire in-range treatment prompts in order
     treatRange = 16,     -- studs from your real position a prompt must be to fire
+    autoHeartbeat = false, -- auto-pass the heartbeat scan minigame
 }
 local knownCures = {}   -- [patientName] = "Herbs" / "Bandages (SURGERY)" (filled by the cure helper below)
 
@@ -478,7 +479,9 @@ local function globalNeeded()
         for _, s in ipairs(r.steps) do
             if s.action == "Apply Treatment" and s.pp.Parent and s.pp.Enabled then hasApply = true break end
         end
-        if hasApply then
+        -- resultsReady: only trust a report the server has stamped with THIS
+        -- patient's name, so we never grab/apply off a stale previous report
+        if hasApply and resultsReady(r) then
             for _, c in ipairs(neededCuresFrom(r.illL)) do need[c] = true end
         end
     end
@@ -527,6 +530,7 @@ track(RunService.Heartbeat:Connect(function()
         end
         for _, s in ipairs(r.steps) do
             if s.action == "Apply Treatment" and s.pp.Parent and s.pp.Enabled
+                and resultsReady(r)
                 and s.wp and (s.wp - pos).Magnitude <= range then
                 local cures = neededCuresFrom(r.illL)
                 if #cures == 0 then
@@ -549,6 +553,31 @@ track(RunService.Heartbeat:Connect(function()
         end
     end
 end))
+
+-- ============================================================
+--  AUTO HEARTBEAT SCAN -- the heartbeat minigame (server fires
+--  StartHeartbeatMinigame -> PlayerGui.HeartbeatMinigameUI.Frame shows). Its
+--  completion is client-authoritative: Lib.HeartMinigameComplete(true) fires
+--  the finish remote with the minigame's own captured id + does cleanup. So we
+--  just watch the UI and auto-pass, with a small human-ish delay.
+-- ============================================================
+do
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local hbui = pg and pg:FindFirstChild("HeartbeatMinigameUI")
+    local frame = hbui and hbui:FindFirstChild("Frame")
+    local function solve()
+        if not (AH.autoHeartbeat and frame and frame.Visible and gameLib) then return end
+        task.delay(0.5 + math.random() * 0.5, function()
+            if AH.autoHeartbeat and frame.Visible then
+                pcall(function() gameLib.HeartMinigameComplete(true) end)
+            end
+        end)
+    end
+    if frame then
+        track(frame:GetPropertyChangedSignal("Visible"):Connect(solve))
+        solve()  -- in case it's already open when you toggle it on
+    end
+end
 
 -- ============================================================
 --  UI  (Animal Hospital page first -> first tab; universal loads after)
@@ -585,6 +614,25 @@ do
     ASec:Label({ Name = "walk a patient's room; it runs analyze -> process ->" })
     ASec:Label({ Name = "right cure -> apply on nearby stations. no clicking." })
     ASec:Label({ Name = "server checks real pos, so you must be near the station" })
+
+    local HSec = AutoPage:Section({ Name = "Heartbeat Scan", Side = 2 })
+    HSec:Toggle({ Name = "Auto heartbeat scan", Flag = "AH_AutoHeartbeat", Default = false,
+        Callback = function(v)
+            AH.autoHeartbeat = v
+            if v then
+                local pg = LocalPlayer:FindFirstChild("PlayerGui")
+                local hbui = pg and pg:FindFirstChild("HeartbeatMinigameUI")
+                local frame = hbui and hbui:FindFirstChild("Frame")
+                if frame and frame.Visible and gameLib then
+                    task.delay(0.4, function()
+                        if AH.autoHeartbeat and frame.Visible then
+                            pcall(function() gameLib.HeartMinigameComplete(true) end)
+                        end
+                    end)
+                end
+            end
+        end })
+    HSec:Label({ Name = "instantly passes the heart scan minigame when it opens" })
 end
 
 -- universal shell after our page (movement + generic ESP). Horror game,
@@ -597,6 +645,7 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 local function cleanup()
     AH.esp = false
     AH.autoTreat = false
+    AH.autoHeartbeat = false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for npc in pairs(esp) do dropEsp(npc) end
     pcall(function() if espGui then espGui:Destroy() end end)
