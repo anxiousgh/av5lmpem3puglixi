@@ -1,6 +1,7 @@
 -- ============================================================
 --  games/7871169780.lua  --  bLockerman's Minesweeper
---  Mine ESP + solver, auto-flag (Legit / Blatant) and a flag triggerbot.
+--  Mine ESP + solver, auto-flag (Legit / Blatant), a flag triggerbot and a
+--  third-person camera unlock.
 --
 --  Solver: reads each revealed tile's NumberGui, runs basic rules + subset
 --  reduction + brute-force "tank" on the exact 5-stud grid, paints covered
@@ -30,6 +31,8 @@ local MS = {
     flagOn = false, flagMode = "Legit", flagRange = 0,
     flagDelayMin = 0.4, flagDelayMax = 0.9, flagTrigger = false,
     trigDelayMin = 0.2, trigDelayMax = 0.5,
+    -- camera
+    thirdPerson = false,
 }
 
 -- generation guard so old instances stop when the hub reloads
@@ -412,6 +415,43 @@ getgenv()._BMS_TRIGCONN = RunService.RenderStepped:Connect(function()
     end
 end)
 
+-- ---------- third person (game locks CameraMode to first person) ----------
+local _camOrig, _camConns
+local function camWatch(prop, want)
+    return LocalPlayer:GetPropertyChangedSignal(prop):Connect(function()
+        if MS.thirdPerson and active() then LocalPlayer[prop] = want end
+    end)
+end
+local function setThirdPerson(on)
+    MS.thirdPerson = on
+    if on then
+        _camOrig = _camOrig or {
+            mode = LocalPlayer.CameraMode,
+            min  = LocalPlayer.CameraMinZoomDistance,
+            max  = LocalPlayer.CameraMaxZoomDistance,
+        }
+        LocalPlayer.CameraMode = Enum.CameraMode.Classic
+        LocalPlayer.CameraMinZoomDistance = 0.5
+        LocalPlayer.CameraMaxZoomDistance = 128
+        -- the game re-locks these (respawn / round start); snap them back
+        _camConns = _camConns or {
+            camWatch("CameraMode", Enum.CameraMode.Classic),
+            camWatch("CameraMinZoomDistance", 0.5),
+            camWatch("CameraMaxZoomDistance", 128),
+        }
+    else
+        if _camConns then
+            for _, c in ipairs(_camConns) do pcall(function() c:Disconnect() end) end
+            _camConns = nil
+        end
+        if _camOrig then
+            LocalPlayer.CameraMode = _camOrig.mode
+            LocalPlayer.CameraMinZoomDistance = _camOrig.min
+            LocalPlayer.CameraMaxZoomDistance = _camOrig.max
+        end
+    end
+end
+
 -- ---------- UI ----------
 local MainPage = Window:Page({ Name = "Minesweeper" })
 local Sub = MainPage:SubPage({ Name = "Solver" })
@@ -436,6 +476,10 @@ do
 
     local Sec3 = Sub:Section({ Name = "Stats", Side = 2 })
     _statLbl = Sec3:Label({ Name = "Mines: 0  |  Safe: 0" })
+
+    local Sec4 = Sub:Section({ Name = "Camera", Side = 2 })
+    Sec4:Toggle({ Name = "Third person", Flag = "MS_ThirdPerson", Default = false,
+        Callback = setThirdPerson })
 end
 
 local FlagSub = MainPage:SubPage({ Name = "Auto Flag" })
