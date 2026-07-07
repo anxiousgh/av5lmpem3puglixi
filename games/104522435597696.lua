@@ -299,8 +299,6 @@ pcall(function() gameLib = require(game.ReplicatedStorage:WaitForChild("Lib")) e
 
 -- ordered non-cure steps; whichever is enabled + in range fires next
 local STEP_ORDER = { "Sleep Patient", "Analyze Sample", "Inspect", "Process Results" }
-local STEP_SET = {}
-for _, s in ipairs(STEP_ORDER) do STEP_SET[s] = true end
 
 local fireCd = {}       -- [pp] = os.clock() of last fire (0.6s debounce)
 local PROMPT_CD = 0.6
@@ -321,9 +319,9 @@ local function myPos()
     return hrp and hrp.Position
 end
 
-local function tryFire(pp, pos, range)
-    if not pp or not pp.Enabled then return false end
-    local wp = ppWorldPos(pp)
+-- fire a cached prompt: cheap live checks + cached world pos (prompts don't move)
+local function tryFire(pp, wp, pos, range)
+    if not pp or not pp.Parent or not pp.Enabled then return false end
     if not (wp and pos) or (wp - pos).Magnitude > range then return false end
     local last = fireCd[pp]
     if last and os.clock() - last < PROMPT_CD then return false end
@@ -343,34 +341,6 @@ local function closeMinigameSoon()
     end)
 end
 
--- needed cure display-names for the room's current report (via the map)
-local function neededCures(mg)
-    local mon = mg:FindFirstChild("Monitor")
-    local rep = mon and mon:FindFirstChild("Screen")
-    rep = rep and rep:FindFirstChild("UI")
-    rep = rep and rep:FindFirstChild("Report")
-    local illL = rep and rep:FindFirstChild("illnesses")
-    if not (illL and illL:IsA("TextLabel")) then return {} end
-    local list = {}
-    for line in illL.Text:gmatch("[^\n]+") do
-        local name = line:gsub("%s*%->.*$", ""):gsub("^%s*%-%s*", ""):gsub("^%s+", ""):gsub("%s+$", "")
-        local cure = cureFor(name)
-        if cure then list[#list + 1] = cure end
-    end
-    return list
-end
-
--- find an enabled prompt anywhere in `room` whose ActionText == want, in range
-local function findPromptInRoom(room, want, pos, range)
-    for _, d in ipairs(room:GetDescendants()) do
-        if d:IsA("ProximityPrompt") and d.Enabled and d.ActionText == want then
-            local wp = ppWorldPos(d)
-            if wp and pos and (wp - pos).Magnitude <= range then return d end
-        end
-    end
-    return nil
-end
-
 local function heldCureNames()
     local held = {}
     local ch = LocalPlayer.Character
@@ -381,97 +351,132 @@ local function heldCureNames()
     return held
 end
 
-local function roomHasApply(room)
-    for _, d in ipairs(room:GetDescendants()) do
-        if d:IsA("ProximityPrompt") and d.Enabled and d.ActionText == "Apply Treatment" then return true end
+-- cure display-names a room's current report calls for (via the illness->cure map)
+local function neededCuresFrom(illL)
+    if not (illL and illL.Parent) then return {} end
+    local list = {}
+    for line in illL.Text:gmatch("[^\n]+") do
+        local name = line:gsub("%s*%->.*$", ""):gsub("^%s*%-%s*", ""):gsub("^%s+", ""):gsub("%s+$", "")
+        local cure = cureFor(name)
+        if cure then list[#list + 1] = cure end
     end
-    return false
+    return list
 end
 
--- union of cures every ready-to-treat patient needs right now (report shown +
--- Apply enabled). Used to grab cures from central supply, which is nowhere near
--- the beds -- so cure-grabbing must be DECOUPLED from being near the Apply prompt.
-local function globalNeededCures()
-    local need = {}
+-- ---- CACHED PROMPT INDEX ----------------------------------------------------
+-- The per-frame GetDescendants() sweeps were the FPS killer. Prompts and their
+-- positions are structurally static (rooms don't move), so we snapshot them into
+-- an index and only rebuild it every REBUILD seconds. The hot loop then does
+-- cheap property reads (.Enabled/.Text) + distance math over a small list.
+local STEP_WANT = {}
+for _, s in ipairs(STEP_ORDER) do STEP_WANT[s] = true end
+STEP_WANT["Apply Treatment"] = true
+
+local idx = { rooms = {}, cures = {}, built = -1 }
+local REBUILD = 3.0
+local TICK = 0.15   -- ~6.7 Hz engine tick (was every frame -> the lag)
+local lastTick = 0
+
+local function rebuildIndex()
+    idx.rooms, idx.cures = {}, {}
     for _, folder in ipairs(workspace.Rooms:GetChildren()) do
         for _, room in ipairs(folder:GetChildren()) do
             local mg = room:FindFirstChild("Minigame")
-            if mg and roomHasApply(room) then
-                for _, c in ipairs(neededCures(mg)) do need[c] = true end
+            if mg then
+                local mon = mg:FindFirstChild("Monitor")
+                local screen = mon and mon:FindFirstChild("Screen")
+                local ui = screen and screen:FindFirstChild("UI")
+                local report = ui and ui:FindFirstChild("Report")
+                local illL = report and report:FindFirstChild("illnesses")
+                local rec = { mg = mg, illL = illL, steps = {} }
+                for _, d in ipairs(mg:GetDescendants()) do
+                    if d:IsA("ProximityPrompt") and STEP_WANT[d.ActionText] then
+                        rec.steps[#rec.steps + 1] = { pp = d, action = d.ActionText, wp = ppWorldPos(d) }
+                    end
+                end
+                idx.rooms[#idx.rooms + 1] = rec
+                -- Emergency room medicine cabinet = its own cure shelf
+                local cab = mg:FindFirstChild("Medicine")
+                if cab then
+                    for _, d in ipairs(cab:GetDescendants()) do
+                        if d:IsA("ProximityPrompt") then
+                            idx.cures[#idx.cures + 1] = { pp = d, name = d.ActionText, wp = ppWorldPos(d) }
+                        end
+                    end
+                end
             end
         end
     end
-    return need
-end
-
--- every enabled cure prompt (room cabinets + central supply items)
-local function eachCurePrompt(fn)
+    -- central supply shelves (Medical cures live here, far from the beds)
     local supply = workspace:FindFirstChild("Model")
     local items = supply and supply:FindFirstChild("Items")
     if items then
         for _, it in ipairs(items:GetChildren()) do
             local pp = it:FindFirstChild("PP")
-            if pp and pp:IsA("ProximityPrompt") and pp.Enabled then fn(it.Name, pp) end
-        end
-    end
-    for _, folder in ipairs(workspace.Rooms:GetChildren()) do
-        for _, room in ipairs(folder:GetChildren()) do
-            local cab = room:FindFirstChild("Minigame")
-            cab = cab and cab:FindFirstChild("Medicine")
-            if cab then
-                for _, d in ipairs(cab:GetDescendants()) do
-                    if d:IsA("ProximityPrompt") and d.Enabled then fn(d.ActionText, d) end
-                end
+            if pp and pp:IsA("ProximityPrompt") then
+                idx.cures[#idx.cures + 1] = { pp = pp, name = it.Name, wp = ppWorldPos(pp) }
             end
         end
     end
+    idx.built = os.clock()
+end
+
+-- union of cures every ready-to-treat patient needs (report shown + Apply
+-- enabled) -- decoupled from bed range so we can grab from the far shelves
+local function globalNeeded()
+    local need = {}
+    for _, r in ipairs(idx.rooms) do
+        local hasApply = false
+        for _, s in ipairs(r.steps) do
+            if s.action == "Apply Treatment" and s.pp.Parent and s.pp.Enabled then hasApply = true break end
+        end
+        if hasApply then
+            for _, c in ipairs(neededCuresFrom(r.illL)) do need[c] = true end
+        end
+    end
+    return need
 end
 
 track(RunService.Heartbeat:Connect(function()
     if not AH.autoTreat then return end
+    local now = os.clock()
+    if now - lastTick < TICK then return end
+    lastTick = now
+    if now - idx.built > REBUILD then rebuildIndex() end
+
     local pos = myPos()
     if not pos then return end
     local range = AH.treatRange
 
-    -- 1) GRAB cures: whenever you're near a supply/cabinet cure a waiting
-    -- patient needs and you aren't already holding it. One grab per tick.
-    local need = globalNeededCures()
+    -- 1) GRAB the medicine you need off the shelves/cabinets when in range and
+    -- not already holding it (one grab per tick).
+    local need = globalNeeded()
     if next(need) then
         local held = heldCureNames()
-        local grabbed = false
-        eachCurePrompt(function(name, pp)
-            if grabbed or not need[name] or held[name] then return end
-            if tryFire(pp, pos, range) then grabbed = true end
-        end)
-        if grabbed then return end
+        for _, c in ipairs(idx.cures) do
+            if need[c.name] and not held[c.name] then
+                if tryFire(c.pp, c.wp, pos, range) then return end
+            end
+        end
     end
 
-    -- 2) per room: ordered analyze/process steps, then Apply when you hold a
-    -- needed cure (or the room lists none). One action per tick, calm + clear.
-    for _, folder in ipairs(workspace.Rooms:GetChildren()) do
-        for _, room in ipairs(folder:GetChildren()) do
-            local mg = room:FindFirstChild("Minigame")
-            if mg then
-                local acted = false
-                for _, want in ipairs(STEP_ORDER) do
-                    local pp = findPromptInRoom(room, want, pos, range)
-                    if pp and tryFire(pp, pos, range) then
-                        if want == "Analyze Sample" or want == "Inspect" then closeMinigameSoon() end
-                        acted = true
-                        break
-                    end
+    -- 2) per-room ordered steps, then Apply once you hold a needed cure.
+    for _, r in ipairs(idx.rooms) do
+        for _, want in ipairs(STEP_ORDER) do
+            for _, s in ipairs(r.steps) do
+                if s.action == want and tryFire(s.pp, s.wp, pos, range) then
+                    if want == "Analyze Sample" or want == "Inspect" then closeMinigameSoon() end
+                    return
                 end
-                if not acted then
-                    local apply = findPromptInRoom(room, "Apply Treatment", pos, range)
-                    if apply then
-                        local cures = neededCures(mg)
-                        local held = heldCureNames()
-                        local haveOne = (#cures == 0)
-                        for _, c in ipairs(cures) do if held[c] then haveOne = true break end end
-                        if haveOne and tryFire(apply, pos, range) then acted = true end
-                    end
-                end
-                if acted then return end
+            end
+        end
+        for _, s in ipairs(r.steps) do
+            if s.action == "Apply Treatment" and s.pp.Parent and s.pp.Enabled then
+                local cures = neededCuresFrom(r.illL)
+                local held = heldCureNames()
+                local haveOne = (#cures == 0)
+                for _, c in ipairs(cures) do if held[c] then haveOne = true break end end
+                if haveOne and tryFire(s.pp, s.wp, pos, range) then return end
             end
         end
     end
