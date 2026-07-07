@@ -29,6 +29,7 @@ local MS = {
     -- flagging
     flagOn = false, flagMode = "Legit", flagRange = 0,
     flagDelayMin = 0.4, flagDelayMax = 0.9, flagTrigger = false,
+    trigDelayMin = 0.2, trigDelayMax = 0.5,
 }
 
 -- generation guard so old instances stop when the hub reloads
@@ -388,14 +389,26 @@ local function flagStart()
         _flagThread = nil
     end)
 end
--- flag triggerbot: hover a deduced-mine tile -> flag it
+-- flag triggerbot: hover a deduced-mine tile -> flag it after a randomized
+-- dwell (rolled per hover from the min/max sliders; moving off a tile resets)
 local _mouse = LocalPlayer:GetMouse()
+local _hoverTile, _hoverT0, _hoverNeed
 if getgenv()._BMS_TRIGCONN then pcall(function() getgenv()._BMS_TRIGCONN:Disconnect() end) end
 getgenv()._BMS_TRIGCONN = RunService.RenderStepped:Connect(function()
-    if not (MS.flagTrigger and active() and getgenv()._BMS_TOKEN) then return end
+    if not (MS.flagTrigger and active() and getgenv()._BMS_TOKEN) then _hoverTile = nil return end
     local tgt = _mouse.Target
     if tgt and _lastMines[tgt] and not handled(tgt) then
-        _flagged[tgt] = tick(); fireFlag(tgt)
+        if tgt ~= _hoverTile then
+            _hoverTile = tgt
+            _hoverT0 = tick()
+            _hoverNeed = MS.trigDelayMin + math.random() * math.max(MS.trigDelayMax - MS.trigDelayMin, 0)
+        end
+        if tick() - _hoverT0 >= _hoverNeed then
+            _hoverTile = nil
+            _flagged[tgt] = tick(); fireFlag(tgt)
+        end
+    else
+        _hoverTile = nil
     end
 end)
 
@@ -443,6 +456,10 @@ do
     local Sec2 = FlagSub:Section({ Name = "Flag triggerbot", Side = 2 })
     Sec2:Toggle({ Name = "Flag on hover", Flag = "MS_FlagTrig", Default = false,
         Callback = function(v) MS.flagTrigger = v end })
+    Sec2:Slider({ Name = "Hover delay min", Flag = "MS_FlagTrigDMin", Min = 0, Max = 2000, Default = 200, Decimals = 0, Suffix = " ms",
+        Callback = function(v) MS.trigDelayMin = v / 1000 end })
+    Sec2:Slider({ Name = "Hover delay max", Flag = "MS_FlagTrigDMax", Min = 0, Max = 2000, Default = 500, Decimals = 0, Suffix = " ms",
+        Callback = function(v) MS.trigDelayMax = v / 1000 end })
     Sec2:Label({ Name = "Hover a red (mine) tile to flag it" })
 
     local Sec3 = FlagSub:Section({ Name = "Token", Side = 2 })
