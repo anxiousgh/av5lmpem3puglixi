@@ -90,19 +90,18 @@ end
 
 -- ============================================================
 --  Wallbang -- shoot the murderer through walls.
---  The server checks the shot ORIGIN sits at our real gun muzzle (small
---  tolerance) then raycasts origin -> target, so a wall between the muzzle
---  and the murderer eats the shot. wallbangOrigin() finds an alternate
---  origin within a stud budget that (a) isn't buried in a wall and (b) has
---  clear line-of-sight to the target, so the server's ray reaches them.
---  Ported from the Hood Customs origin-spoof. nil = fully enclosed / out of
---  budget -> skip the shot rather than fire a blocked (and rejected) one.
+--  The server raycasts origin -> target, so a wall between the muzzle and
+--  the murderer eats the shot -- but MM2 does NOT check how far the origin
+--  sits from the real gun, so the spoof can go as far as it needs to.
+--  wallbangOrigin() finds an origin that (a) isn't buried in a wall and
+--  (b) has clear line-of-sight to the target: first near the real muzzle
+--  (cheap, keeps the shot looking normal), then right next to the target,
+--  which works from any distance. nil = target fully sealed in geometry
+--  -> skip the shot rather than fire a blocked (and rejected) one.
 -- ============================================================
-local WB_CAP       = 12     -- hard budget cap (origin-mismatch kick guard); MM2's exact
-                            -- tolerance is unverified -- lower the slider if you get kicked.
+local WB_NEAR      = 12     -- near-muzzle search radius (preferred origins)
 local WB_MAX_RANGE = 5000   -- MM2's gun has no practical range cap
 local wbEnabled = false
-local wbOffset  = 10        -- origin-spoof budget in studs (slider-controlled)
 
 local function wallbangOrigin(realOrigin, part)
     local targetPos = part.Position
@@ -131,7 +130,7 @@ local function wallbangOrigin(realOrigin, part)
         return (targetPos - pos).Magnitude <= WB_MAX_RANGE
     end
     if clearFrom(realOrigin) and inRange(realOrigin) then return realOrigin end   -- already clear, no spoof
-    local budget = math.min(wbOffset, WB_CAP)
+    local budget = WB_NEAR
     -- basis for sideways peeks around cover
     local up0 = math.abs(fwd.Y) > 0.99 and Vector3.new(1, 0, 0) or Vector3.new(0, 1, 0)
     local right = fwd:Cross(up0); right = (right.Magnitude > 0 and right.Unit) or Vector3.new(1, 0, 0)
@@ -158,7 +157,19 @@ local function wallbangOrigin(realOrigin, part)
         -- inRange (pure math) first, then the raycast, then the overlap query -- cheapest first
         if inRange(origin) and clearFrom(origin) and inAir(origin) then return origin end
     end
-    return nil                                                -- nothing valid within budget
+    -- Fallback: spoof right next to the target. MM2 doesn't check how far the
+    -- origin sits from the real gun, so distance is a non-issue -- a point a
+    -- few studs off the murderer nearly always has clear LoS to them.
+    for d = 2, 16 do
+        local base = targetPos - fwd * d
+        for _, off in ipairs({ Vector3.zero, worldUp * 2, worldUp * 4,
+                               right * 2, right * -2,
+                               worldUp * 2 + right * 2, worldUp * 2 - right * 2 }) do
+            local origin = base + off
+            if clearFrom(origin) and inAir(origin) then return origin end
+        end
+    end
+    return nil                                                -- target sealed in geometry
 end
 
 local SHOOT_ERR = {
@@ -166,7 +177,7 @@ local SHOOT_ERR = {
     no_murderer = "No player is holding the Knife right now.",
     no_victim   = "The murderer's character isn't loaded.",
     no_my_hrp   = "Your character isn't loaded yet.",
-    no_wb       = "Wallbang: no clear origin to the murderer (too enclosed -- raise the offset).",
+    no_wb       = "Wallbang: the murderer is sealed in geometry -- no clear origin anywhere.",
 }
 local function shootMurderer()
     local remote = findGunShoot()
@@ -438,8 +449,6 @@ SheriffSec:Slider({ Name = "Ping prediction", Flag = "MM2_ShootPredict", Min = 0
 SheriffSec:Label({ Name = "leads the shot by ping x velocity (0 = off)" })
 SheriffSec:Toggle({ Name = "Wallbang (shoot through walls)", Flag = "MM2_Wallbang", Default = false,
     Callback = function(v) wbEnabled = v end })
-SheriffSec:Slider({ Name = "Wallbang offset", Flag = "MM2_WallbangOffset", Min = 2, Max = 12, Default = 10, Decimals = 0, Suffix = " studs",
-    Callback = function(v) wbOffset = v end })
 SheriffSec:Label({ Name = "origin-spoof budget; lower it if you get kicked" })
 
 local KnifeSec = Sub:Section({ Name = "Murderer knife", Side = 1 })
