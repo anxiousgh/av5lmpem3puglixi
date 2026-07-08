@@ -9,11 +9,15 @@
 --                                                  point = spot on its surface
 --  Zones live in workspace.StoreMaps.HardStore.SectionZones (BaseParts with
 --  SectionId / ShelfType / SurfaceY / FrontDir / ClaimedProduct attributes).
---  ReplicatedStorage.Shared.SectionIndex (shared module) answers
+--  A zone's SectionId ("ProduceSmallWedge/Fixture_10/Shelf1/1") indexes the
+--  physical shelf model: Shelves.<first>/<second> -- used for the finder
+--  highlight. ReplicatedStorage.Shared.SectionIndex (shared module) answers
 --  canPlace(itemName, resolveZone(zone)) client-side, so we can pre-filter.
 --  Server feedback: LocalCorrectPlacement (accepted) / PlaceRejected (reason).
 --  Held stack mirrors via Remotes.UpdateHeld. Capacity / reach are player
 --  attributes: CartCapacity, PickupRange (both upgradeable in-game).
+--  Item -> category comes from ReplicatedStorage.GroceryItems.<Category>.<Name>
+--  template folders (21 categories; every floor item name maps to exactly one).
 --
 --  DELIBERATELY SUBTLE: no teleports, no reach extension. Auto-pickup and
 --  auto-shelve only act within the player's REAL PickupRange with randomized
@@ -55,6 +59,32 @@ local function itemPos(it)
     end)
     return ok and p or nil
 end
+local function uiParent() return (gethui and gethui()) or game:GetService("CoreGui") end
+
+-- ============================================================
+--  CATEGORIES  -- item name -> category from the GroceryItems template
+--  folders; each category gets a stable distinct hue (golden-ratio walk).
+-- ============================================================
+local catOf, catList, catColor = {}, {}, {}
+do
+    local gi = ReplicatedStorage:FindFirstChild("GroceryItems")
+    if gi then
+        for _, folder in ipairs(gi:GetChildren()) do
+            catList[#catList + 1] = folder.Name
+            for _, tpl in ipairs(folder:GetChildren()) do catOf[tpl.Name] = folder.Name end
+        end
+    end
+    table.sort(catList)
+    for i, name in ipairs(catList) do
+        catColor[name] = Color3.fromHSV((i * 0.618034) % 1, 0.65, 1)
+    end
+end
+local selectedCats = {}                    -- [categoryName] = true
+local function catSelected(itemName)
+    local c = catOf[itemName]
+    return c ~= nil and selectedCats[c] == true
+end
+local function anyCatSelected() return next(selectedCats) ~= nil end
 
 -- ============================================================
 --  Held-stack mirror (server pushes the full list on every change)
@@ -114,12 +144,25 @@ local function surfacePoint(z)
         (math.random() - 0.5) * z.Size.Z * 0.4))
     return Vector3.new(p.X, sy, p.Z)
 end
+-- physical shelf model for a zone: SectionId "A/B/..." -> Shelves.A.B
+local function fixtureFor(z)
+    local id = z:GetAttribute("SectionId")
+    local a, b = id and id:match("^([^/]+)/([^/]+)")
+    if not a then return nil end
+    local store = workspace:FindFirstChild("StoreMaps")
+    store = store and store:FindFirstChild("HardStore")
+    local shelves = store and store:FindFirstChild("Shelves")
+    local sub = shelves and shelves:FindFirstChild(a)
+    return sub and sub:FindFirstChild(b)
+end
 
 -- ============================================================
---  AUTO PICKUP  -- nearest floor item inside your real reach, jittered pacing
+--  AUTO CLEAN  -- pickup + shelve, jittered pacing, real reach only.
+--  Pickup optionally restricted to the selected categories.
 -- ============================================================
 local pickupOn, pickupDelay, autoRange = false, 0.4, 12
 local placeOn, placeDelay = false, 0.55
+local catFilterOn = false                  -- pickup only selected categories
 local nextPick, nextPlace = 0, 0
 local itemCD = {}                          -- [item] = retry-not-before (server ignored us)
 local lastTriedZone = nil
@@ -139,9 +182,11 @@ track(RunService.Heartbeat:Connect(function()
     -- pickup
     if pickupOn and now >= nextPick and #held < capacity() then
         nextPick = now + jitter(pickupDelay)
+        local filtering = catFilterOn and anyCatSelected()
         local best, bestD
         for _, it in ipairs(CollectionService:GetTagged("FloorItem")) do
-            if it.Parent and (not itemCD[it] or now >= itemCD[it]) then
+            if it.Parent and (not itemCD[it] or now >= itemCD[it])
+                and (not filtering or catSelected(it.Name)) then
                 local p = itemPos(it)
                 local d = p and (p - hrp.Position).Magnitude
                 if d and d <= reach and (not bestD or d < bestD) then best, bestD = it, d end
@@ -161,8 +206,7 @@ track(RunService.Heartbeat:Connect(function()
             local z = c.zone
             if z.Parent and (not zoneCD[z] or now >= zoneCD[z]) then
                 local d = (z.Position - hrp.Position).Magnitude
-                -- prefer zones for the bottom-of-stack item on ties (pri already
-                -- ordered); nearest wins otherwise
+                -- pri already orders bottom-of-stack first; nearest wins otherwise
                 if d <= reach and (not bestD or d < bestD) then best, bestD = z, d end
             end
         end
@@ -175,68 +219,125 @@ track(RunService.Heartbeat:Connect(function()
 end))
 
 -- ============================================================
---  SHELF FINDER  -- beam from you to the nearest valid shelf for the held
---  stack (any distance). Pure client visual: it shows WHERE to walk; the
---  auto-shelve fires once you're actually there.
+--  SHELF FINDER  -- arced two-layer beam from you to the nearest valid shelf
+--  for the held stack (any distance), pulsing highlight on the target zone
+--  and a softer one on the shelf fixture it belongs to. Pure client visuals.
 -- ============================================================
 local finderOn = false
-local beamPart, beam, a0char
+local beamPart, beamCore, beamGlow, a0char, a1
+local zoneHl, fixHl
 do
     beamPart = Instance.new("Part")
     beamPart.Anchored = true; beamPart.CanCollide = false; beamPart.CanQuery = false
     beamPart.CanTouch = false; beamPart.Transparency = 1; beamPart.Size = Vector3.new(0.2, 0.2, 0.2)
-    local a1 = Instance.new("Attachment"); a1.Parent = beamPart
-    beam = Instance.new("Beam")
-    beam.Attachment1 = a1; beam.Width0 = 0.15; beam.Width1 = 0.4
-    beam.FaceCamera = true; beam.Transparency = NumberSequence.new(0.35)
-    beam.Color = ColorSequence.new(Color3.fromRGB(170, 140, 255))
-    beam.Enabled = false; beam.Parent = beamPart
+    a1 = Instance.new("Attachment"); a1.Axis = Vector3.yAxis; a1.Parent = beamPart
+
+    local grad = ColorSequence.new({
+        ColorSequenceKeypoint.new(0,   Color3.fromRGB(170, 140, 255)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(120, 220, 255)),
+        ColorSequenceKeypoint.new(1,   Color3.fromRGB(170, 140, 255)),
+    })
+    beamCore = Instance.new("Beam")
+    beamCore.Attachment1 = a1; beamCore.Width0 = 0.12; beamCore.Width1 = 0.35
+    beamCore.FaceCamera = true; beamCore.Segments = 24; beamCore.LightEmission = 1
+    beamCore.Transparency = NumberSequence.new(0.1)
+    beamCore.Color = grad; beamCore.Enabled = false; beamCore.Parent = beamPart
+
+    beamGlow = Instance.new("Beam")
+    beamGlow.Attachment1 = a1; beamGlow.Width0 = 0.6; beamGlow.Width1 = 1.4
+    beamGlow.FaceCamera = true; beamGlow.Segments = 24; beamGlow.LightEmission = 1
+    beamGlow.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.75), NumberSequenceKeypoint.new(0.5, 0.6),
+        NumberSequenceKeypoint.new(1, 0.75),
+    })
+    beamGlow.Color = grad; beamGlow.Enabled = false; beamGlow.Parent = beamPart
     beamPart.Parent = workspace
 
-    local acc = 0
+    zoneHl = Instance.new("Highlight")     -- highlights render even on invisible parts
+    zoneHl.FillColor = Color3.fromRGB(120, 220, 255); zoneHl.OutlineColor = Color3.fromRGB(220, 245, 255)
+    zoneHl.FillTransparency = 0.5; zoneHl.OutlineTransparency = 0
+    zoneHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; zoneHl.Enabled = false
+    pcall(function() zoneHl.Parent = uiParent() end)
+
+    fixHl = Instance.new("Highlight")
+    fixHl.FillColor = Color3.fromRGB(170, 140, 255); fixHl.OutlineColor = Color3.fromRGB(170, 140, 255)
+    fixHl.FillTransparency = 0.92; fixHl.OutlineTransparency = 0.25
+    fixHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; fixHl.Enabled = false
+    pcall(function() fixHl.Parent = uiParent() end)
+
+    local acc, target = 0, nil
     track(RunService.Heartbeat:Connect(function(dt)
-        acc += dt; if acc < 0.25 then return end
-        acc = 0
         local hrp = myHRP()
-        if not (finderOn and hrp and #held > 0) then
-            if beam.Enabled then beam.Enabled = false end
-            return
-        end
-        if not a0char or a0char.Parent ~= hrp then
-            if a0char then a0char:Destroy() end
-            a0char = Instance.new("Attachment"); a0char.Parent = hrp
-            beam.Attachment0 = a0char
-        end
-        local now, best, bestD = os.clock(), nil, nil
-        for _, c in ipairs(candidateZones()) do
-            local z = c.zone
-            if z.Parent and (not zoneCD[z] or now >= zoneCD[z]) then
-                local d = (z.Position - hrp.Position).Magnitude
-                if not bestD or d < bestD then best, bestD = z, d end
+        local active = finderOn and hrp and #held > 0
+
+        -- retarget on a slow tick; animate every frame
+        acc += dt
+        if acc >= 0.25 then
+            acc = 0
+            target = nil
+            if active then
+                local now, bestD = os.clock(), nil
+                for _, c in ipairs(candidateZones()) do
+                    local z = c.zone
+                    if z.Parent and (not zoneCD[z] or now >= zoneCD[z]) then
+                        local d = (z.Position - hrp.Position).Magnitude
+                        if not bestD or d < bestD then target, bestD = z, d end
+                    end
+                end
             end
         end
-        if best then
-            beamPart.Position = Vector3.new(best.Position.X,
-                best:GetAttribute("SurfaceY") or best.Position.Y, best.Position.Z)
-            beam.Enabled = true
-        else
-            beam.Enabled = false
+
+        if not (active and target) then
+            if beamCore.Enabled then beamCore.Enabled = false; beamGlow.Enabled = false end
+            if zoneHl.Enabled then zoneHl.Enabled = false; zoneHl.Adornee = nil end
+            if fixHl.Enabled then fixHl.Enabled = false; fixHl.Adornee = nil end
+            return
         end
+
+        if not a0char or a0char.Parent ~= hrp then
+            if a0char then a0char:Destroy() end
+            a0char = Instance.new("Attachment")
+            a0char.Axis = Vector3.yAxis; a0char.Parent = hrp
+            beamCore.Attachment0 = a0char; beamGlow.Attachment0 = a0char
+        end
+
+        local tpos = Vector3.new(target.Position.X,
+            target:GetAttribute("SurfaceY") or target.Position.Y, target.Position.Z)
+        beamPart.Position = tpos
+
+        -- arc height scales with distance; gentle width/glow pulse
+        local dist = (tpos - hrp.Position).Magnitude
+        local arc = math.clamp(dist * 0.3, 2, 14)
+        local s = 0.5 + 0.5 * math.sin(os.clock() * 4)
+        beamCore.CurveSize0 = arc;  beamCore.CurveSize1 = -arc
+        beamGlow.CurveSize0 = arc;  beamGlow.CurveSize1 = -arc
+        beamCore.Width0 = 0.1 + 0.08 * s;  beamCore.Width1 = 0.3 + 0.15 * s
+        beamGlow.Width0 = 0.5 + 0.3 * s;   beamGlow.Width1 = 1.2 + 0.5 * s
+        beamCore.Enabled = true; beamGlow.Enabled = true
+
+        zoneHl.FillTransparency = 0.35 + 0.35 * s
+        if zoneHl.Adornee ~= target then zoneHl.Adornee = target end
+        zoneHl.Enabled = true
+
+        local fix = fixtureFor(target)
+        if fixHl.Adornee ~= fix then fixHl.Adornee = fix end
+        fixHl.Enabled = fix ~= nil
     end))
 end
 
 -- ============================================================
---  FLOOR ITEM HIGHLIGHTS  -- pooled (Roblox caps ~31 Highlights), nearest N
+--  FIND CATEGORY ITEMS  -- pick categories, floor items from them get
+--  highlighted in that category's colour (pooled: nearest 20 in radius;
+--  Roblox caps ~31 enabled Highlights). No categories selected = show all.
 -- ============================================================
-local espOn, espRadius = false, 60
-local pool = {}
-for i = 1, 10 do
+local catEspOn, catEspRadius = false, 60
+local catPool = {}
+for i = 1, 20 do
     local hl = Instance.new("Highlight")
-    hl.FillTransparency = 0.75; hl.OutlineTransparency = 0.1
-    hl.FillColor = Color3.fromRGB(140, 110, 255); hl.OutlineColor = Color3.fromRGB(200, 180, 255)
+    hl.FillTransparency = 0.7; hl.OutlineTransparency = 0.1
     hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; hl.Enabled = false
-    pcall(function() hl.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
-    pool[i] = hl
+    pcall(function() hl.Parent = uiParent() end)
+    catPool[i] = hl
 end
 do
     local acc = 0
@@ -244,28 +345,55 @@ do
         acc += dt; if acc < 0.35 then return end
         acc = 0
         local hrp = myHRP()
-        if not (espOn and hrp) then
-            for _, hl in ipairs(pool) do
+        if not (catEspOn and hrp) then
+            for _, hl in ipairs(catPool) do
                 if hl.Enabled then hl.Enabled = false; hl.Adornee = nil end
             end
             return
         end
+        local filtering = anyCatSelected()
         local near = {}
         for _, it in ipairs(CollectionService:GetTagged("FloorItem")) do
-            if it.Parent then
+            if it.Parent and (not filtering or catSelected(it.Name)) then
                 local p = itemPos(it)
                 local d = p and (p - hrp.Position).Magnitude
-                if d and d <= espRadius then near[#near + 1] = { it = it, d = d } end
+                if d and d <= catEspRadius then near[#near + 1] = { it = it, d = d } end
             end
         end
         table.sort(near, function(a, b) return a.d < b.d end)
-        for i, hl in ipairs(pool) do
+        for i, hl in ipairs(catPool) do
             local e = near[i]
-            if e then hl.Adornee = e.it; hl.Enabled = true
-            else hl.Adornee = nil; hl.Enabled = false end
+            if e then
+                local col = catColor[catOf[e.it.Name]] or Color3.fromRGB(140, 110, 255)
+                hl.FillColor = col; hl.OutlineColor = col
+                hl.Adornee = e.it; hl.Enabled = true
+            else
+                hl.Adornee = nil; hl.Enabled = false
+            end
         end
     end))
 end
+
+-- ============================================================
+--  THIRD PERSON  -- the game locks first person via CameraMode/MaxZoom, so we
+--  override them every frame (it re-locks). Restores the originals when off.
+-- ============================================================
+local thirdPerson, tpDist = false, 14
+local _origMode, _origMaxZoom = nil, nil
+track(RunService.RenderStepped:Connect(function()
+    if thirdPerson then
+        if _origMode == nil then
+            _origMode = LocalPlayer.CameraMode
+            _origMaxZoom = LocalPlayer.CameraMaxZoomDistance
+        end
+        if LocalPlayer.CameraMode ~= Enum.CameraMode.Classic then LocalPlayer.CameraMode = Enum.CameraMode.Classic end
+        if LocalPlayer.CameraMaxZoomDistance ~= tpDist then LocalPlayer.CameraMaxZoomDistance = tpDist end
+    elseif _origMode ~= nil then
+        LocalPlayer.CameraMode = _origMode
+        LocalPlayer.CameraMaxZoomDistance = _origMaxZoom
+        _origMode, _origMaxZoom = nil, nil
+    end
+end))
 
 -- ============================================================
 --  UI  (Supermarket subpage)
@@ -278,6 +406,8 @@ do
         Callback = function(v) pickupOn = v end })
     pickToggle:Keybind({ Name = "Toggle auto pickup", Flag = "SM_AutoPickupKey", Mode = "Toggle",
         Default = Enum.KeyCode.V, Callback = function() pickToggle:Set(not pickToggle.Value) end })
+    SecA:Toggle({ Name = "Selected categories only", Flag = "SM_CatFilter", Default = false,
+        Callback = function(v) catFilterOn = v end })
     SecA:Slider({ Name = "Pickup delay", Flag = "SM_PickDelay", Min = 200, Max = 1500, Default = 400, Decimals = 0, Suffix = " ms",
         Callback = function(v) pickupDelay = v / 1000 end })
     local placeToggle = SecA:Toggle({ Name = "Auto shelve held items", Flag = "SM_AutoPlace", Default = false,
@@ -290,14 +420,28 @@ do
         Callback = function(v) autoRange = v end })
     SecA:Label({ Name = "capped to your real reach -- you still walk" })
 
-    local SecV = Sub:Section({ Name = "Visuals", Side = 2 })
-    SecV:Toggle({ Name = "Shelf finder beam", Flag = "SM_Finder", Default = false,
+    local SecF = Sub:Section({ Name = "Shelf finder", Side = 2 })
+    SecF:Toggle({ Name = "Shelf finder", Flag = "SM_Finder", Default = false,
         Callback = function(v) finderOn = v end })
-    SecV:Toggle({ Name = "Highlight floor items", Flag = "SM_Esp", Default = false,
-        Callback = function(v) espOn = v end })
-    SecV:Slider({ Name = "Highlight radius", Flag = "SM_EspRadius", Min = 20, Max = 150, Default = 60, Decimals = 0, Suffix = " studs",
-        Callback = function(v) espRadius = v end })
-    SecV:Label({ Name = "beam points at a valid shelf for your stack" })
+    SecF:Label({ Name = "beam + glow on the shelf your item belongs to" })
+
+    local SecCam = Sub:Section({ Name = "Camera", Side = 1 })
+    SecCam:Toggle({ Name = "Third person", Flag = "SM_ThirdPerson", Default = false,
+        Callback = function(v) thirdPerson = v end })
+    SecCam:Slider({ Name = "Max zoom", Flag = "SM_TPDist", Min = 6, Max = 30, Default = 14, Decimals = 0, Suffix = " studs",
+        Callback = function(v) tpDist = v end })
+
+    local SecC = Sub:Section({ Name = "Find category items", Side = 2 })
+    SecC:Toggle({ Name = "Highlight category items", Flag = "SM_CatEsp", Default = false,
+        Callback = function(v) catEspOn = v end })
+    SecC:Dropdown({ Name = "Categories", Flag = "SM_Categories", Items = catList, Multi = true,
+        Callback = function(v)
+            selectedCats = {}
+            for _, name in ipairs(v or {}) do selectedCats[name] = true end
+        end })
+    SecC:Slider({ Name = "Highlight radius", Flag = "SM_CatEspRadius", Min = 20, Max = 200, Default = 60, Decimals = 0, Suffix = " studs",
+        Callback = function(v) catEspRadius = v end })
+    SecC:Label({ Name = "no selection = all; colour-coded per category" })
 end
 
 -- universal shell after our page so Supermarket stays the first sub-tab
@@ -307,11 +451,19 @@ pcall(function() ctx.load("games/universal.lua")(ctx) end)
 --  Teardown
 -- ============================================================
 local function cleanup()
-    pickupOn, placeOn, finderOn, espOn = false, false, false, false
+    pickupOn, placeOn, finderOn, catEspOn = false, false, false, false
+    if _origMode ~= nil then
+        pcall(function()
+            LocalPlayer.CameraMode = _origMode
+            LocalPlayer.CameraMaxZoomDistance = _origMaxZoom
+        end)
+        _origMode, _origMaxZoom = nil, nil
+    end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-    for _, hl in ipairs(pool) do pcall(function() hl:Destroy() end) end
-    if a0char then pcall(function() a0char:Destroy() end) end
-    if beamPart then pcall(function() beamPart:Destroy() end) end
+    for _, hl in ipairs(catPool) do pcall(function() hl:Destroy() end) end
+    for _, inst in ipairs({ zoneHl, fixHl, a0char, beamPart }) do
+        pcall(function() inst:Destroy() end)
+    end
 end
 do
     local g = (getgenv and getgenv()) or nil
