@@ -60,6 +60,10 @@ local function itemPos(it)
     return ok and p or nil
 end
 local function uiParent() return (gethui and gethui()) or game:GetService("CoreGui") end
+-- GUI theme accent so world visuals match the menu (live: themes can change)
+local function accent()
+    return (Library.Theme and Library.Theme["Accent"]) or Color3.fromRGB(200, 183, 247)
+end
 
 -- ============================================================
 --  CATEGORIES  -- item name -> category from the GroceryItems template
@@ -75,8 +79,10 @@ do
         end
     end
     table.sort(catList)
+    -- distinct hue per category, nudged toward the GUI accent so it fits the theme
+    local acc = Color3.fromRGB(200, 183, 247)
     for i, name in ipairs(catList) do
-        catColor[name] = Color3.fromHSV((i * 0.618034) % 1, 0.65, 1)
+        catColor[name] = Color3.fromHSV((i * 0.618034) % 1, 0.6, 1):Lerp(acc, 0.2)
     end
 end
 local selectedCats = {}                    -- [categoryName] = true
@@ -242,6 +248,7 @@ end))
 -- ============================================================
 local finderOn = false
 local beamPart, beams, a0char, a1
+local corePart, coreHl
 local zoneHl, fixHl
 do
     beamPart = Instance.new("Part")
@@ -249,7 +256,7 @@ do
     beamPart.CanTouch = false; beamPart.Transparency = 1; beamPart.Size = Vector3.new(0.2, 0.2, 0.2)
     a1 = Instance.new("Attachment"); a1.Parent = beamPart
 
-    local col = Color3.fromRGB(170, 140, 255)
+    local col = accent()
     local whiteHot = ColorSequence.new({
         ColorSequenceKeypoint.new(0, col), ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)),
         ColorSequenceKeypoint.new(1, col) })
@@ -270,21 +277,40 @@ do
         beams[#beams + 1] = b
         return b
     end
-    -- "Laser" style: soft halo + solid hot core + scrolling energy line
-    mkBeam(0.9, 0.6)
-    mkBeam(0.3, 0, false, whiteHot)
-    mkBeam(0.14, 0, true)
+    -- HC "Standard" tracer: halo + mid glow + white-hot textured core
+    local th = 0.35
+    local outer = mkBeam(th * 5, nil)
+    outer.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.6), NumberSequenceKeypoint.new(0.5, 0.35),
+        NumberSequenceKeypoint.new(1, 0.6) })
+    mkBeam(th * 2.6, 0.25)                 -- mid glow
+    mkBeam(th * 1.1, 0.02, true, whiteHot) -- white-hot textured core
     beamPart.Parent = workspace
 
+    -- the HC signature: a solid neon core line under a black-outline Highlight
+    -- (reads through walls, hairline stays visible)
+    corePart = Instance.new("Part")
+    corePart.Anchored = true; corePart.CanCollide = false; corePart.CanQuery = false
+    corePart.CanTouch = false; corePart.CastShadow = false
+    corePart.Material = Enum.Material.Neon; corePart.Color = col
+    corePart.Transparency = 1; corePart.Size = Vector3.new(0.12, 0.12, 0.12)
+    corePart.Parent = workspace
+    coreHl = Instance.new("Highlight")
+    coreHl.Adornee = corePart
+    coreHl.FillColor = col; coreHl.FillTransparency = 0.2
+    coreHl.OutlineColor = Color3.new(0, 0, 0); coreHl.OutlineTransparency = 0
+    coreHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; coreHl.Enabled = false
+    pcall(function() coreHl.Parent = uiParent() end)
+
     zoneHl = Instance.new("Highlight")     -- highlights render even on invisible parts
-    zoneHl.FillColor = Color3.fromRGB(120, 220, 255); zoneHl.OutlineColor = Color3.fromRGB(220, 245, 255)
-    zoneHl.FillTransparency = 0.5; zoneHl.OutlineTransparency = 0
+    zoneHl.FillColor = accent(); zoneHl.OutlineColor = Color3.new(1, 1, 1)
+    zoneHl.FillTransparency = 0.15; zoneHl.OutlineTransparency = 0
     zoneHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; zoneHl.Enabled = false
     pcall(function() zoneHl.Parent = uiParent() end)
 
     fixHl = Instance.new("Highlight")
-    fixHl.FillColor = Color3.fromRGB(170, 140, 255); fixHl.OutlineColor = Color3.fromRGB(230, 220, 255)
-    fixHl.FillTransparency = 0.6; fixHl.OutlineTransparency = 0
+    fixHl.FillColor = accent(); fixHl.OutlineColor = Color3.new(0, 0, 0)
+    fixHl.FillTransparency = 0.3; fixHl.OutlineTransparency = 0
     fixHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; fixHl.Enabled = false
     pcall(function() fixHl.Parent = uiParent() end)
 
@@ -314,6 +340,9 @@ do
             if beams[1].Enabled then
                 for _, b in ipairs(beams) do b.Enabled = false end
             end
+            if coreHl.Enabled then
+                coreHl.Enabled = false; corePart.Transparency = 1
+            end
             if zoneHl.Enabled then zoneHl.Enabled = false; zoneHl.Adornee = nil end
             if fixHl.Enabled then fixHl.Enabled = false; fixHl.Adornee = nil end
             return
@@ -325,14 +354,25 @@ do
             for _, b in ipairs(beams) do b.Attachment0 = a0char end
         end
 
-        beamPart.Position = Vector3.new(target.Position.X,
+        local tpos = Vector3.new(target.Position.X,
             target:GetAttribute("SurfaceY") or target.Position.Y, target.Position.Z)
+        beamPart.Position = tpos
         for _, b in ipairs(beams) do
             if not b.Enabled then b.Enabled = true end
         end
 
+        -- stretch the neon core line from chest to shelf
+        local from = hrp.Position
+        local dist = (tpos - from).Magnitude
+        if dist > 0.5 then
+            corePart.Size = Vector3.new(0.12, 0.12, dist)
+            corePart.CFrame = CFrame.lookAt((from + tpos) / 2, tpos)
+            corePart.Transparency = 0
+            coreHl.Enabled = true
+        end
+
         local s = 0.5 + 0.5 * math.sin(os.clock() * 4)
-        zoneHl.FillTransparency = 0.35 + 0.35 * s
+        zoneHl.FillTransparency = 0.1 + 0.35 * s
         if zoneHl.Adornee ~= target then zoneHl.Adornee = target end
         zoneHl.Enabled = true
 
@@ -351,7 +391,7 @@ local catEspOn, catEspRadius = false, 60
 local catPool = {}
 for i = 1, 20 do
     local hl = Instance.new("Highlight")
-    hl.FillTransparency = 0.7; hl.OutlineTransparency = 0.1
+    hl.FillTransparency = 0.3; hl.OutlineTransparency = 0
     hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; hl.Enabled = false
     pcall(function() hl.Parent = uiParent() end)
     catPool[i] = hl
@@ -381,8 +421,9 @@ do
         for i, hl in ipairs(catPool) do
             local e = near[i]
             if e then
-                local col = catColor[catOf[e.it.Name]] or Color3.fromRGB(140, 110, 255)
-                hl.FillColor = col; hl.OutlineColor = col
+                local col = catColor[catOf[e.it.Name]] or accent()
+                hl.FillColor = col
+                hl.OutlineColor = col:Lerp(Color3.new(1, 1, 1), 0.5)
                 hl.Adornee = e.it; hl.Enabled = true
             else
                 hl.Adornee = nil; hl.Enabled = false
@@ -478,7 +519,7 @@ local function cleanup()
     end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, hl in ipairs(catPool) do pcall(function() hl:Destroy() end) end
-    for _, inst in ipairs({ zoneHl, fixHl, a0char, beamPart }) do
+    for _, inst in ipairs({ zoneHl, fixHl, a0char, beamPart, corePart, coreHl }) do
         pcall(function() inst:Destroy() end)
     end
 end
