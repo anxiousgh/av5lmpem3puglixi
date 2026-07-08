@@ -129,10 +129,12 @@ local function candidateZones()
     local list = {}
     local okZ, folder = pcall(SectionIndex.getZonesFolder)
     if okZ and folder then
-        -- distinct held names, held[1] first (server appears to shelve FIFO)
+        -- distinct held names, ACTIVE item first (= LAST in the stack: it's
+        -- what the UI shows, what the ghost previews, and what the server
+        -- places; CycleHeld rotates the stack to change it)
         local names, seen = {}, {}
-        for _, e in ipairs(held) do
-            local n = e.name
+        for i = #held, 1, -1 do
+            local n = held[i].name
             if n and not seen[n] then seen[n] = true; names[#names + 1] = n end
         end
         for _, z in ipairs(folder:GetChildren()) do
@@ -155,13 +157,19 @@ local function candidateZones()
     candCache.sig, candCache.t, candCache.list = sig, os.clock(), list
     return list
 end
--- random spot on the zone's shelf surface (SurfaceY is absolute world Y)
+-- random spot on the zone's shelf surface (SurfaceY is absolute world Y).
+-- LIFT the point into the box: real client placements land ~0.6 above
+-- SurfaceY (raycast on the shelf/stacked items); a point exactly on the
+-- SurfaceY plane sits on the box's bottom boundary and the server resolves
+-- it into the NEIGHBOURING box -> bogus wrongType/claimed rejections
+-- (confirmed by comparing spied real placements against ours).
 local function surfacePoint(z)
     local sy = z:GetAttribute("SurfaceY") or (z.Position.Y + z.Size.Y / 2)
     local p = z.CFrame:PointToWorldSpace(Vector3.new(
         (math.random() - 0.5) * z.Size.X * 0.4, 0,
         (math.random() - 0.5) * z.Size.Z * 0.4))
-    return Vector3.new(p.X, sy, p.Z)
+    local y = math.min(sy + 0.55, z.Position.Y + z.Size.Y / 2 - 0.1)
+    return Vector3.new(p.X, y, p.Z)
 end
 -- the actual shelf a zone belongs to: SectionId "A/B/C/..." ->
 -- Shelves.A.B.C (e.g. ProduceSmallWedge/Fixture_10/Shelf1); falls back to the
@@ -220,22 +228,29 @@ track(RunService.Heartbeat:Connect(function()
         end
     end
 
-    -- shelve
+    -- shelve: the server only places the ACTIVE (last-held) item, so if the
+    -- nearest valid shelf is for a different held item, rotate the stack with
+    -- CycleHeld (what the in-game switch button fires) until it's active
     if placeOn and now >= nextPlace and #held > 0 then
         nextPlace = now + jitter(placeDelay)
+        local activeName = held[#held] and held[#held].name
         local best, bestD
         for _, c in ipairs(candidateZones()) do
             local z = c.zone
             if z.Parent and (not zoneCD[z] or now >= zoneCD[z]) then
                 local d = (z.Position - hrp.Position).Magnitude
-                -- pri already orders bottom-of-stack first; nearest wins otherwise
-                if d <= reach and (not bestD or d < bestD) then best, bestD = z, d end
+                if d <= reach and (not bestD or d < bestD) then best, bestD = c, d end
             end
         end
         if best then
-            lastTriedZone = best
-            zoneCD[best] = now + 0.25      -- brief self-cooldown; rejection extends it
-            Remotes.PlaceItem:FireServer(best, surfacePoint(best))
+            if best.name == activeName or #held < 2 then
+                lastTriedZone = best.zone
+                zoneCD[best.zone] = now + 0.25 -- brief self-cooldown; rejection extends it
+                Remotes.PlaceItem:FireServer(best.zone, surfacePoint(best.zone))
+            else
+                Remotes.CycleHeld:FireServer("forward")
+                nextPlace = now + 0.12         -- give UpdateHeld a beat to mirror back
+            end
         end
     end
 end))
