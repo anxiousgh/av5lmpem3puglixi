@@ -119,7 +119,7 @@ end
 local function candidateZones()
     if not SectionIndex then return {} end
     local sig = heldSig()
-    if candCache.sig == sig and os.clock() - candCache.t < 0.75 then return candCache.list end
+    if candCache.sig == sig and os.clock() - candCache.t < 0.4 then return candCache.list end
     local list = {}
     local okZ, folder = pcall(SectionIndex.getZonesFolder)
     if okZ and folder then
@@ -176,15 +176,15 @@ end
 --  AUTO CLEAN  -- pickup + shelve, jittered pacing, real reach only.
 --  Pickup optionally restricted to the selected categories.
 -- ============================================================
-local pickupOn, pickupDelay, autoRange = false, 0.15, 12
-local placeOn, placeDelay = false, 0.2
+local pickupOn, pickupDelay, autoRange = false, 0.05, 12
+local placeOn, placeDelay = false, 0.06
 local catFilterOn = false                  -- pickup only selected categories
 local nextPick, nextPlace = 0, 0
 local itemCD = {}                          -- [item] = retry-not-before (server ignored us)
 local lastTriedZone = nil
 
 track(Remotes.PlaceRejected.OnClientEvent:Connect(function()
-    if lastTriedZone then zoneCD[lastTriedZone] = os.clock() + 6; lastTriedZone = nil end
+    if lastTriedZone then zoneCD[lastTriedZone] = os.clock() + 3; lastTriedZone = nil end
     candCache.sig = nil                    -- claim state was stale; recompute
 end))
 
@@ -209,7 +209,7 @@ track(RunService.Heartbeat:Connect(function()
             end
         end
         if best then
-            itemCD[best] = now + 1.5
+            itemCD[best] = now + 0.5
             Remotes.PickupItem:FireServer(best)
         end
     end
@@ -228,7 +228,7 @@ track(RunService.Heartbeat:Connect(function()
         end
         if best then
             lastTriedZone = best
-            zoneCD[best] = now + 0.8       -- brief self-cooldown; rejection extends it
+            zoneCD[best] = now + 0.25      -- brief self-cooldown; rejection extends it
             Remotes.PlaceItem:FireServer(best, surfacePoint(best))
         end
     end
@@ -295,7 +295,7 @@ do
 
         -- retarget on a fast tick; animate every frame
         acc += dt
-        if acc >= 0.1 then
+        if acc >= 0.05 then
             acc = 0
             target = nil
             if active then
@@ -359,7 +359,7 @@ end
 do
     local acc = 0
     track(RunService.Heartbeat:Connect(function(dt)
-        acc += dt; if acc < 0.15 then return end
+        acc += dt; if acc < 0.08 then return end
         acc = 0
         local hrp = myHRP()
         if not (catEspOn and hrp) then
@@ -425,13 +425,13 @@ do
         Default = Enum.KeyCode.V, Callback = function() pickToggle:Set(not pickToggle.Value) end })
     SecA:Toggle({ Name = "Selected categories only", Flag = "SM_CatFilter", Default = false,
         Callback = function(v) catFilterOn = v end })
-    SecA:Slider({ Name = "Pickup delay", Flag = "SM_PickDelay", Min = 50, Max = 1000, Default = 150, Decimals = 0, Suffix = " ms",
+    SecA:Slider({ Name = "Pickup delay", Flag = "SM_PickDelay", Min = 10, Max = 500, Default = 50, Decimals = 0, Suffix = " ms",
         Callback = function(v) pickupDelay = v / 1000 end })
     local placeToggle = SecA:Toggle({ Name = "Auto shelve held items", Flag = "SM_AutoPlace", Default = false,
         Callback = function(v) placeOn = v end })
     placeToggle:Keybind({ Name = "Toggle auto shelve", Flag = "SM_AutoPlaceKey", Mode = "Toggle",
         Default = Enum.KeyCode.B, Callback = function() placeToggle:Set(not placeToggle.Value) end })
-    SecA:Slider({ Name = "Shelve delay", Flag = "SM_PlaceDelay", Min = 50, Max = 1000, Default = 200, Decimals = 0, Suffix = " ms",
+    SecA:Slider({ Name = "Shelve delay", Flag = "SM_PlaceDelay", Min = 10, Max = 500, Default = 60, Decimals = 0, Suffix = " ms",
         Callback = function(v) placeDelay = v / 1000 end })
     SecA:Slider({ Name = "Act range", Flag = "SM_Range", Min = 4, Max = 18, Default = 12, Decimals = 0, Suffix = " studs",
         Callback = function(v) autoRange = v end })
