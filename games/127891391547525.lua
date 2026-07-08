@@ -105,6 +105,17 @@ local function heldSig()
     for _, e in ipairs(held) do t[#t + 1] = tostring(e.name) end
     return table.concat(t, "|")
 end
+-- a different product already physically on the shelf zone: placed items get
+-- parented INTO the zone box, named exactly the product. More reliable than
+-- the ClaimedProduct attribute, which we've seen go stale client-side.
+local function occupiedByOther(z, name)
+    for _, k in ipairs(z:GetChildren()) do
+        if (k:IsA("BasePart") or k:IsA("Model")) and k.Name ~= name then
+            return true
+        end
+    end
+    return false
+end
 local function candidateZones()
     if not SectionIndex then return {} end
     local sig = heldSig()
@@ -121,13 +132,15 @@ local function candidateZones()
         for _, z in ipairs(folder:GetChildren()) do
             if z:IsA("BasePart") and z:GetAttribute("SectionId") then
                 for pri, n in ipairs(names) do
-                    local ok, can = pcall(function()
-                        local zi = SectionIndex.resolveZone(z)
-                        return zi and SectionIndex.canPlace(n, zi)
-                    end)
-                    if ok and can then
-                        list[#list + 1] = { zone = z, name = n, pri = pri }
-                        break
+                    if not occupiedByOther(z, n) then
+                        local ok, can = pcall(function()
+                            local zi = SectionIndex.resolveZone(z)
+                            return zi and SectionIndex.canPlace(n, zi)
+                        end)
+                        if ok and can then
+                            list[#list + 1] = { zone = z, name = n, pri = pri }
+                            break
+                        end
                     end
                 end
             end
