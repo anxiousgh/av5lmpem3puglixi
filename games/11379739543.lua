@@ -284,8 +284,10 @@ do
         Callback = function(v) tagReturn = v end })
 
     local SecJ = Sub:Section({ Name = "Bomb juke (while holding)", Side = 2 })
-    SecJ:Toggle({ Name = "Look away from nearest", Flag = "TBD_LookAway", Default = false,
+    local lookToggle = SecJ:Toggle({ Name = "Look away from nearest", Flag = "TBD_LookAway", Default = false,
         Callback = function(v) lookAway = v end })
+    lookToggle:Keybind({ Name = "Toggle look away", Flag = "TBD_LookAwayKey", Mode = "Toggle",
+        Default = Enum.KeyCode.Q, Callback = function() lookToggle:Set(not lookToggle.Value) end })
     SecJ:Label({ Name = "Aim-at key (hold)" }):Keybind({
         Name = "Look at nearest", Flag = "TBD_AimKey", Mode = "Hold", Default = Enum.KeyCode.E,
         Callback = function(state) aimHeld = state end })
