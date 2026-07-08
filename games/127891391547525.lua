@@ -108,7 +108,7 @@ end
 local function candidateZones()
     if not SectionIndex then return {} end
     local sig = heldSig()
-    if candCache.sig == sig and os.clock() - candCache.t < 2 then return candCache.list end
+    if candCache.sig == sig and os.clock() - candCache.t < 0.75 then return candCache.list end
     local list = {}
     local okZ, folder = pcall(SectionIndex.getZonesFolder)
     if okZ and folder then
@@ -144,31 +144,34 @@ local function surfacePoint(z)
         (math.random() - 0.5) * z.Size.Z * 0.4))
     return Vector3.new(p.X, sy, p.Z)
 end
--- physical shelf model for a zone: SectionId "A/B/..." -> Shelves.A.B
-local function fixtureFor(z)
+-- the actual shelf a zone belongs to: SectionId "A/B/C/..." ->
+-- Shelves.A.B.C (e.g. ProduceSmallWedge/Fixture_10/Shelf1); falls back to the
+-- fixture model when the shelf part is missing
+local function shelfFor(z)
     local id = z:GetAttribute("SectionId")
-    local a, b = id and id:match("^([^/]+)/([^/]+)")
+    local a, b, c = id and id:match("^([^/]+)/([^/]+)/([^/]+)")
     if not a then return nil end
     local store = workspace:FindFirstChild("StoreMaps")
     store = store and store:FindFirstChild("HardStore")
     local shelves = store and store:FindFirstChild("Shelves")
     local sub = shelves and shelves:FindFirstChild(a)
-    return sub and sub:FindFirstChild(b)
+    local fix = sub and sub:FindFirstChild(b)
+    return fix and ((c and fix:FindFirstChild(c)) or fix) or nil
 end
 
 -- ============================================================
 --  AUTO CLEAN  -- pickup + shelve, jittered pacing, real reach only.
 --  Pickup optionally restricted to the selected categories.
 -- ============================================================
-local pickupOn, pickupDelay, autoRange = false, 0.4, 12
-local placeOn, placeDelay = false, 0.55
+local pickupOn, pickupDelay, autoRange = false, 0.15, 12
+local placeOn, placeDelay = false, 0.2
 local catFilterOn = false                  -- pickup only selected categories
 local nextPick, nextPlace = 0, 0
 local itemCD = {}                          -- [item] = retry-not-before (server ignored us)
 local lastTriedZone = nil
 
 track(Remotes.PlaceRejected.OnClientEvent:Connect(function()
-    if lastTriedZone then zoneCD[lastTriedZone] = os.clock() + 12; lastTriedZone = nil end
+    if lastTriedZone then zoneCD[lastTriedZone] = os.clock() + 6; lastTriedZone = nil end
     candCache.sig = nil                    -- claim state was stale; recompute
 end))
 
@@ -193,7 +196,7 @@ track(RunService.Heartbeat:Connect(function()
             end
         end
         if best then
-            itemCD[best] = now + 3
+            itemCD[best] = now + 1.5
             Remotes.PickupItem:FireServer(best)
         end
     end
@@ -212,45 +215,52 @@ track(RunService.Heartbeat:Connect(function()
         end
         if best then
             lastTriedZone = best
-            zoneCD[best] = now + 1.5       -- brief self-cooldown; rejection extends it
+            zoneCD[best] = now + 0.8       -- brief self-cooldown; rejection extends it
             Remotes.PlaceItem:FireServer(best, surfacePoint(best))
         end
     end
 end))
 
 -- ============================================================
---  SHELF FINDER  -- arced two-layer beam from you to the nearest valid shelf
---  for the held stack (any distance), pulsing highlight on the target zone
---  and a softer one on the shelf fixture it belongs to. Pure client visuals.
+--  SHELF FINDER  -- straight tracer-style beam (same look as the Hood Customs
+--  fake bullet tracers: glow halo + white-hot core + scrolling energy texture)
+--  from you to the nearest valid shelf for the held stack, pulsing highlight
+--  on the target zone and one on the actual shelf it maps to. Client visuals.
 -- ============================================================
 local finderOn = false
-local beamPart, beamCore, beamGlow, a0char, a1
+local beamPart, beams, a0char, a1
 local zoneHl, fixHl
 do
     beamPart = Instance.new("Part")
     beamPart.Anchored = true; beamPart.CanCollide = false; beamPart.CanQuery = false
     beamPart.CanTouch = false; beamPart.Transparency = 1; beamPart.Size = Vector3.new(0.2, 0.2, 0.2)
-    a1 = Instance.new("Attachment"); a1.Axis = Vector3.yAxis; a1.Parent = beamPart
+    a1 = Instance.new("Attachment"); a1.Parent = beamPart
 
-    local grad = ColorSequence.new({
-        ColorSequenceKeypoint.new(0,   Color3.fromRGB(170, 140, 255)),
-        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(120, 220, 255)),
-        ColorSequenceKeypoint.new(1,   Color3.fromRGB(170, 140, 255)),
-    })
-    beamCore = Instance.new("Beam")
-    beamCore.Attachment1 = a1; beamCore.Width0 = 0.12; beamCore.Width1 = 0.35
-    beamCore.FaceCamera = true; beamCore.Segments = 24; beamCore.LightEmission = 1
-    beamCore.Transparency = NumberSequence.new(0.1)
-    beamCore.Color = grad; beamCore.Enabled = false; beamCore.Parent = beamPart
-
-    beamGlow = Instance.new("Beam")
-    beamGlow.Attachment1 = a1; beamGlow.Width0 = 0.6; beamGlow.Width1 = 1.4
-    beamGlow.FaceCamera = true; beamGlow.Segments = 24; beamGlow.LightEmission = 1
-    beamGlow.Transparency = NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 0.75), NumberSequenceKeypoint.new(0.5, 0.6),
-        NumberSequenceKeypoint.new(1, 0.75),
-    })
-    beamGlow.Color = grad; beamGlow.Enabled = false; beamGlow.Parent = beamPart
+    local col = Color3.fromRGB(170, 140, 255)
+    local whiteHot = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, col), ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)),
+        ColorSequenceKeypoint.new(1, col) })
+    local TEX = "rbxassetid://446111271"   -- soft energy streak (same as tracers)
+    beams = {}
+    local function mkBeam(width, transp, textured, colSeq)
+        local b = Instance.new("Beam")
+        b.Attachment1 = a1
+        b.LightEmission, b.LightInfluence, b.FaceCamera, b.Segments = 1, 0, true, 4
+        b.Width0, b.Width1 = width, width
+        b.Color = colSeq or ColorSequence.new(col)
+        b.Transparency = NumberSequence.new(transp or 0)
+        if textured then pcall(function()
+            b.Texture, b.TextureMode = TEX, Enum.TextureMode.Wrap
+            b.TextureLength, b.TextureSpeed = 4, 12   -- fast scroll = energy flow
+        end) end
+        b.Enabled = false; b.Parent = beamPart
+        beams[#beams + 1] = b
+        return b
+    end
+    -- "Laser" style: soft halo + solid hot core + scrolling energy line
+    mkBeam(0.9, 0.6)
+    mkBeam(0.3, 0, false, whiteHot)
+    mkBeam(0.14, 0, true)
     beamPart.Parent = workspace
 
     zoneHl = Instance.new("Highlight")     -- highlights render even on invisible parts
@@ -260,8 +270,8 @@ do
     pcall(function() zoneHl.Parent = uiParent() end)
 
     fixHl = Instance.new("Highlight")
-    fixHl.FillColor = Color3.fromRGB(170, 140, 255); fixHl.OutlineColor = Color3.fromRGB(170, 140, 255)
-    fixHl.FillTransparency = 0.92; fixHl.OutlineTransparency = 0.25
+    fixHl.FillColor = Color3.fromRGB(170, 140, 255); fixHl.OutlineColor = Color3.fromRGB(230, 220, 255)
+    fixHl.FillTransparency = 0.6; fixHl.OutlineTransparency = 0
     fixHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; fixHl.Enabled = false
     pcall(function() fixHl.Parent = uiParent() end)
 
@@ -270,9 +280,9 @@ do
         local hrp = myHRP()
         local active = finderOn and hrp and #held > 0
 
-        -- retarget on a slow tick; animate every frame
+        -- retarget on a fast tick; animate every frame
         acc += dt
-        if acc >= 0.25 then
+        if acc >= 0.1 then
             acc = 0
             target = nil
             if active then
@@ -288,7 +298,9 @@ do
         end
 
         if not (active and target) then
-            if beamCore.Enabled then beamCore.Enabled = false; beamGlow.Enabled = false end
+            if beams[1].Enabled then
+                for _, b in ipairs(beams) do b.Enabled = false end
+            end
             if zoneHl.Enabled then zoneHl.Enabled = false; zoneHl.Adornee = nil end
             if fixHl.Enabled then fixHl.Enabled = false; fixHl.Adornee = nil end
             return
@@ -296,32 +308,24 @@ do
 
         if not a0char or a0char.Parent ~= hrp then
             if a0char then a0char:Destroy() end
-            a0char = Instance.new("Attachment")
-            a0char.Axis = Vector3.yAxis; a0char.Parent = hrp
-            beamCore.Attachment0 = a0char; beamGlow.Attachment0 = a0char
+            a0char = Instance.new("Attachment"); a0char.Parent = hrp
+            for _, b in ipairs(beams) do b.Attachment0 = a0char end
         end
 
-        local tpos = Vector3.new(target.Position.X,
+        beamPart.Position = Vector3.new(target.Position.X,
             target:GetAttribute("SurfaceY") or target.Position.Y, target.Position.Z)
-        beamPart.Position = tpos
+        for _, b in ipairs(beams) do
+            if not b.Enabled then b.Enabled = true end
+        end
 
-        -- arc height scales with distance; gentle width/glow pulse
-        local dist = (tpos - hrp.Position).Magnitude
-        local arc = math.clamp(dist * 0.3, 2, 14)
         local s = 0.5 + 0.5 * math.sin(os.clock() * 4)
-        beamCore.CurveSize0 = arc;  beamCore.CurveSize1 = -arc
-        beamGlow.CurveSize0 = arc;  beamGlow.CurveSize1 = -arc
-        beamCore.Width0 = 0.1 + 0.08 * s;  beamCore.Width1 = 0.3 + 0.15 * s
-        beamGlow.Width0 = 0.5 + 0.3 * s;   beamGlow.Width1 = 1.2 + 0.5 * s
-        beamCore.Enabled = true; beamGlow.Enabled = true
-
         zoneHl.FillTransparency = 0.35 + 0.35 * s
         if zoneHl.Adornee ~= target then zoneHl.Adornee = target end
         zoneHl.Enabled = true
 
-        local fix = fixtureFor(target)
-        if fixHl.Adornee ~= fix then fixHl.Adornee = fix end
-        fixHl.Enabled = fix ~= nil
+        local shelf = shelfFor(target)
+        if fixHl.Adornee ~= shelf then fixHl.Adornee = shelf end
+        fixHl.Enabled = shelf ~= nil
     end))
 end
 
@@ -342,7 +346,7 @@ end
 do
     local acc = 0
     track(RunService.Heartbeat:Connect(function(dt)
-        acc += dt; if acc < 0.35 then return end
+        acc += dt; if acc < 0.15 then return end
         acc = 0
         local hrp = myHRP()
         if not (catEspOn and hrp) then
@@ -408,13 +412,13 @@ do
         Default = Enum.KeyCode.V, Callback = function() pickToggle:Set(not pickToggle.Value) end })
     SecA:Toggle({ Name = "Selected categories only", Flag = "SM_CatFilter", Default = false,
         Callback = function(v) catFilterOn = v end })
-    SecA:Slider({ Name = "Pickup delay", Flag = "SM_PickDelay", Min = 200, Max = 1500, Default = 400, Decimals = 0, Suffix = " ms",
+    SecA:Slider({ Name = "Pickup delay", Flag = "SM_PickDelay", Min = 50, Max = 1000, Default = 150, Decimals = 0, Suffix = " ms",
         Callback = function(v) pickupDelay = v / 1000 end })
     local placeToggle = SecA:Toggle({ Name = "Auto shelve held items", Flag = "SM_AutoPlace", Default = false,
         Callback = function(v) placeOn = v end })
     placeToggle:Keybind({ Name = "Toggle auto shelve", Flag = "SM_AutoPlaceKey", Mode = "Toggle",
         Default = Enum.KeyCode.B, Callback = function() placeToggle:Set(not placeToggle.Value) end })
-    SecA:Slider({ Name = "Shelve delay", Flag = "SM_PlaceDelay", Min = 250, Max = 1500, Default = 550, Decimals = 0, Suffix = " ms",
+    SecA:Slider({ Name = "Shelve delay", Flag = "SM_PlaceDelay", Min = 50, Max = 1000, Default = 200, Decimals = 0, Suffix = " ms",
         Callback = function(v) placeDelay = v / 1000 end })
     SecA:Slider({ Name = "Act range", Flag = "SM_Range", Min = 4, Max = 18, Default = 12, Decimals = 0, Suffix = " studs",
         Callback = function(v) autoRange = v end })
