@@ -1110,10 +1110,10 @@ end
 local VisualsPage = Window:Page({ Name = "Visuals" })
 -- subpages pre-declared here to control tab order: ESP first, Misc last
 local EspSub    = VisualsPage:SubPage({ Name = "ESP" })
-local FovSub    = VisualsPage:SubPage({ Name = "FOV Settings" })
-local CursorSub = VisualsPage:SubPage({ Name = "Custom Cursor" })
 local SrvPosSub = VisualsPage:SubPage({ Name = "Server Pos" })
 local WorldSub  = VisualsPage:SubPage({ Name = "World" })
+local FovSub    = VisualsPage:SubPage({ Name = "FOV Settings" })
+local CursorSub = VisualsPage:SubPage({ Name = "Custom Cursor" })
 local MiscSub   = VisualsPage:SubPage({ Name = "Misc" })
 
 -- ---- FOV Settings: global look for every FOV circle in the hub (size stays
