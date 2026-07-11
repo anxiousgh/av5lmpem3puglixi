@@ -339,7 +339,14 @@ local Esp = {
     enabled = false, box = true, names = false, distance = false, health = false,
     teamCheck = false, color = Color3.fromRGB(248, 212, 255),
     boxType = "Full",                 -- "Full" | "Corner" | "Solid"
-    fillOpacity = 0.4,                -- Drawing alpha for the "Solid" filled box
+    boxThickness = 1, cornerRadius = 0, textSize = 13,
+    avatar = false, avatarSize = 24,  -- round headshot chip above the box
+    -- fill / motion: same knobs as Library.FOV.Settings (the box is a GUI frame
+    -- + UIStroke so the fill AND outline can carry a spinning gradient)
+    fill = false, fillOpacity = 0.4,
+    gradient = true, color2 = Color3.fromRGB(50, 50, 50),
+    spin = true, spinSpeed = 114,     -- degrees / second
+    rainbow = false, rainbowSpeed = 1,
     tracer = false, tracerOrigin = "Bottom",   -- "Bottom" | "Top" | "Mouse"
     chams = false,                    -- in-game Highlight
     chamsFill = Color3.fromRGB(248, 212, 255),
@@ -436,23 +443,24 @@ do
     local function add(plr)
         if plr == LocalPlayer or objs[plr] or not hasDrawing then return end
         objs[plr] = {
-            box    = mkDraw("Square", { Thickness = 1, Filled = false, Visible = false, Transparency = 1 }),
-            solid  = mkDraw("Square", { Thickness = 0, Filled = true, Visible = false }),
             name   = mkDraw("Text",   { Size = 13, Center = true, Outline = true, Visible = false }),
             dist   = mkDraw("Text",   { Size = 12, Center = true, Outline = true, Visible = false }),
             health = mkDraw("Square", { Thickness = 1, Filled = true, Visible = false }),
             tracer = lineFrame(),
-            corners = nil, skel = nil, chams = nil, glow = nil,   -- created lazily when used
+            -- created lazily when used
+            frame = nil, avatar = nil, corners = nil, skel = nil, chams = nil, glow = nil,
         }
     end
     local function remove(plr)
         local o = objs[plr]; if not o then return end
-        for _, k in ipairs({ "box", "solid", "name", "dist", "health" }) do
+        for _, k in ipairs({ "name", "dist", "health" }) do
             if o[k] then pcall(function() o[k]:Remove() end) end   -- Drawing objects
         end
         if o.tracer then killLine(o.tracer) end
         if o.corners then for _, d in ipairs(o.corners) do killLine(d) end end
         if o.skel then for _, d in ipairs(o.skel) do killLine(d) end end
+        if o.frame then pcall(function() o.frame:Destroy() end) end
+        if o.avatar then pcall(function() o.avatar:Destroy() end) end
         if o.chams then pcall(function() o.chams:Destroy() end) end
         if o.glow then pcall(function() o.glow:Destroy() end) end
         objs[plr] = nil
@@ -467,6 +475,53 @@ do
         if o.skel then return o.skel end
         local s = {}; for i = 1, #BONES do s[i] = lineFrame() end
         o.skel = s; return s
+    end
+    -- the box is a GUI Frame + UIStroke instead of a Drawing.Square: like the
+    -- shared FOV renderer, that lets both the fill and the outline carry a
+    -- (spinning) UIGradient. Frame + stroke stay WHITE -- the gradients
+    -- multiply the base colour, so a non-white base would darken them.
+    local function ensureBoxFrame(o)
+        if o.frame then return o.frame end
+        local f = Instance.new("Frame")
+        f.AnchorPoint = Vector2.new(0, 0)
+        f.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        f.BackgroundTransparency = 1
+        f.BorderSizePixel = 0
+        f.Visible = false
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 0)
+        corner.Parent = f
+        local fg = Instance.new("UIGradient")
+        fg.Parent = f
+        local st = Instance.new("UIStroke")
+        st.Color = Color3.fromRGB(255, 255, 255)
+        st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        st.Parent = f
+        local sg = Instance.new("UIGradient")
+        sg.Parent = st
+        f.Parent = espGui
+        o.frame, o.frameCorner, o.fillGrad, o.stroke, o.strokeGrad = f, corner, fg, st, sg
+        return f
+    end
+    local function ensureAvatar(o, plr)   -- round headshot chip above the box
+        if o.avatar then return o.avatar end
+        local img = Instance.new("ImageLabel")
+        img.AnchorPoint = Vector2.new(0.5, 1)
+        img.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+        img.BackgroundTransparency = 0.25
+        img.BorderSizePixel = 0
+        img.Image = "rbxthumb://type=AvatarHeadShot&id=" .. plr.UserId .. "&w=48&h=48"
+        img.Visible = false
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(1, 0)
+        corner.Parent = img
+        local st = Instance.new("UIStroke")
+        st.Thickness = 1
+        st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        st.Parent = img
+        img.Parent = espGui
+        o.avatar, o.avatarStroke = img, st
+        return img
     end
     local function ensureChams(o, char)   -- in-game Highlight
         -- key off the CURRENT character: on respawn the old char (and its
@@ -515,22 +570,47 @@ do
                              -- tanks FPS) -- only the closest few get the glow aura
 
     local function hideObjs(o)
-        o.box.Visible = false; o.solid.Visible = false; o.name.Visible = false
-        o.dist.Visible = false; o.health.Visible = false; o.tracer.Visible = false
+        o.name.Visible = false; o.dist.Visible = false
+        o.health.Visible = false; o.tracer.Visible = false
+        if o.frame then o.frame.Visible = false end
+        if o.avatar then o.avatar.Visible = false end
         if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
         if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
     end
 
     local espWasActive = false
     local chamsTopC, glowTopC, chamsTopT = nil, nil, 0
-    track(RunService.RenderStepped:Connect(function()
+    -- per-frame shared look (mirrors the Library.FOV render loop): one gradient
+    -- sequence + rotation + rainbow hue computed once, applied to every target
+    local espRot, espHue = 0, 0
+    local espSeq, espCol = nil, Esp.color
+    local function setBoxFrame(o, x, y, w, h, strokeOn, fillOn)
+        local f = ensureBoxFrame(o)
+        f.Position = UDim2.fromOffset(x, y)
+        f.Size = UDim2.fromOffset(w, h)
+        f.BackgroundTransparency = fillOn and math.clamp(1 - Esp.fillOpacity, 0, 1) or 1
+        o.fillGrad.Color = espSeq
+        o.fillGrad.Rotation = espRot
+        local st = o.stroke
+        st.Enabled = strokeOn and Esp.boxThickness > 0
+        if st.Enabled then
+            st.Thickness = Esp.boxThickness
+            o.strokeGrad.Color = espSeq
+            o.strokeGrad.Rotation = espRot
+        end
+        if o.frameCorner.CornerRadius.Offset ~= Esp.cornerRadius then
+            o.frameCorner.CornerRadius = UDim.new(0, Esp.cornerRadius)
+        end
+        f.Visible = true
+    end
+    track(RunService.RenderStepped:Connect(function(dt)
         -- ESP off: hide everything ONCE, then the loop is a single cheap check per
         -- frame instead of a full property sweep over every player
         if not Esp.enabled then
             if espWasActive then
                 espWasActive = false
                 for _, o in pairs(objs) do
-                    if o.box then hideObjs(o); o._shown = false end
+                    if o.name then hideObjs(o); o._shown = false end
                     if o.chams then o.chams.Enabled = false end
                     if o.glow then pcall(function() o.glow:Destroy() end); o.glow = nil end
                 end
@@ -538,6 +618,18 @@ do
             return
         end
         espWasActive = true
+        dt = dt or (1 / 60)
+        espRot = (espRot + (Esp.spin and (Esp.spinSpeed * dt) or 0)) % 360
+        local c1, c2
+        if Esp.rainbow then
+            espHue = (espHue + (Esp.rainbowSpeed or 1) * dt * 0.15) % 1
+            c1 = Color3.fromHSV(espHue, 0.8, 1)
+            c2 = Color3.fromHSV((espHue + 0.15) % 1, 0.8, 1)
+        else
+            c1, c2 = Esp.color, Esp.color2
+        end
+        espSeq = Esp.gradient and ColorSequence.new(c1, c2) or ColorSequence.new(c1)
+        espCol = c1
         local cam = Workspace.CurrentCamera
         local vp = cam.ViewportSize
         local mouse = UserInputService:GetMouseLocation()
@@ -577,7 +669,7 @@ do
         end
 
         for plr, o in pairs(objs) do
-            if not o.box then continue end
+            if not o.name then continue end
             -- hide everything first -- but only if something was drawn last frame
             -- (spares the full Visible=false sweep for off/inactive players)
             if o._shown then o._shown = false; hideObjs(o) end
@@ -630,11 +722,13 @@ do
                     if Esp.tracerOrigin == "Top" then origin = Vector2.new(vp.X / 2, 0)
                     elseif Esp.tracerOrigin == "Mouse" then origin = mouse
                     else origin = Vector2.new(vp.X / 2, vp.Y) end
-                    setLine(o.tracer, origin, Vector2.new(center.X, y + height), Esp.color, 1)
+                    setLine(o.tracer, origin, Vector2.new(center.X, y + height), espCol, 1)
                 end
 
                 if on then
-                    -- box: full outline / corner brackets / solid filled box
+                    -- box: full outline / corner brackets / solid filled box.
+                    -- Full + Solid share one GUI frame (gradient stroke + fill);
+                    -- Corner keeps the bracket lines and can add the fill under them.
                     if not Esp.box then
                         -- box disabled; leave it hidden
                     elseif Esp.boxType == "Corner" then
@@ -647,30 +741,34 @@ do
                             { x + width, y + height, x + width - cl, y + height }, { x + width, y + height, x + width, y + height - cl }, -- BR
                         }
                         for i, p in ipairs(pts) do
-                            setLine(c[i], Vector2.new(p[1], p[2]), Vector2.new(p[3], p[4]), Esp.color)
+                            setLine(c[i], Vector2.new(p[1], p[2]), Vector2.new(p[3], p[4]), espCol, Esp.boxThickness)
                         end
-                    elseif Esp.boxType == "Solid" then
-                        -- filled translucent box (a Drawing.Square -- no flicker,
-                        -- unlike the triangle-fan silhouette)
-                        o.solid.Color = Esp.color
-                        o.solid.Size = Vector2.new(width, height)
-                        o.solid.Position = Vector2.new(x, y)
-                        o.solid.Transparency = Esp.fillOpacity
-                        o.solid.Visible = true
+                        if Esp.fill then setBoxFrame(o, x, y, width, height, false, true) end
                     else
-                        o.box.Color = Esp.color
-                        o.box.Size = Vector2.new(width, height)
-                        o.box.Position = Vector2.new(x, y)
-                        o.box.Visible = true
+                        local solid = Esp.boxType == "Solid"
+                        setBoxFrame(o, x, y, width, height, not solid, solid or Esp.fill)
                     end
 
+                    if Esp.avatar then
+                        local av = ensureAvatar(o, plr)
+                        if av.Size.X.Offset ~= Esp.avatarSize then
+                            av.Size = UDim2.fromOffset(Esp.avatarSize, Esp.avatarSize)
+                        end
+                        av.Position = UDim2.fromOffset(
+                            center.X, y - (Esp.names and (Esp.textSize + 4) or 2))
+                        o.avatarStroke.Color = espCol
+                        av.Visible = true
+                    end
                     if Esp.names then
-                        o.name.Text = plr.Name; o.name.Color = Esp.color
-                        o.name.Position = Vector2.new(center.X, y - 14); o.name.Visible = true
+                        o.name.Text = plr.Name; o.name.Color = espCol
+                        o.name.Size = Esp.textSize
+                        o.name.Position = Vector2.new(center.X, y - Esp.textSize - 1)
+                        o.name.Visible = true
                     end
                     if Esp.distance then
                         local d = myHRP and math.floor((myHRP.Position - hrp.Position).Magnitude) or 0
-                        o.dist.Text = tostring(d) .. "m"; o.dist.Color = Esp.color
+                        o.dist.Text = tostring(d) .. "m"; o.dist.Color = espCol
+                        o.dist.Size = math.max(Esp.textSize - 1, 8)
                         o.dist.Position = Vector2.new(center.X, y + height + 2); o.dist.Visible = true
                     end
                     if Esp.health then
@@ -710,7 +808,7 @@ do
                             else
                                 local a, b = vpOf(p1), vpOf(p2)
                                 if a and b then
-                                    setLine(line, a, b, Esp.color)
+                                    setLine(line, a, b, espCol)
                                 else
                                     line.Visible = false
                                 end
@@ -1437,6 +1535,8 @@ do
     Sec:Dropdown({ Name = "Box style", Flag = "EspBoxType", Default = "Full", Multi = false,
         Items = { "Full", "Corner", "Solid" },
         Callback = function(v) Esp.boxType = (type(v) == "table" and v[1]) or v or "Full" end })
+    Sec:Toggle({ Name = "Avatar", Flag = "EspAvatar", Default = false,
+        Callback = function(v) Esp.avatar = v end })
     Sec:Toggle({ Name = "Names", Flag = "EspNames", Default = false,
         Callback = function(v) Esp.names = v end })
     Sec:Toggle({ Name = "Distance", Flag = "EspDistance", Default = false,
@@ -1450,7 +1550,18 @@ do
     Sec:Toggle({ Name = "Chams", Flag = "EspChams", Default = false,
         Callback = function(v) Esp.chams = v end })
 
-    local Sec2 = EspSub:Section({ Name = "Options", Side = 2 })
+    local SecC = EspSub:Section({ Name = "Chams", Side = 1 })
+    SecC:Label({ Name = "Fill" }):Colorpicker({
+        Flag = "EspChamsFill", Default = Color3.fromRGB(248, 212, 255),
+        Callback = function(c) Esp.chamsFill = c end })
+    SecC:Label({ Name = "Outline" }):Colorpicker({
+        Flag = "EspChamsOutline", Default = Color3.fromRGB(255, 255, 255),
+        Callback = function(c) Esp.chamsOutline = c end })
+    SecC:Slider({ Name = "Opacity", Flag = "EspChamsOp",
+        Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
+        Callback = function(v) Esp.chamsTransparency = 1 - (v / 100) end })
+
+    local Sec2 = EspSub:Section({ Name = "Style", Side = 2 })
     Sec2:Toggle({ Name = "Team check", Flag = "EspTeam", Default = false,
         Callback = function(v) Esp.teamCheck = v end })
     Sec2:Dropdown({ Name = "Tracer origin", Flag = "EspTracerOrigin", Default = "Bottom", Multi = false,
@@ -1459,18 +1570,40 @@ do
     Sec2:Label({ Name = "ESP color" }):Colorpicker({
         Flag = "EspColor", Default = Color3.fromRGB(248, 212, 255),
         Callback = function(c) Esp.color = c end })
-    Sec2:Slider({ Name = "Solid box opacity", Flag = "EspFillOp",
+    Sec2:Toggle({ Name = "Gradient", Flag = "EspGradient", Default = true,
+        Callback = function(v) Esp.gradient = v end })
+    Sec2:Label({ Name = "Gradient color" }):Colorpicker({
+        Flag = "EspColor2", Default = Color3.fromRGB(50, 50, 50),
+        Callback = function(c) Esp.color2 = c end })
+    Sec2:Slider({ Name = "Box thickness", Flag = "EspBoxThickness",
+        Min = 1, Max = 6, Default = 1, Decimals = 0,
+        Callback = function(v) Esp.boxThickness = v end })
+    Sec2:Slider({ Name = "Corner radius", Flag = "EspCornerRadius",
+        Min = 0, Max = 12, Default = 0, Decimals = 0,
+        Callback = function(v) Esp.cornerRadius = v end })
+    Sec2:Slider({ Name = "Text size", Flag = "EspTextSize",
+        Min = 10, Max = 24, Default = 13, Decimals = 0,
+        Callback = function(v) Esp.textSize = v end })
+    Sec2:Slider({ Name = "Avatar size", Flag = "EspAvatarSize",
+        Min = 12, Max = 64, Default = 24, Decimals = 0,
+        Callback = function(v) Esp.avatarSize = v end })
+
+    local Sec3 = EspSub:Section({ Name = "Fill & Motion", Side = 2 })
+    Sec3:Toggle({ Name = "Fill", Flag = "EspFill", Default = false,
+        Callback = function(v) Esp.fill = v end })
+    Sec3:Slider({ Name = "Fill opacity", Flag = "EspFillOp",
         Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
         Callback = function(v) Esp.fillOpacity = v / 100 end })
-    Sec2:Label({ Name = "Chams fill" }):Colorpicker({
-        Flag = "EspChamsFill", Default = Color3.fromRGB(248, 212, 255),
-        Callback = function(c) Esp.chamsFill = c end })
-    Sec2:Label({ Name = "Chams outline" }):Colorpicker({
-        Flag = "EspChamsOutline", Default = Color3.fromRGB(255, 255, 255),
-        Callback = function(c) Esp.chamsOutline = c end })
-    Sec2:Slider({ Name = "Chams opacity", Flag = "EspChamsOp",
-        Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
-        Callback = function(v) Esp.chamsTransparency = 1 - (v / 100) end })
+    Sec3:Toggle({ Name = "Spin", Flag = "EspSpin", Default = true,
+        Callback = function(v) Esp.spin = v end })
+    Sec3:Slider({ Name = "Spin speed", Flag = "EspSpinSpeed",
+        Min = 0, Max = 720, Default = 114, Decimals = 0, Suffix = "/s",
+        Callback = function(v) Esp.spinSpeed = v end })
+    Sec3:Toggle({ Name = "Rainbow", Flag = "EspRainbow", Default = false,
+        Callback = function(v) Esp.rainbow = v end })
+    Sec3:Slider({ Name = "Rainbow speed", Flag = "EspRainbowSpeed",
+        Min = 1, Max = 20, Default = 1, Decimals = 0,
+        Callback = function(v) Esp.rainbowSpeed = v end })
 end
 
 -- ============================================================

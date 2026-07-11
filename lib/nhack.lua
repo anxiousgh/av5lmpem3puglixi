@@ -4002,15 +4002,41 @@ do
             -- distance, health and tracer. (Chams and skeleton aren't previewed:
             -- Highlights don't render in a ViewportFrame and skeleton needs live
             -- limb positions.)
+            -- box + stroke stay WHITE; the UIGradients carry the colour (same
+            -- trick as Library.FOV) so the preview mirrors gradient/spin/rainbow
             local OverlayBox = Library:Create("Frame", {
                 Name = "\0", Parent = Items["Background"].Instance, ZIndex = 5,
-                BackgroundColor3 = Color3.fromRGB(248, 212, 255),
+                BackgroundColor3 = Color3.fromRGB(255, 255, 255),
                 BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
                 AnchorPoint = Vector2.new(0.5, 0),
                 Position = UDim2.new(0.5, 0, 0.34, 0), Size = UDim2.new(0.24, 0, 0.42, 0),
             })
+            local OverlayCorner = Library:Create("UICorner", {
+                Name = "\0", Parent = OverlayBox.Instance, CornerRadius = UDim.new(0, 0),
+            })
+            local OverlayFillGrad = Library:Create("UIGradient", {
+                Name = "\0", Parent = OverlayBox.Instance,
+            })
             local OverlayStroke = Library:Create("UIStroke", {
                 Name = "\0", Parent = OverlayBox.Instance, Thickness = 1,
+                Color = Color3.fromRGB(255, 255, 255),
+            })
+            local OverlayStrokeGrad = Library:Create("UIGradient", {
+                Name = "\0", Parent = OverlayStroke.Instance,
+            })
+            local OverlayAvatar = Library:Create("ImageLabel", {
+                Name = "\0", Parent = Items["Background"].Instance, ZIndex = 6,
+                BackgroundColor3 = Color3.fromRGB(20, 20, 25),
+                BackgroundTransparency = 0.25, BorderSizePixel = 0, Visible = false,
+                Image = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=48&h=48",
+                AnchorPoint = Vector2.new(0.5, 1),
+                Position = UDim2.new(0.5, 0, 0.335, -1), Size = UDim2.new(0, 24, 0, 24),
+            })
+            Library:Create("UICorner", {
+                Name = "\0", Parent = OverlayAvatar.Instance, CornerRadius = UDim.new(1, 0),
+            })
+            local OverlayAvatarStroke = Library:Create("UIStroke", {
+                Name = "\0", Parent = OverlayAvatar.Instance, Thickness = 1,
                 Color = Color3.fromRGB(248, 212, 255),
             })
             -- corner brackets (shown for the "Corner" style)
@@ -4065,23 +4091,57 @@ do
                 Size = UDim2.new(0, 1, 0.24, 0),
             })
 
-            Library:Connect(RunService.RenderStepped, function()
+            local PreviewRot, PreviewHue = 0, 0
+            Library:Connect(RunService.RenderStepped, function(DeltaTime)
                 local s = getgenv and getgenv().WH and getgenv().WH.espPreview
                 local on = (s and s.enabled and Items["ESPPreview"].Instance.Visible) and true or false
-                local col = (s and s.color) or Color3.fromRGB(248, 212, 255)
                 local style = (s and s.boxType) or "Full"
                 local showBox = on and (not s or s.box ~= false)
 
+                -- same per-frame look math as the live ESP loop
+                DeltaTime = DeltaTime or (1 / 60)
+                if not s or s.spin ~= false then
+                    PreviewRot = (PreviewRot + ((s and s.spinSpeed) or 114) * DeltaTime) % 360
+                end
+                local col, col2
+                if s and s.rainbow then
+                    PreviewHue = (PreviewHue + (s.rainbowSpeed or 1) * DeltaTime * 0.15) % 1
+                    col = Color3.fromHSV(PreviewHue, 0.8, 1)
+                    col2 = Color3.fromHSV((PreviewHue + 0.15) % 1, 0.8, 1)
+                else
+                    col = (s and s.color) or Color3.fromRGB(248, 212, 255)
+                    col2 = (s and s.color2) or Color3.fromRGB(50, 50, 50)
+                end
+                local seq = (not s or s.gradient ~= false) and ColorSequence.new(col, col2)
+                    or ColorSequence.new(col)
+                local th = (s and s.boxThickness) or 1
+                local textSize = (s and s.textSize) or Library.FontSize
+                local fillOn = style == "Solid" or (s and s.fill and true or false)
+
                 OverlayBox.Instance.Visible = showBox
-                OverlayBox.Instance.BackgroundColor3 = col
-                OverlayBox.Instance.BackgroundTransparency = (style == "Solid") and (1 - ((s and s.fillOpacity) or 0.4)) or 1
-                OverlayStroke.Instance.Color = col
+                OverlayBox.Instance.BackgroundTransparency = fillOn and (1 - ((s and s.fillOpacity) or 0.4)) or 1
+                OverlayCorner.Instance.CornerRadius = UDim.new(0, (s and s.cornerRadius) or 0)
+                OverlayFillGrad.Instance.Color = seq
+                OverlayFillGrad.Instance.Rotation = PreviewRot
                 OverlayStroke.Instance.Enabled = showBox and style ~= "Corner"
-                for _, c in ipairs(Corners) do
+                OverlayStroke.Instance.Thickness = th
+                OverlayStrokeGrad.Instance.Color = seq
+                OverlayStrokeGrad.Instance.Rotation = PreviewRot
+                for i, c in ipairs(Corners) do
                     c.Instance.Visible = showBox and style == "Corner"
                     c.Instance.BackgroundColor3 = col
+                    -- odd entries are the horizontal bracket arms, even the vertical
+                    c.Instance.Size = (i % 2 == 1) and UDim2.new(0.3, 0, 0, th) or UDim2.new(0, th, 0.3, 0)
                 end
 
+                local showAvatar = on and (s.avatar and true or false)
+                OverlayAvatar.Instance.Visible = showAvatar
+                if showAvatar then
+                    local avSize = (s and s.avatarSize) or 24
+                    OverlayAvatar.Instance.Size = UDim2.new(0, avSize, 0, avSize)
+                    OverlayAvatar.Instance.Position = UDim2.new(0.5, 0, 0.335, s.names and -(textSize + 4) or -1)
+                    OverlayAvatarStroke.Instance.Color = col
+                end
                 OverlayName.Instance.Visible = on and (s.names and true or false)
                 OverlayDist.Instance.Visible = on and (s.distance and true or false)
                 OverlayHealth.Instance.Visible = on and (s.health and true or false)
@@ -4090,7 +4150,9 @@ do
                 if on then
                     OverlayName.Instance.TextColor3 = col
                     OverlayName.Instance.Text = LocalPlayer.Name
+                    OverlayName.Instance.TextSize = textSize
                     OverlayDist.Instance.TextColor3 = col
+                    OverlayDist.Instance.TextSize = math.max(textSize - 1, 8)
                 end
             end)
 
