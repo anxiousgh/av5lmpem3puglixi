@@ -1,19 +1,18 @@
 -- ============================================================
 --  games/5315046213.lua  --  Strafe / bhop game (Source-style air physics)
 --
---  Decoded live (2026-07-11). The game has a built-in strafe GAUGE; its needle =
---    (your yaw rate / tickrate) / atan2(mv, speed)
---  (from the "Gauges" module). needle 1 = white (optimal), >1 red (too fast),
---  <1 blue (too slow). So the OPTIMAL mouse turn rate is:
---    optimal_yaw_rate(rad/s) = atan2(mv, speed) * tickrate      -- SHRINKS as you speed up
---  where `speed` is the INTERNAL velocity (read from the movement Simulation
---  object; world speed from position deltas is aliased garbage) and mv/tickrate
---  come from the current style (Autohop: mv=2.7, tickrate=100). Verified against a
---  live run (at internal speed 40, optimal ~386 deg/s matched a perfect-white frame).
+--  Decoded live (2026-07-11) incl. the on-screen gauge (video). The strafe GAUGE
+--  needle = (your yaw rate / tickrate) / atan2(mv, speed)  [from the "Gauges"
+--  module]. white = 1 (optimal), red >1 (too fast), blue <1 (too slow). So:
+--    optimal_yaw_rate(rad/s) = atan2(mv, speed) * tickrate      -- shrinks as you speed up
+--  CRITICAL: `speed` is the game's real horizontal speed (its "u/s" readout, ~8-29
+--  in the clip) = the WORLD speed from HRP position deltas -- NOT the memory-scanned
+--  "Simulation.Velocity" (that read ~106, a decoy; using it made v6 slow you down).
+--  Style Autohop: mv=2.7, tickrate=100.
 --
---  Strafe ASSIST v6 (closed loop on the game's own math): you steer; while Space is
---  held and airborne it reads your live internal speed + your turn, and boosts/slows
---  your mouse so your turn rate tracks the optimal (holds the needle white).
+--  Strafe ASSIST v7: you steer; while Space is held + airborne it reads your real
+--  turn + your smoothed world speed, and boosts/slows your mouse so your turn rate
+--  matches the optimal -> holds the needle white. No memory scanning.
 -- ============================================================
 local ctx     = ({ ... })[1]
 local Library = ctx.Library
@@ -29,17 +28,18 @@ local LocalPlayer = Players.LocalPlayer
 local conns = {}
 local function track(c) conns[#conns + 1] = c; return c end
 
-local PX_PER_DEG = 6.6   -- mousemoverel(120) -> ~18 deg camera turn
+local PX_PER_DEG = 6.6
 
 local S = {
     bhop = false,
     assist = false,
-    strength = 0.8,     -- 0 = all you, 1 = force optimal
-    maxAngle = 25,      -- cap deg/frame the assist may add/remove
-    minSpeed = 6,       -- min INTERNAL speed to activate
-    autoKey = true,     -- auto-hold A/D matching your turn direction
-    mouseSign = 1,      -- calibration for autoKey / turn direction
-    mv = 2.7, tickrate = 100,   -- style fallbacks if the Simulation isn't readable
+    strength = 0.7,
+    maxAngle = 30,      -- cap deg/frame the assist adds/removes
+    minSpeed = 6,       -- min world speed (u/s) to activate
+    autoKey = true,
+    mouseSign = 1,
+    mv = 2.7, tickrate = 100,
+    _spd = 0,           -- live smoothed speed (readback)
 }
 do local g = getgenv and getgenv(); if g then g.WH = g.WH or {}; g.WH.strafe = S end end
 
@@ -47,36 +47,12 @@ local function myHRP()
     local c = LocalPlayer.Character
     return c and c:FindFirstChild("HumanoidRootPart")
 end
-
--- ---- find the live movement Simulation (obfuscated; pick the one that's moving) ----
-local simCandidates = {}
-local function scanSims()
-    simCandidates = {}
-    pcall(function()
-        for _, v in ipairs(getgc(true)) do
-            if type(v) == "table" and typeof(rawget(v, "Velocity")) == "Vector3"
-                and rawget(v, "GameMechanics") ~= nil then
-                simCandidates[#simCandidates + 1] = v
-            end
-        end
-    end)
-end
-local function liveSim()
-    local best, bestV = nil, 0.5
-    for _, s in ipairs(simCandidates) do
-        local ok, v = pcall(function() local vv = s.Velocity; return math.sqrt(vv.X * vv.X + vv.Z * vv.Z) end)
-        if ok and v > bestV then bestV = v; best = s end
-    end
-    return best, bestV
-end
-
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 local function grounded(pos)
     rayParams.FilterDescendantsInstances = { LocalPlayer.Character }
     return Workspace:Raycast(pos, Vector3.new(0, -5, 0), rayParams) ~= nil
 end
-
 local heldKey = nil
 local function holdStrafe(keyCode)
     if heldKey == keyCode then return end
@@ -92,37 +68,34 @@ local function tapJump()
     pcall(function() VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game) end)
     pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game) end)
 end
-
 local function camYaw()
     local lv = Workspace.CurrentCamera.CFrame.LookVector
     return math.atan2(lv.X, lv.Z)
 end
 
-scanSims()
-local lastYaw, _lastInjPx, _rescanT = camYaw(), 0, 0
+-- world speed is spiky (anchored HRP CFrame updates at the 100Hz tick, not per
+-- render frame), so heavily smooth it to match the game's steady u/s readout.
+local lastPos, speedEMA, lastYaw, _lastInjPx = nil, 0, camYaw(), 0
 
 track(RunService.RenderStepped:Connect(function(dt)
     local hrp = myHRP()
-    local onGround = hrp and grounded(hrp.Position)
-    if S.bhop and hrp and onGround then tapJump() end
+    if not hrp then lastPos = nil; releaseStrafe(); _lastInjPx = 0; return end
+    local pos = hrp.Position
+    if lastPos then
+        local inst = Vector3.new(pos.X - lastPos.X, 0, pos.Z - lastPos.Z).Magnitude / math.max(dt, 1 / 240)
+        speedEMA = speedEMA * 0.88 + inst * 0.12
+    end
+    lastPos = pos
+    S._spd = math.floor(speedEMA)
+    local onGround = grounded(pos)
 
-    if not S.assist or not hrp or onGround or not UIS:IsKeyDown(Enum.KeyCode.Space) then
+    if S.bhop and onGround then tapJump() end
+
+    if not S.assist or onGround or not UIS:IsKeyDown(Enum.KeyCode.Space) or speedEMA < S.minSpeed then
         if S.autoKey then releaseStrafe() end
         lastYaw = camYaw(); _lastInjPx = 0
         return
     end
-
-    local sim, ispeed = liveSim()
-    if not sim then   -- lost it (respawn/new run) -> re-scan occasionally
-        if os.clock() - _rescanT > 1 then _rescanT = os.clock(); scanSims() end
-        lastYaw = camYaw(); _lastInjPx = 0
-        return
-    end
-    if ispeed < S.minSpeed then lastYaw = camYaw(); _lastInjPx = 0; return end
-
-    local si = sim.GameMechanics and sim.GameMechanics.StyleInfo
-    local mv = (si and si.mv) or S.mv
-    local tickrate = (si and si.tickrate) or S.tickrate
 
     -- your real turn this frame (camera yaw delta minus what our injection caused)
     local yaw = camYaw()
@@ -130,19 +103,17 @@ track(RunService.RenderStepped:Connect(function(dt)
     lastYaw = yaw
     local playerDeg = rawDeg - (_lastInjPx / PX_PER_DEG)
 
-    if math.abs(playerDeg) < 0.05 then   -- you're not turning -> nothing to optimize
+    if math.abs(playerDeg) < 0.05 then
         if S.autoKey then releaseStrafe() end
         _lastInjPx = 0
         return
     end
 
-    local dir = (playerDeg * S.mouseSign) > 0 and 1 or -1
-    if S.autoKey then holdStrafe(dir > 0 and Enum.KeyCode.D or Enum.KeyCode.A) end
+    if S.autoKey then holdStrafe((playerDeg * S.mouseSign) > 0 and Enum.KeyCode.D or Enum.KeyCode.A) end
 
-    -- optimal turn this frame = atan2(mv, speed) * tickrate * dt  (in YOUR direction)
-    local optimalDeg = math.deg(math.atan2(mv, ispeed) * tickrate) * dt * (playerDeg > 0 and 1 or -1)
-    local injectDeg = (optimalDeg - playerDeg) * S.strength
-    injectDeg = math.clamp(injectDeg, -S.maxAngle, S.maxAngle)
+    -- optimal turn this frame, in YOUR direction
+    local optimalDeg = math.deg(math.atan2(S.mv, speedEMA) * S.tickrate) * dt * (playerDeg > 0 and 1 or -1)
+    local injectDeg = math.clamp((optimalDeg - playerDeg) * S.strength, -S.maxAngle, S.maxAngle)
 
     local injectPx = injectDeg * PX_PER_DEG
     pcall(function() mousemoverel(injectPx, 0) end)
@@ -163,14 +134,16 @@ do
         Callback = function(v) S.autoKey = v end })
     Sec:Toggle({ Name = "Auto Bhop", Flag = "ST_Bhop", Default = false,
         Callback = function(v) S.bhop = v end })
-    Sec:Label({ Name = "keeps the strafe needle in the white (optimal)" })
+    Sec:Label({ Name = "keeps the strafe needle in the white" })
 
     local Sec2 = Sub:Section({ Name = "Tuning", Side = 2 })
-    Sec2:Slider({ Name = "Strength", Flag = "ST_Strength", Min = 0, Max = 100, Default = 80, Decimals = 0, Suffix = " %",
+    Sec2:Slider({ Name = "Strength", Flag = "ST_Strength", Min = 0, Max = 100, Default = 70, Decimals = 0, Suffix = " %",
         Callback = function(v) S.strength = v / 100 end })
-    Sec2:Slider({ Name = "Max angle / frame", Flag = "ST_MaxAngle", Min = 1, Max = 60, Default = 25, Decimals = 0, Suffix = " deg",
+    Sec2:Slider({ Name = "Max angle / frame", Flag = "ST_MaxAngle", Min = 1, Max = 80, Default = 30, Decimals = 0, Suffix = " deg",
         Callback = function(v) S.maxAngle = v end })
-    Sec2:Slider({ Name = "Min speed", Flag = "ST_MinSpeed", Min = 0, Max = 60, Default = 6, Decimals = 0,
+    Sec2:Slider({ Name = "mv (style const)", Flag = "ST_MV", Min = 1, Max = 60, Default = 27, Decimals = 0,
+        Callback = function(v) S.mv = v / 10 end })
+    Sec2:Slider({ Name = "Min speed", Flag = "ST_MinSpeed", Min = 0, Max = 40, Default = 6, Decimals = 0,
         Callback = function(v) S.minSpeed = v end })
     Sec2:Toggle({ Name = "Flip mouse read", Flag = "ST_MouseSign", Default = false,
         Callback = function(v) S.mouseSign = v and -1 or 1 end })
