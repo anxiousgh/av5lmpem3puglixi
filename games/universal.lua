@@ -1110,9 +1110,71 @@ end
 local VisualsPage = Window:Page({ Name = "Visuals" })
 -- subpages pre-declared here to control tab order: ESP first, Misc last
 local EspSub    = VisualsPage:SubPage({ Name = "ESP" })
+local FovSub    = VisualsPage:SubPage({ Name = "FOV Settings" })
+local CursorSub = VisualsPage:SubPage({ Name = "Custom Cursor" })
 local SrvPosSub = VisualsPage:SubPage({ Name = "Server Pos" })
 local WorldSub  = VisualsPage:SubPage({ Name = "World" })
 local MiscSub   = VisualsPage:SubPage({ Name = "Misc" })
+
+-- ---- FOV Settings: global look for every FOV circle in the hub (size stays
+--      per-feature, e.g. Combat > Aimbot > FOV). Drives Library.FOV.Settings. ----
+do
+    local S = Library.FOV and Library.FOV.Settings
+    if S then
+        local Sec = FovSub:Section({ Name = "Appearance", Side = 1 })
+        Sec:Label({ Name = "Color" }):Colorpicker({ Flag = "FovColor", Default = S.Color,
+            Callback = function(c) S.Color = c end })
+        Sec:Toggle({ Name = "Gradient", Flag = "FovGradient", Default = S.Gradient,
+            Callback = function(v) S.Gradient = v end })
+        Sec:Label({ Name = "Gradient color" }):Colorpicker({ Flag = "FovColor2", Default = S.Color2,
+            Callback = function(c) S.Color2 = c end })
+        Sec:Slider({ Name = "Thickness", Flag = "FovThickness", Min = 0, Max = 10, Default = S.Thickness, Decimals = 0,
+            Callback = function(v) S.Thickness = v end })
+        Sec:Label({ Name = "Size is per-feature (Combat > Aimbot > FOV)." })
+
+        local Sec2 = FovSub:Section({ Name = "Fill & Motion", Side = 2 })
+        Sec2:Toggle({ Name = "Fill", Flag = "FovFill", Default = S.Fill,
+            Callback = function(v) S.Fill = v end })
+        Sec2:Slider({ Name = "Fill opacity", Flag = "FovFillOpacity", Min = 0, Max = 100,
+            Default = math.floor(S.FillOpacity * 100), Decimals = 0, Suffix = "%",
+            Callback = function(v) S.FillOpacity = v / 100 end })
+        Sec2:Toggle({ Name = "Spin", Flag = "FovSpin", Default = S.Spin,
+            Callback = function(v) S.Spin = v end })
+        Sec2:Slider({ Name = "Spin speed", Flag = "FovSpinSpeed", Min = 0, Max = 720,
+            Default = S.SpinSpeed, Decimals = 0, Suffix = "/s",
+            Callback = function(v) S.SpinSpeed = v end })
+        Sec2:Toggle({ Name = "Rainbow", Flag = "FovRainbow", Default = S.Rainbow,
+            Callback = function(v) S.Rainbow = v end })
+        Sec2:Slider({ Name = "Rainbow speed", Flag = "FovRainbowSpeed", Min = 1, Max = 20, Default = 1, Decimals = 0,
+            Callback = function(v) S.RainbowSpeed = v end })
+    end
+end
+
+-- ---- Custom Cursor: a GUI cursor that follows the mouse and replaces the OS
+--      pointer. Drives Library.Cursor.Settings. ----
+do
+    local C = Library.Cursor and Library.Cursor.Settings
+    if C then
+        local Sec = CursorSub:Section({ Name = "Cursor", Side = 1 })
+        Sec:Toggle({ Name = "Enabled", Flag = "CursorEnabled", Default = false,
+            Callback = function(v) C.Enabled = v end })
+        Sec:Dropdown({ Name = "Style", Flag = "CursorStyle", Default = "Arrow", Multi = false,
+            Items = { "Arrow", "Circle", "Dot", "Crosshair" },
+            Callback = function(v) C.Style = (type(v) == "table" and v[1]) or v or "Arrow" end })
+        Sec:Label({ Name = "Color" }):Colorpicker({ Flag = "CursorColor", Default = C.Color,
+            Callback = function(c) C.Color = c end })
+        Sec:Slider({ Name = "Size", Flag = "CursorSize", Min = 6, Max = 48, Default = C.Size, Decimals = 0,
+            Callback = function(v) C.Size = v end })
+
+        local Sec2 = CursorSub:Section({ Name = "Extras", Side = 2 })
+        Sec2:Toggle({ Name = "Outline", Flag = "CursorOutline", Default = true,
+            Callback = function(v) C.Outline = v end })
+        Sec2:Toggle({ Name = "Rainbow", Flag = "CursorRainbow", Default = false,
+            Callback = function(v) C.Rainbow = v end })
+        Sec2:Slider({ Name = "Rainbow speed", Flag = "CursorRainbowSpeed", Min = 1, Max = 20, Default = 1, Decimals = 0,
+            Callback = function(v) C.RainbowSpeed = v end })
+    end
+end
 
 -- ---- Misc utility toggles (Force enable chat) ----
 do

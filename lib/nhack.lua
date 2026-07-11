@@ -266,6 +266,9 @@ do
         if Self.OnExit then pcall(Self.OnExit) end -- [wh] teardown hook (turns features off)
         Self:ApplyWindowInputState(false)
 
+        -- custom cursor may have hidden the OS pointer -- always hand it back.
+        pcall(function() UserInputService.MouseIconEnabled = true end)
+
         if Self.MouseFreeBindName then -- [wh] see BindToRenderStep mouse-free patch
             pcall(function() RunService:UnbindFromRenderStep(Self.MouseFreeBindName) end)
         end
@@ -1603,6 +1606,287 @@ do
 
         local MouseLocation = UserInputService:GetMouseLocation()
         MouseCursor.Instance.Position = UDim2.new(0, MouseLocation.X - 18, 0, MouseLocation.Y - 18)
+    end)
+
+    -- ============================================================
+    --  [wh] Shared FOV renderer
+    --
+    --  Any aim feature that wants a FOV circle asks Library.FOV:New() for a
+    --  handle, then each frame calls handle:Set(radius, visible[, position]).
+    --  APPEARANCE is global (Library.FOV.Settings, driven by Visuals > FOV
+    --  Settings) so every circle in the hub shares one look; only the RADIUS
+    --  is per-feature. GUI-based (square frame + UICorner) rather than a
+    --  Drawing circle, so the fill/stroke can carry a spinning gradient.
+    -- ============================================================
+    Library.FOV = {
+        Settings = {
+            Color = Color3.fromRGB(200, 183, 247),
+            Gradient = true,
+            Color2 = Color3.fromRGB(120, 90, 220),
+            Thickness = 2,
+            Fill = false,
+            FillOpacity = 0.25,
+            Spin = true,
+            SpinSpeed = 90,      -- degrees / second
+            Rainbow = false,
+            RainbowSpeed = 1,
+        },
+        Handles = {},
+        _rot = 0,
+        _hue = 0,
+    }
+
+    Library.FOV.New = function(Self)
+        local S = Library.FOV.Settings
+        local Ring = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Library.Holder.Instance,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundColor3 = S.Color,
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            Visible = false,
+            ZIndex = 9000,
+        })
+        Library:Create("UICorner", {
+            Name = "\0", Parent = Ring.Instance, CornerRadius = UDim.new(1, 0),
+        })
+        local FillGradient = Library:Create("UIGradient", {
+            Name = "\0", Parent = Ring.Instance,
+            Color = ColorSequence.new(S.Color, S.Color2),
+        })
+        local Stroke = Library:Create("UIStroke", {
+            Name = "\0", Parent = Ring.Instance,
+            Thickness = S.Thickness, Color = S.Color,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        })
+        local StrokeGradient = Library:Create("UIGradient", {
+            Name = "\0", Parent = Stroke.Instance,
+            Color = ColorSequence.new(S.Color, S.Color2),
+        })
+        local Handle = {
+            Ring = Ring.Instance,
+            FillGradient = FillGradient.Instance,
+            Stroke = Stroke.Instance,
+            StrokeGradient = StrokeGradient.Instance,
+            radius = 100, visible = false, position = nil,
+        }
+        function Handle:Set(Radius, Visible, Position)
+            if Radius then self.radius = Radius end
+            self.visible = Visible and true or false
+            self.position = Position
+        end
+        function Handle:Destroy()
+            self._dead = true
+            pcall(function() self.Ring:Destroy() end)
+        end
+        table.insert(Library.FOV.Handles, Handle)
+        return Handle
+    end
+
+    Library:Connect(RunService.RenderStepped, function(DeltaTime)
+        local FOV = Library.FOV
+        local Handles = FOV.Handles
+        if #Handles == 0 then return end
+        local S = FOV.Settings
+        DeltaTime = DeltaTime or (1 / 60)
+
+        FOV._rot = (FOV._rot + (S.Spin and (S.SpinSpeed * DeltaTime) or 0)) % 360
+        local C1, C2
+        if S.Rainbow then
+            FOV._hue = (FOV._hue + (S.RainbowSpeed or 1) * DeltaTime * 0.15) % 1
+            C1 = Color3.fromHSV(FOV._hue, 0.8, 1)
+            C2 = Color3.fromHSV((FOV._hue + 0.15) % 1, 0.8, 1)
+        else
+            C1, C2 = S.Color, S.Color2
+        end
+        local Seq = S.Gradient and ColorSequence.new(C1, C2) or ColorSequence.new(C1)
+        local Mouse = UserInputService:GetMouseLocation()
+
+        local Live, Compact = {}, false
+        for Index = 1, #Handles do
+            local Handle = Handles[Index]
+            if not Handle._dead and Handle.Ring and Handle.Ring.Parent then
+                Live[#Live + 1] = Handle
+                local Ring = Handle.Ring
+                Ring.Visible = Handle.visible
+                if Handle.visible then
+                    local Pos = Handle.position or Mouse
+                    local Diameter = math.max(0, Handle.radius * 2)
+                    Ring.Size = UDim2.fromOffset(Diameter, Diameter)
+                    Ring.Position = UDim2.fromOffset(Pos.X, Pos.Y)
+                    Ring.BackgroundColor3 = C1
+                    Ring.BackgroundTransparency = S.Fill and math.clamp(1 - S.FillOpacity, 0, 1) or 1
+                    Handle.FillGradient.Color = Seq
+                    Handle.FillGradient.Rotation = FOV._rot
+                    Handle.Stroke.Enabled = (S.Thickness or 0) > 0
+                    Handle.Stroke.Thickness = S.Thickness
+                    Handle.Stroke.Color = C1
+                    Handle.StrokeGradient.Color = Seq
+                    Handle.StrokeGradient.Rotation = FOV._rot
+                end
+            else
+                Compact = true
+            end
+        end
+        if Compact then Library.FOV.Handles = Live end
+    end)
+
+    -- ============================================================
+    --  [wh] Custom cursor
+    --
+    --  Library.Cursor.Settings drives a GUI cursor that follows the mouse and
+    --  replaces the OS pointer (in-game and in-menu). Styles are pre-built and
+    --  toggled by name; colour/size/outline/rainbow are live.
+    -- ============================================================
+    Library.Cursor = {
+        Settings = {
+            Enabled = false,
+            Style = "Arrow",     -- Arrow | Circle | Dot | Crosshair
+            Color = Color3.fromRGB(200, 183, 247),
+            Size = 16,
+            Outline = true,
+            Rainbow = false,
+            RainbowSpeed = 1,
+        },
+        _hue = 0,
+        _wasEnabled = false,
+        _built = false,
+        Parts = {},
+    }
+
+    Library.Cursor.Build = function(Self)
+        if Library.Cursor._built then return end
+        local Holder = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Library.Holder.Instance,
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            Size = UDim2.fromOffset(0, 0),
+            Visible = false,
+            ZIndex = 10001,
+        })
+        local P = Library.Cursor.Parts
+        P.Holder = Holder.Instance
+
+        -- Arrow: reuse the menu pointer asset, anchored at its tip (top-left).
+        P.Arrow = Library:Create("ImageLabel", {
+            Name = "\0", Parent = Holder.Instance,
+            BackgroundTransparency = 1,
+            Image = "http://www.roblox.com/asset/?id=5545698398",
+            AnchorPoint = Vector2.new(0, 0),
+            Position = UDim2.fromOffset(0, 0),
+            Size = UDim2.fromOffset(32, 32),
+            ZIndex = 10002,
+        }).Instance
+
+        -- Circle: ring outline centred on the pointer.
+        P.Circle = Library:Create("Frame", {
+            Name = "\0", Parent = Holder.Instance,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            Size = UDim2.fromOffset(16, 16),
+            ZIndex = 10002,
+        }).Instance
+        Library:Create("UICorner", { Name = "\0", Parent = P.Circle, CornerRadius = UDim.new(1, 0) })
+        P.CircleStroke = Library:Create("UIStroke", {
+            Name = "\0", Parent = P.Circle, Thickness = 2,
+        }).Instance
+
+        -- Dot: filled centre dot.
+        P.Dot = Library:Create("Frame", {
+            Name = "\0", Parent = Holder.Instance,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BorderSizePixel = 0,
+            Size = UDim2.fromOffset(8, 8),
+            ZIndex = 10002,
+        }).Instance
+        Library:Create("UICorner", { Name = "\0", Parent = P.Dot, CornerRadius = UDim.new(1, 0) })
+        P.DotStroke = Library:Create("UIStroke", {
+            Name = "\0", Parent = P.Dot, Thickness = 1, Color = Color3.fromRGB(0, 0, 0),
+        }).Instance
+
+        -- Crosshair: two thin bars crossing at the pointer.
+        P.CrossH = Library:Create("Frame", {
+            Name = "\0", Parent = Holder.Instance,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BorderSizePixel = 0,
+            Size = UDim2.fromOffset(16, 2),
+            ZIndex = 10002,
+        }).Instance
+        Library:Create("UIStroke", { Name = "\0", Parent = P.CrossH, Thickness = 1, Color = Color3.fromRGB(0, 0, 0) })
+        P.CrossV = Library:Create("Frame", {
+            Name = "\0", Parent = Holder.Instance,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BorderSizePixel = 0,
+            Size = UDim2.fromOffset(2, 16),
+            ZIndex = 10002,
+        }).Instance
+        Library:Create("UIStroke", { Name = "\0", Parent = P.CrossV, Thickness = 1, Color = Color3.fromRGB(0, 0, 0) })
+
+        Library.Cursor._built = true
+    end
+
+    Library:Connect(RunService.RenderStepped, function(DeltaTime)
+        local Cur = Library.Cursor
+        local S = Cur.Settings
+        DeltaTime = DeltaTime or (1 / 60)
+
+        if not S.Enabled then
+            if Cur._wasEnabled then
+                Cur._wasEnabled = false
+                if Cur.Parts.Holder then Cur.Parts.Holder.Visible = false end
+                pcall(function() UserInputService.MouseIconEnabled = true end)
+            end
+            return
+        end
+
+        Library.Cursor:Build()
+        Cur._wasEnabled = true
+        pcall(function() UserInputService.MouseIconEnabled = false end)
+        -- don't double up with the menu's own pointer while ours is on
+        if Library.MouseCursor and Library.MouseCursor.Instance then
+            Library.MouseCursor.Instance.Visible = false
+        end
+
+        local Color = S.Color
+        if S.Rainbow then
+            Cur._hue = (Cur._hue + (S.RainbowSpeed or 1) * DeltaTime * 0.15) % 1
+            Color = Color3.fromHSV(Cur._hue, 0.8, 1)
+        end
+
+        local Mouse = UserInputService:GetMouseLocation()
+        local P = Cur.Parts
+        local Holder = P.Holder
+        Holder.Visible = true
+        Holder.Position = UDim2.fromOffset(Mouse.X, Mouse.Y)
+
+        local Style = S.Style
+        local Size = S.Size or 16
+        P.Arrow.Visible = Style == "Arrow"
+        P.Circle.Visible = Style == "Circle"
+        P.Dot.Visible = Style == "Dot"
+        P.CrossH.Visible = Style == "Crosshair"
+        P.CrossV.Visible = Style == "Crosshair"
+
+        if Style == "Arrow" then
+            P.Arrow.ImageColor3 = Color
+            P.Arrow.Size = UDim2.fromOffset(Size * 2, Size * 2)
+        elseif Style == "Circle" then
+            P.Circle.Size = UDim2.fromOffset(Size, Size)
+            P.CircleStroke.Color = Color
+            P.CircleStroke.Enabled = true
+        elseif Style == "Dot" then
+            P.Dot.Size = UDim2.fromOffset(math.max(3, Size * 0.5), math.max(3, Size * 0.5))
+            P.Dot.BackgroundColor3 = Color
+            P.DotStroke.Enabled = S.Outline
+        elseif Style == "Crosshair" then
+            P.CrossH.Size = UDim2.fromOffset(Size, 2)
+            P.CrossV.Size = UDim2.fromOffset(2, Size)
+            P.CrossH.BackgroundColor3 = Color
+            P.CrossV.BackgroundColor3 = Color
+        end
     end)
 
     do

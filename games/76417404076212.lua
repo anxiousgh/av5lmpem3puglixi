@@ -90,20 +90,8 @@ local function pickAim()
     end
     return best
 end
--- ---- FOV circle (a rounded GUI ring, centered on the crosshair) ----
-local fovGui = Instance.new("ScreenGui")
-fovGui.Name = "_shard_fov"; fovGui.ResetOnSpawn = false; fovGui.IgnoreGuiInset = false
-if not pcall(function() fovGui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end) or not fovGui.Parent then
-    fovGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-end
-local fovRing = Instance.new("Frame")
-fovRing.AnchorPoint = Vector2.new(0.5, 0.5)
-fovRing.BackgroundTransparency = 1
-fovRing.BorderSizePixel = 0
-fovRing.Visible = false
-fovRing.Parent = fovGui
-local fovCorner = Instance.new("UICorner"); fovCorner.CornerRadius = UDim.new(1, 0); fovCorner.Parent = fovRing
-local fovStroke = Instance.new("UIStroke"); fovStroke.Thickness = 1.5; fovStroke.Transparency = 0.35; fovStroke.Parent = fovRing
+-- ---- FOV circle via the shared renderer (look = Visuals > FOV Settings) ----
+local fovHandle = Library.FOV and Library.FOV:New() or nil
 
 track(RunService.RenderStepped:Connect(function()
     if not S.killAura then S.head = (S.silent and pickAim()) or nil end  -- Kill Aura controls the target while on
@@ -113,15 +101,7 @@ track(RunService.RenderStepped:Connect(function()
     local hp = ch and (ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart"))
     S.myPos = hp and hp.Position or nil
     -- FOV circle
-    if S.silent and S.showFov then
-        local m = UIS:GetMouseLocation()
-        fovRing.Position = UDim2.fromOffset(m.X, m.Y)
-        fovRing.Size = UDim2.fromOffset(S.fov * 2, S.fov * 2)
-        fovStroke.Color = S.fovColor
-        fovRing.Visible = true
-    else
-        fovRing.Visible = false
-    end
+    if fovHandle then fovHandle:Set(S.fov, S.silent and S.showFov) end
 end))
 
 -- ---- the __namecall hook (installed once, survives re-exec). Hook body does NO
@@ -293,8 +273,7 @@ do
         Callback = function(v) S.priority = (type(v) == "table" and v[1]) or v or "Crosshair" end })
     Sec:Toggle({ Name = "Show FOV circle", Flag = "SHARD_ShowFov", Default = true,
         Callback = function(v) S.showFov = v end })
-    Sec:Label({ Name = "FOV color" }):Colorpicker({ Flag = "SHARD_FovColor", Default = Color3.fromRGB(255, 255, 255),
-        Callback = function(c) S.fovColor = c end })
+    Sec:Label({ Name = "FOV look: Visuals > FOV Settings" })
 
     local Sec2 = Sub:Section({ Name = "Knife mods", Side = 2 })
     Sec2:Toggle({ Name = "Instant", Flag = "SHARD_Instant", Default = true,
@@ -335,7 +314,7 @@ local function cleanup()
     S.thirdPerson = false
     if S._zeroed then pcall(function() forEachWeaponConfig(function(cfg) cfg.ThrowCooldown = S._origCD or 0.8 end) end); S._zeroed = false end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-    pcall(function() fovGui:Destroy() end)
+    pcall(function() if fovHandle then fovHandle:Destroy() end end)
 end
 do
     local g = gv()
