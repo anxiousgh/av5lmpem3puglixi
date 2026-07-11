@@ -1620,14 +1620,14 @@ do
     -- ============================================================
     Library.FOV = {
         Settings = {
-            Color = Color3.fromRGB(200, 183, 247),
+            Color = Color3.fromRGB(200, 183, 247),   -- ~GUI accent
             Gradient = true,
-            Color2 = Color3.fromRGB(120, 90, 220),
-            Thickness = 2,
-            Fill = false,
-            FillOpacity = 0.25,
+            Color2 = Color3.fromRGB(120, 120, 130),   -- gray
+            Thickness = 1,
+            Fill = true,
+            FillOpacity = 0.29,
             Spin = true,
-            SpinSpeed = 90,      -- degrees / second
+            SpinSpeed = 114,     -- degrees / second
             Rainbow = false,
             RainbowSpeed = 1,
         },
@@ -1638,11 +1638,14 @@ do
 
     Library.FOV.New = function(Self)
         local S = Library.FOV.Settings
+        -- Frame + stroke stay WHITE; the UIGradients carry the actual colours.
+        -- (A UIGradient multiplies the base colour, so a non-white base would
+        --  darken the gradient -- and a black base would swallow it entirely.)
         local Ring = Library:Create("Frame", {
             Name = "\0",
             Parent = Library.Holder.Instance,
             AnchorPoint = Vector2.new(0.5, 0.5),
-            BackgroundColor3 = S.Color,
+            BackgroundColor3 = Color3.fromRGB(255, 255, 255),
             BackgroundTransparency = 1,
             BorderSizePixel = 0,
             Visible = false,
@@ -1657,7 +1660,7 @@ do
         })
         local Stroke = Library:Create("UIStroke", {
             Name = "\0", Parent = Ring.Instance,
-            Thickness = S.Thickness, Color = S.Color,
+            Thickness = S.Thickness, Color = Color3.fromRGB(255, 255, 255),
             ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
         })
         local StrokeGradient = Library:Create("UIGradient", {
@@ -1715,13 +1718,11 @@ do
                     local Diameter = math.max(0, Handle.radius * 2)
                     Ring.Size = UDim2.fromOffset(Diameter, Diameter)
                     Ring.Position = UDim2.fromOffset(Pos.X, Pos.Y)
-                    Ring.BackgroundColor3 = C1
                     Ring.BackgroundTransparency = S.Fill and math.clamp(1 - S.FillOpacity, 0, 1) or 1
                     Handle.FillGradient.Color = Seq
                     Handle.FillGradient.Rotation = FOV._rot
                     Handle.Stroke.Enabled = (S.Thickness or 0) > 0
                     Handle.Stroke.Thickness = S.Thickness
-                    Handle.Stroke.Color = C1
                     Handle.StrokeGradient.Color = Seq
                     Handle.StrokeGradient.Rotation = FOV._rot
                 end
@@ -1746,10 +1747,16 @@ do
             Color = Color3.fromRGB(200, 183, 247),
             Size = 16,
             Outline = true,
+            Opacity = 1,          -- 1 = solid
             Rainbow = false,
             RainbowSpeed = 1,
+            Spin = false,
+            SpinSpeed = 120,      -- degrees / second
+            Watermark = false,
+            WatermarkText = "wrath.cc",
         },
         _hue = 0,
+        _rot = 0,
         _wasEnabled = false,
         _built = false,
         Parts = {},
@@ -1769,12 +1776,14 @@ do
         local P = Library.Cursor.Parts
         P.Holder = Holder.Instance
 
-        -- Arrow: reuse the menu pointer asset, anchored at its tip (top-left).
+        -- Arrow: reuse the menu pointer asset. Its hotspot (tip) sits at the
+        -- image centre -- that's why the menu positions it mouse-18 on a 36px
+        -- icon -- so anchor 0.5,0.5 to land the tip on the actual cursor.
         P.Arrow = Library:Create("ImageLabel", {
             Name = "\0", Parent = Holder.Instance,
             BackgroundTransparency = 1,
             Image = "http://www.roblox.com/asset/?id=5545698398",
-            AnchorPoint = Vector2.new(0, 0),
+            AnchorPoint = Vector2.new(0.5, 0.5),
             Position = UDim2.fromOffset(0, 0),
             Size = UDim2.fromOffset(32, 32),
             ZIndex = 10002,
@@ -1825,6 +1834,23 @@ do
         }).Instance
         Library:Create("UIStroke", { Name = "\0", Parent = P.CrossV, Thickness = 1, Color = Color3.fromRGB(0, 0, 0) })
 
+        -- Watermark: "wrath.cc" tag sitting just below the pointer.
+        P.Watermark = Library:Create("TextLabel", {
+            Name = "\0", Parent = Holder.Instance,
+            FontFace = Library.Font,
+            TextSize = 12,
+            AnchorPoint = Vector2.new(0.5, 0),
+            Position = UDim2.fromOffset(0, 12),
+            Size = UDim2.fromOffset(0, 14),
+            AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundTransparency = 1,
+            Text = "wrath.cc",
+            TextColor3 = Color3.fromRGB(255, 255, 255),
+            Visible = false,
+            ZIndex = 10002,
+        }).Instance
+        Library:Create("UIStroke", { Name = "\0", Parent = P.Watermark, Thickness = 1, Color = Color3.fromRGB(0, 0, 0) })
+
         Library.Cursor._built = true
     end
 
@@ -1856,6 +1882,13 @@ do
             Color = Color3.fromHSV(Cur._hue, 0.8, 1)
         end
 
+        local Trans = math.clamp(1 - (S.Opacity or 1), 0, 1)
+        local Rot = 0
+        if S.Spin then
+            Cur._rot = (Cur._rot + (S.SpinSpeed or 120) * DeltaTime) % 360
+            Rot = Cur._rot
+        end
+
         local Mouse = UserInputService:GetMouseLocation()
         local P = Cur.Parts
         local Holder = P.Holder
@@ -1872,20 +1905,41 @@ do
 
         if Style == "Arrow" then
             P.Arrow.ImageColor3 = Color
+            P.Arrow.ImageTransparency = Trans
             P.Arrow.Size = UDim2.fromOffset(Size * 2, Size * 2)
+            P.Arrow.Rotation = Rot
         elseif Style == "Circle" then
             P.Circle.Size = UDim2.fromOffset(Size, Size)
+            P.Circle.Rotation = Rot
             P.CircleStroke.Color = Color
+            P.CircleStroke.Transparency = Trans
             P.CircleStroke.Enabled = true
         elseif Style == "Dot" then
-            P.Dot.Size = UDim2.fromOffset(math.max(3, Size * 0.5), math.max(3, Size * 0.5))
+            local D = math.max(3, Size * 0.5)
+            P.Dot.Size = UDim2.fromOffset(D, D)
             P.Dot.BackgroundColor3 = Color
+            P.Dot.BackgroundTransparency = Trans
             P.DotStroke.Enabled = S.Outline
+            P.DotStroke.Transparency = Trans
         elseif Style == "Crosshair" then
             P.CrossH.Size = UDim2.fromOffset(Size, 2)
             P.CrossV.Size = UDim2.fromOffset(2, Size)
             P.CrossH.BackgroundColor3 = Color
             P.CrossV.BackgroundColor3 = Color
+            P.CrossH.BackgroundTransparency = Trans
+            P.CrossV.BackgroundTransparency = Trans
+            P.CrossH.Rotation = Rot
+            P.CrossV.Rotation = Rot
+        end
+
+        if P.Watermark then
+            P.Watermark.Visible = S.Watermark and true or false
+            if S.Watermark then
+                P.Watermark.Text = S.WatermarkText or "wrath.cc"
+                P.Watermark.TextColor3 = Color
+                P.Watermark.TextTransparency = Trans
+                P.Watermark.Position = UDim2.fromOffset(0, Size + 4)
+            end
         end
     end)
 

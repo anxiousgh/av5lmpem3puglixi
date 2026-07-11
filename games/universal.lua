@@ -1165,14 +1165,29 @@ do
             Callback = function(c) C.Color = c end })
         Sec:Slider({ Name = "Size", Flag = "CursorSize", Min = 6, Max = 48, Default = C.Size, Decimals = 0,
             Callback = function(v) C.Size = v end })
-
-        local Sec2 = CursorSub:Section({ Name = "Extras", Side = 2 })
-        Sec2:Toggle({ Name = "Outline", Flag = "CursorOutline", Default = true,
+        Sec:Slider({ Name = "Opacity", Flag = "CursorOpacity", Min = 5, Max = 100,
+            Default = math.floor((C.Opacity or 1) * 100), Decimals = 0, Suffix = "%",
+            Callback = function(v) C.Opacity = v / 100 end })
+        Sec:Toggle({ Name = "Outline", Flag = "CursorOutline", Default = true,
             Callback = function(v) C.Outline = v end })
+
+        local Sec2 = CursorSub:Section({ Name = "Motion", Side = 2 })
+        Sec2:Toggle({ Name = "Spin", Flag = "CursorSpin", Default = false,
+            Callback = function(v) C.Spin = v end })
+        Sec2:Slider({ Name = "Spin speed", Flag = "CursorSpinSpeed", Min = 0, Max = 720,
+            Default = C.SpinSpeed, Decimals = 0, Suffix = "/s",
+            Callback = function(v) C.SpinSpeed = v end })
         Sec2:Toggle({ Name = "Rainbow", Flag = "CursorRainbow", Default = false,
             Callback = function(v) C.Rainbow = v end })
         Sec2:Slider({ Name = "Rainbow speed", Flag = "CursorRainbowSpeed", Min = 1, Max = 20, Default = 1, Decimals = 0,
             Callback = function(v) C.RainbowSpeed = v end })
+
+        local Sec3 = CursorSub:Section({ Name = "Watermark", Side = 1 })
+        Sec3:Toggle({ Name = "Watermark text", Flag = "CursorWatermark", Default = false,
+            Callback = function(v) C.Watermark = v end })
+        Sec3:Textbox({ Name = "Text", Flag = "CursorWatermarkText", Default = C.WatermarkText,
+            Placeholder = "wrath.cc",
+            Callback = function(v) C.WatermarkText = (v ~= nil and tostring(v)) or "wrath.cc" end })
     end
 end
 
