@@ -1743,7 +1743,7 @@ do
     Library.Cursor = {
         Settings = {
             Enabled = false,
-            Style = "Arrow",     -- Arrow | Circle | Dot | Crosshair
+            Style = "Arrow",     -- Arrow | Dot | Crosshair
             Color = Color3.fromRGB(248, 212, 255),
             Size = 16,
             Outline = true,
@@ -1752,11 +1752,25 @@ do
             RainbowSpeed = 1,
             Spin = false,
             SpinSpeed = 120,      -- degrees / second
+            -- size pulse: drift to a fresh RANDOM size in [MinSize, MaxSize]
+            Pulse = false,
+            MinSize = 10,
+            MaxSize = 24,
+            PulseSpeed = 3,
+            -- crosshair geometry (px)
+            CrossGap = 4,
+            CrossLength = 8,
+            CrossThickness = 2,
+            CrossDot = false,
+            -- moving gradient on the "wrath.cc" tag
             Watermark = false,
             WatermarkText = "wrath.cc",
+            WatermarkGradient = true,
         },
         _hue = 0,
         _rot = 0,
+        _pulseSize = 16,
+        _pulseTarget = nil,
         _wasEnabled = false,
         _built = false,
         Parts = {},
@@ -1789,20 +1803,6 @@ do
             ZIndex = 10002,
         }).Instance
 
-        -- Circle: ring outline centred on the pointer.
-        P.Circle = Library:Create("Frame", {
-            Name = "\0", Parent = Holder.Instance,
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            BackgroundTransparency = 1,
-            BorderSizePixel = 0,
-            Size = UDim2.fromOffset(16, 16),
-            ZIndex = 10002,
-        }).Instance
-        Library:Create("UICorner", { Name = "\0", Parent = P.Circle, CornerRadius = UDim.new(1, 0) })
-        P.CircleStroke = Library:Create("UIStroke", {
-            Name = "\0", Parent = P.Circle, Thickness = 2,
-        }).Instance
-
         -- Dot: filled centre dot.
         P.Dot = Library:Create("Frame", {
             Name = "\0", Parent = Holder.Instance,
@@ -1816,25 +1816,53 @@ do
             Name = "\0", Parent = P.Dot, Thickness = 1, Color = Color3.fromRGB(0, 0, 0),
         }).Instance
 
-        -- Crosshair: two thin bars crossing at the pointer.
-        P.CrossH = Library:Create("Frame", {
+        -- Crosshair: 4 arms + optional centre dot, all inside a 0x0 holder so
+        -- Spin can rotate the whole thing around the pointer. Gap/length/
+        -- thickness/dot are driven live from the settings.
+        P.CrossHolder = Library:Create("Frame", {
             Name = "\0", Parent = Holder.Instance,
             AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromOffset(0, 0),
+            Size = UDim2.fromOffset(0, 0),
+            BackgroundTransparency = 1,
             BorderSizePixel = 0,
-            Size = UDim2.fromOffset(16, 2),
+            Visible = false,
             ZIndex = 10002,
         }).Instance
-        Library:Create("UIStroke", { Name = "\0", Parent = P.CrossH, Thickness = 1, Color = Color3.fromRGB(0, 0, 0) })
-        P.CrossV = Library:Create("Frame", {
-            Name = "\0", Parent = Holder.Instance,
+        P.CrossArms = {}
+        for _, Def in ipairs({
+            { key = "Top",    anchor = Vector2.new(0.5, 1) },
+            { key = "Bottom", anchor = Vector2.new(0.5, 0) },
+            { key = "Left",   anchor = Vector2.new(1, 0.5) },
+            { key = "Right",  anchor = Vector2.new(0, 0.5) },
+        }) do
+            local Arm = Library:Create("Frame", {
+                Name = "\0", Parent = P.CrossHolder,
+                AnchorPoint = Def.anchor,
+                BorderSizePixel = 0,
+                Size = UDim2.fromOffset(2, 8),
+                ZIndex = 10002,
+            }).Instance
+            local Stroke = Library:Create("UIStroke", {
+                Name = "\0", Parent = Arm, Thickness = 1, Color = Color3.fromRGB(0, 0, 0),
+            }).Instance
+            P.CrossArms[Def.key] = { Frame = Arm, Stroke = Stroke, Anchor = Def.anchor }
+        end
+        P.CrossDot = Library:Create("Frame", {
+            Name = "\0", Parent = P.CrossHolder,
             AnchorPoint = Vector2.new(0.5, 0.5),
             BorderSizePixel = 0,
-            Size = UDim2.fromOffset(2, 16),
+            Size = UDim2.fromOffset(3, 3),
+            Visible = false,
             ZIndex = 10002,
         }).Instance
-        Library:Create("UIStroke", { Name = "\0", Parent = P.CrossV, Thickness = 1, Color = Color3.fromRGB(0, 0, 0) })
+        Library:Create("UICorner", { Name = "\0", Parent = P.CrossDot, CornerRadius = UDim.new(1, 0) })
+        P.CrossDotStroke = Library:Create("UIStroke", {
+            Name = "\0", Parent = P.CrossDot, Thickness = 1, Color = Color3.fromRGB(0, 0, 0),
+        }).Instance
 
-        -- Watermark: "wrath.cc" tag sitting just below the pointer.
+        -- Watermark: "wrath.cc" tag below the pointer, with a moving sheen
+        -- gradient (registered on the shared shimmer clock).
         P.Watermark = Library:Create("TextLabel", {
             Name = "\0", Parent = Holder.Instance,
             FontFace = Library.Font,
@@ -1850,6 +1878,10 @@ do
             ZIndex = 10002,
         }).Instance
         Library:Create("UIStroke", { Name = "\0", Parent = P.Watermark, Thickness = 1, Color = Color3.fromRGB(0, 0, 0) })
+        P.WatermarkGradient = Library:Create("UIGradient", {
+            Name = "\0", Parent = P.Watermark, Offset = Vector2.new(0, 0),
+        }).Instance
+        Library:RegisterShimmer(P.WatermarkGradient)
 
         Library.Cursor._built = true
     end
@@ -1896,24 +1928,29 @@ do
         Holder.Position = UDim2.fromOffset(Mouse.X, Mouse.Y)
 
         local Style = S.Style
+        if Style ~= "Arrow" and Style ~= "Dot" and Style ~= "Crosshair" then Style = "Arrow" end
         local Size = S.Size or 16
+        -- size pulse: drift toward a fresh random target in [min,max]
+        if S.Pulse then
+            local Lo = math.min(S.MinSize or 6, S.MaxSize or 24)
+            local Hi = math.max(S.MinSize or 6, S.MaxSize or 24)
+            if not Cur._pulseTarget or math.abs(Cur._pulseSize - Cur._pulseTarget) < 0.5 then
+                Cur._pulseTarget = Lo + math.random() * (Hi - Lo)
+            end
+            Cur._pulseSize = Cur._pulseSize +
+                (Cur._pulseTarget - Cur._pulseSize) * math.clamp((S.PulseSpeed or 3) * DeltaTime, 0, 1)
+            Size = Cur._pulseSize
+        end
+
         P.Arrow.Visible = Style == "Arrow"
-        P.Circle.Visible = Style == "Circle"
         P.Dot.Visible = Style == "Dot"
-        P.CrossH.Visible = Style == "Crosshair"
-        P.CrossV.Visible = Style == "Crosshair"
+        P.CrossHolder.Visible = Style == "Crosshair"
 
         if Style == "Arrow" then
             P.Arrow.ImageColor3 = Color
             P.Arrow.ImageTransparency = Trans
             P.Arrow.Size = UDim2.fromOffset(Size * 2, Size * 2)
             P.Arrow.Rotation = Rot
-        elseif Style == "Circle" then
-            P.Circle.Size = UDim2.fromOffset(Size, Size)
-            P.Circle.Rotation = Rot
-            P.CircleStroke.Color = Color
-            P.CircleStroke.Transparency = Trans
-            P.CircleStroke.Enabled = true
         elseif Style == "Dot" then
             local D = math.max(3, Size * 0.5)
             P.Dot.Size = UDim2.fromOffset(D, D)
@@ -1922,23 +1959,51 @@ do
             P.DotStroke.Enabled = S.Outline
             P.DotStroke.Transparency = Trans
         elseif Style == "Crosshair" then
-            P.CrossH.Size = UDim2.fromOffset(Size, 2)
-            P.CrossV.Size = UDim2.fromOffset(2, Size)
-            P.CrossH.BackgroundColor3 = Color
-            P.CrossV.BackgroundColor3 = Color
-            P.CrossH.BackgroundTransparency = Trans
-            P.CrossV.BackgroundTransparency = Trans
-            P.CrossH.Rotation = Rot
-            P.CrossV.Rotation = Rot
+            P.CrossHolder.Rotation = Rot
+            local Gap = math.max(0, S.CrossGap or 4)
+            local Len = math.max(1, S.CrossLength or 8)
+            local Th  = math.max(1, S.CrossThickness or 2)
+            local A = P.CrossArms
+            A.Top.Frame.Position    = UDim2.fromOffset(0, -Gap); A.Top.Frame.Size    = UDim2.fromOffset(Th, Len)
+            A.Bottom.Frame.Position = UDim2.fromOffset(0, Gap);  A.Bottom.Frame.Size = UDim2.fromOffset(Th, Len)
+            A.Left.Frame.Position   = UDim2.fromOffset(-Gap, 0); A.Left.Frame.Size   = UDim2.fromOffset(Len, Th)
+            A.Right.Frame.Position  = UDim2.fromOffset(Gap, 0);  A.Right.Frame.Size  = UDim2.fromOffset(Len, Th)
+            for _, Arm in pairs(A) do
+                Arm.Frame.BackgroundColor3 = Color
+                Arm.Frame.BackgroundTransparency = Trans
+                Arm.Stroke.Enabled = S.Outline
+                Arm.Stroke.Transparency = Trans
+            end
+            P.CrossDot.Visible = S.CrossDot and true or false
+            if S.CrossDot then
+                local D = math.max(2, Th)
+                P.CrossDot.Size = UDim2.fromOffset(D, D)
+                P.CrossDot.BackgroundColor3 = Color
+                P.CrossDot.BackgroundTransparency = Trans
+                P.CrossDotStroke.Enabled = S.Outline
+                P.CrossDotStroke.Transparency = Trans
+            end
         end
 
         if P.Watermark then
             P.Watermark.Visible = S.Watermark and true or false
             if S.Watermark then
+                local Below = (S.Pulse and (S.MaxSize or 24) or Size) + 4
                 P.Watermark.Text = S.WatermarkText or "wrath.cc"
-                P.Watermark.TextColor3 = Color
                 P.Watermark.TextTransparency = Trans
-                P.Watermark.Position = UDim2.fromOffset(0, Size + 4)
+                P.Watermark.Position = UDim2.fromOffset(0, Below)
+                if S.WatermarkGradient then
+                    P.Watermark.TextColor3 = Color3.fromRGB(255, 255, 255)
+                    P.WatermarkGradient.Enabled = true
+                    P.WatermarkGradient.Color = ColorSequence.new({
+                        ColorSequenceKeypoint.new(0, Color),
+                        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+                        ColorSequenceKeypoint.new(1, Color),
+                    })
+                else
+                    P.Watermark.TextColor3 = Color
+                    P.WatermarkGradient.Enabled = false
+                end
             end
         end
     end)

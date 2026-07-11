@@ -1159,7 +1159,7 @@ do
         Sec:Toggle({ Name = "Enabled", Flag = "CursorEnabled", Default = false,
             Callback = function(v) C.Enabled = v end })
         Sec:Dropdown({ Name = "Style", Flag = "CursorStyle", Default = "Arrow", Multi = false,
-            Items = { "Arrow", "Circle", "Dot", "Crosshair" },
+            Items = { "Arrow", "Dot", "Crosshair" },
             Callback = function(v) C.Style = (type(v) == "table" and v[1]) or v or "Arrow" end })
         Sec:Label({ Name = "Color" }):Colorpicker({ Flag = "CursorColor", Default = C.Color,
             Callback = function(c) C.Color = c end })
@@ -1177,17 +1177,37 @@ do
         Sec2:Slider({ Name = "Spin speed", Flag = "CursorSpinSpeed", Min = 0, Max = 720,
             Default = C.SpinSpeed, Decimals = 0, Suffix = "/s",
             Callback = function(v) C.SpinSpeed = v end })
+        Sec2:Toggle({ Name = "Size pulse", Flag = "CursorPulse", Default = false,
+            Callback = function(v) C.Pulse = v end })
+        Sec2:Slider({ Name = "Min size", Flag = "CursorMinSize", Min = 4, Max = 48, Default = C.MinSize, Decimals = 0,
+            Callback = function(v) C.MinSize = v end })
+        Sec2:Slider({ Name = "Max size", Flag = "CursorMaxSize", Min = 4, Max = 48, Default = C.MaxSize, Decimals = 0,
+            Callback = function(v) C.MaxSize = v end })
+        Sec2:Slider({ Name = "Pulse speed", Flag = "CursorPulseSpeed", Min = 1, Max = 20, Default = C.PulseSpeed, Decimals = 0,
+            Callback = function(v) C.PulseSpeed = v end })
         Sec2:Toggle({ Name = "Rainbow", Flag = "CursorRainbow", Default = false,
             Callback = function(v) C.Rainbow = v end })
         Sec2:Slider({ Name = "Rainbow speed", Flag = "CursorRainbowSpeed", Min = 1, Max = 20, Default = 1, Decimals = 0,
             Callback = function(v) C.RainbowSpeed = v end })
 
-        local Sec3 = CursorSub:Section({ Name = "Watermark", Side = 1 })
-        Sec3:Toggle({ Name = "Watermark text", Flag = "CursorWatermark", Default = false,
+        local Sec3 = CursorSub:Section({ Name = "Crosshair", Side = 1 })
+        Sec3:Slider({ Name = "Gap", Flag = "CursorCrossGap", Min = 0, Max = 30, Default = C.CrossGap, Decimals = 0,
+            Callback = function(v) C.CrossGap = v end })
+        Sec3:Slider({ Name = "Length", Flag = "CursorCrossLength", Min = 1, Max = 40, Default = C.CrossLength, Decimals = 0,
+            Callback = function(v) C.CrossLength = v end })
+        Sec3:Slider({ Name = "Thickness", Flag = "CursorCrossThickness", Min = 1, Max = 12, Default = C.CrossThickness, Decimals = 0,
+            Callback = function(v) C.CrossThickness = v end })
+        Sec3:Toggle({ Name = "Center dot", Flag = "CursorCrossDot", Default = false,
+            Callback = function(v) C.CrossDot = v end })
+
+        local Sec4 = CursorSub:Section({ Name = "Watermark", Side = 2 })
+        Sec4:Toggle({ Name = "Watermark text", Flag = "CursorWatermark", Default = false,
             Callback = function(v) C.Watermark = v end })
-        Sec3:Textbox({ Name = "Text", Flag = "CursorWatermarkText", Default = C.WatermarkText,
+        Sec4:Textbox({ Name = "Text", Flag = "CursorWatermarkText", Default = C.WatermarkText,
             Placeholder = "wrath.cc",
             Callback = function(v) C.WatermarkText = (v ~= nil and tostring(v)) or "wrath.cc" end })
+        Sec4:Toggle({ Name = "Moving gradient", Flag = "CursorWatermarkGradient", Default = true,
+            Callback = function(v) C.WatermarkGradient = v end })
     end
 end
 
