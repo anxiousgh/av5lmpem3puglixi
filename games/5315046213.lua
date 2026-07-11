@@ -37,6 +37,8 @@ local S = {
     turnSign = 1,           -- calibration for which way mousemoverel turns (+1/-1)
     minSpeed = 6,           -- need this much horizontal speed before we bother strafing
 }
+-- expose for live tuning (Claude reads/writes via getgenv().WH.strafe)
+do local g = getgenv and getgenv(); if g then g.WH = g.WH or {}; g.WH.strafe = S end end
 
 local function myHRP()
     local c = LocalPlayer.Character
