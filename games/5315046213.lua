@@ -2,16 +2,14 @@
 --  games/5315046213.lua  --  Strafe / bhop game (Source-style air physics)
 --
 --  Decoded live (2026-07-11): custom CFrame movement on an anchored HRP, Source
---  AirAccelerate physics (add air_accel*dt in wishdir, capped at style `mv`),
---  ~100Hz tick, WASD + Space. Velocity object is obfuscated, so we read velocity
---  DIRECTION from HumanoidRootPart position deltas and drive input.
+--  AirAccelerate physics, ~100Hz tick, WASD + Space. Velocity object obfuscated,
+--  so we read velocity DIRECTION from HumanoidRootPart position deltas.
 --
---  Strafe ASSIST (v3, ported from a CS:S strafe optimizer's "Silent/legit" mode):
---  it does NOT move your camera on its own. YOU turn; while Space is held and
---  you're airborne it reads your mouse turn, holds the matching strafe key, and
---  BOOSTS or SLOWS your turn so it tracks your velocity vector (keeping the
---  wishdir ~perpendicular = max AirAccelerate gain). Strength blends between
---  "all you" (0%) and "fully optimal" (100%). Camera sens ~6.6 px/deg (measured).
+--  Strafe ASSIST (v4): you steer, it boosts/slows your turn toward the optimal
+--  (tracking your velocity's rotation) -- active only while Space is held.
+--  Fixes over v3: smoothed velocity (less choppy); target = velocity's turn RATE,
+--  not zero, so it never fights your turning; slowing is clamped so it can never
+--  cancel your own movement; lower magnitude. Debug recorder for tuning.
 -- ============================================================
 local ctx     = ({ ... })[1]
 local Library = ctx.Library
@@ -27,33 +25,31 @@ local LocalPlayer = Players.LocalPlayer
 local conns = {}
 local function track(c) conns[#conns + 1] = c; return c end
 
-local PX_PER_DEG = 6.6   -- mousemoverel(120) turned ~18deg
+local PX_PER_DEG = 6.6
 
 local S = {
     bhop = false,
     assist = false,
-    strength = 0.5,      -- 0 = no help, 1 = fully optimal (hijack). Boost/slow amount.
-    maxAngle = 8,        -- cap on degrees the assist adds/removes per frame
-    minSpeed = 8,        -- min horizontal speed to activate
-    deadzone = 1.5,      -- min mouse movement (px/frame) before we assist -- you must be turning
-    autoKey = true,      -- auto-hold A/D matching your turn direction (else you press them)
-    mouseSign = 1,       -- calibration: which sign of mouse-X = turning right
-    turnSign = 1,        -- calibration: which sign of mousemoverel = turning right
+    strength = 0.5,     -- how hard to pull your turn toward optimal
+    maxBoost = 6,       -- max deg/frame the assist may ADD (boost cap; also "too fast" fix)
+    maxSlow = 0.5,      -- assist may remove at most this fraction of YOUR turn (never cancels you)
+    smooth = 0.3,       -- injection smoothing (lower = smoother, fixes chop)
+    minSpeed = 8,
+    autoKey = true,
+    mouseSign = 1, turnSign = 1,
+    debug = false,
 }
--- expose for live tuning (Claude reads/writes via getgenv().WH.strafe)
 do local g = getgenv and getgenv(); if g then g.WH = g.WH or {}; g.WH.strafe = S end end
 
 local function myHRP()
     local c = LocalPlayer.Character
     return c and c:FindFirstChild("HumanoidRootPart")
 end
-
-local function signedYaw(a, b)   -- signed horizontal angle (rad) from a to b
+local function signedYaw(a, b)
     local cross = a.X * b.Z - a.Z * b.X
     local dot = math.clamp(a.X * b.X + a.Z * b.Z, -1, 1)
     return math.atan2(cross, dot)
 end
-
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 local function grounded(pos)
@@ -61,7 +57,6 @@ local function grounded(pos)
     return Workspace:Raycast(pos, Vector3.new(0, -5, 0), rayParams) ~= nil
 end
 
--- ---- input ----
 local heldKey = nil
 local function holdStrafe(keyCode)
     if heldKey == keyCode then return end
@@ -70,7 +65,6 @@ local function holdStrafe(keyCode)
     if keyCode then pcall(function() VIM:SendKeyEvent(true, keyCode, false, game) end) end
 end
 local function releaseStrafe() holdStrafe(nil) end
-
 local _lastJump = 0
 local function tapJump()
     if os.clock() - _lastJump < 0.04 then return end
@@ -79,8 +73,11 @@ local function tapJump()
     pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game) end)
 end
 
--- ---- main loop ----
-local lastPos, _lastInject = nil, 0
+-- debug ring buffer (Claude reads getgenv().WH.strafe._dbg)
+S._dbg = {}
+local function dbg(row) if S.debug then local d = S._dbg; d[#d + 1] = row; if #d > 150 then table.remove(d, 1) end end end
+
+local lastPos, velSmooth, prevVel, _turnAccum, _lastInject = nil, nil, nil, 0, 0
 
 track(RunService.RenderStepped:Connect(function(dt)
     local hrp = myHRP()
@@ -92,45 +89,43 @@ track(RunService.RenderStepped:Connect(function(dt)
     lastPos = pos
     local onGround = grounded(pos)
 
-    if S.bhop and onGround then tapJump() end   -- auto-bhop (optional)
+    if S.bhop and onGround then tapJump() end
 
-    -- assist gates: enabled + Space held + airborne + actually moving
     if not S.assist or onGround or speed < S.minSpeed or delta.Magnitude < 1e-4
         or not UIS:IsKeyDown(Enum.KeyCode.Space) then
         if S.autoKey then releaseStrafe() end
-        _lastInject = 0
+        _lastInject = 0; velSmooth = nil; prevVel = nil; _turnAccum = 0
         return
     end
 
-    -- your real mouse turn this frame (subtract our own injection to avoid a loop)
-    local playerDx = (UIS:GetMouseDelta().X - _lastInject) * S.mouseSign
-
-    -- you must actively be turning for the assist to kick in
-    if math.abs(playerDx) < S.deadzone then
-        if S.autoKey then releaseStrafe() end
-        _lastInject = 0
-        return
-    end
-
-    -- hold the strafe key matching your turn direction (turn right -> D)
-    if S.autoKey then holdStrafe(playerDx > 0 and Enum.KeyCode.D or Enum.KeyCode.A) end
-
-    -- optimal turn this frame = the amount that realigns look with your velocity
-    -- (so the strafe key's wishdir stays perpendicular). Boost/slow you toward it.
+    -- smoothed velocity direction (raw position delta is jittery -> choppy)
     local velDir = delta.Unit
-    local lv = Workspace.CurrentCamera.CFrame.LookVector
-    local look = Vector3.new(lv.X, 0, lv.Z)
-    if look.Magnitude < 1e-3 then return end
-    look = look.Unit
+    velSmooth = velSmooth and (velSmooth * 0.6 + velDir * 0.4) or velDir
+    if velSmooth.Magnitude > 1e-3 then velSmooth = velSmooth.Unit end
+    -- how much the velocity vector rotated this frame = the ideal camera turn to track it
+    local velTurnDeg = prevVel and math.deg(signedYaw(prevVel, velSmooth)) or 0
+    prevVel = velSmooth
 
-    local desiredDeg = math.deg(signedYaw(look, velDir))     -- optimal turn (signed, toward velocity)
-    local playerDeg = playerDx / PX_PER_DEG                  -- your turn this frame, in degrees
-    local injectDeg = (desiredDeg - playerDeg) * S.strength  -- close the gap (boost/slow)
-    if S.maxAngle > 0 then injectDeg = math.clamp(injectDeg, -S.maxAngle, S.maxAngle) end
+    -- your mouse turn this frame (best-effort remove our own injection)
+    local playerDeg = ((UIS:GetMouseDelta().X - _lastInject) / PX_PER_DEG) * S.mouseSign
 
-    local injectPx = injectDeg * PX_PER_DEG * S.turnSign
+    -- strafe key follows your turn direction (fall back to velocity's rotation)
+    local dirSign = (math.abs(playerDeg) > 0.2 and (playerDeg > 0 and 1 or -1))
+        or (velTurnDeg > 0 and 1 or -1)
+    if S.autoKey then holdStrafe(dirSign > 0 and Enum.KeyCode.D or Enum.KeyCode.A) end
+
+    -- boost/slow YOUR turn toward the optimal (= velocity's rotation rate)
+    local injectDeg = (velTurnDeg - playerDeg) * S.strength
+    -- boost is capped; slowing can never remove more than maxSlow of your own turn
+    injectDeg = math.clamp(injectDeg, -math.abs(playerDeg) * S.maxSlow, S.maxBoost)
+    _turnAccum = _turnAccum + (injectDeg - _turnAccum) * math.clamp(S.smooth, 0.05, 1)
+
+    local injectPx = _turnAccum * PX_PER_DEG * S.turnSign
     pcall(function() mousemoverel(injectPx, 0) end)
     _lastInject = injectPx
+
+    dbg({ spd = math.floor(speed), vturn = math.floor(velTurnDeg * 10) / 10,
+          you = math.floor(playerDeg * 10) / 10, inj = math.floor(_turnAccum * 10) / 10 })
 end))
 
 -- ============================================================
@@ -149,20 +144,19 @@ do
         Callback = function(v) S.bhop = v end })
     Sec:Slider({ Name = "Min speed", Flag = "ST_MinSpeed", Min = 0, Max = 60, Default = 8, Decimals = 0,
         Callback = function(v) S.minSpeed = v end })
-    Sec:Label({ Name = "you turn -- it boosts/slows your strafe to optimal" })
+    Sec:Label({ Name = "you turn -- it boosts/slows toward optimal" })
 
     local Sec2 = Sub:Section({ Name = "Tuning", Side = 2 })
     Sec2:Slider({ Name = "Strength", Flag = "ST_Strength", Min = 0, Max = 100, Default = 50, Decimals = 0, Suffix = " %",
         Callback = function(v) S.strength = v / 100 end })
-    Sec2:Slider({ Name = "Max angle / frame", Flag = "ST_MaxAngle", Min = 0, Max = 30, Default = 8, Decimals = 0, Suffix = " deg",
-        Callback = function(v) S.maxAngle = v end })
-    Sec2:Slider({ Name = "Deadzone", Flag = "ST_Deadzone", Min = 0, Max = 10, Default = 15, Decimals = 1, Suffix = " px",
-        Callback = function(v) S.deadzone = v / 10 end })
+    Sec2:Slider({ Name = "Boost cap", Flag = "ST_MaxBoost", Min = 1, Max = 20, Default = 6, Decimals = 0, Suffix = " deg",
+        Callback = function(v) S.maxBoost = v end })
+    Sec2:Slider({ Name = "Smoothness", Flag = "ST_Smooth", Min = 5, Max = 100, Default = 30, Decimals = 0, Suffix = " %",
+        Callback = function(v) S.smooth = v / 100 end })
     Sec2:Toggle({ Name = "Flip mouse read", Flag = "ST_MouseSign", Default = false,
         Callback = function(v) S.mouseSign = v and -1 or 1 end })
     Sec2:Toggle({ Name = "Flip turn output", Flag = "ST_TurnSign", Default = false,
         Callback = function(v) S.turnSign = v and -1 or 1 end })
-    Sec2:Label({ Name = "if it fights your turn, flip mouse read or turn output" })
 end
 
 pcall(function() ctx.load("games/universal.lua")(ctx) end)
