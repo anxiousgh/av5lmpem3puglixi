@@ -63,6 +63,8 @@ local PC = {
     dsBurst = false,               -- auto-shoot desync burst in flight (off -> shoot -> on)
     autoTpsLast = 0,               -- last auto TP-shoot burst (inter-burst gap)
     godHum = nil, godPending = false, -- godmode: humanoid the track lives on + one-pending guard
+    suspC = 0, suspT = 0,          -- anti-cheat suspension remaining (cached)
+    riskyShotAt = 0,               -- last over-threshold (suspension-risking) shot
 }
 -- OUR REAL root position. While the universal Desync is spoofing, the live root (and the
 -- whole character with it) may sit at the void when this runs -- Heartbeat spoof fires
@@ -78,6 +80,30 @@ function PC.realPos()
     local lc = LocalPlayer.Character
     local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
     return lhrp and lhrp.Position or nil
+end
+-- Anti-cheat suspension gate. Decoded live 2026-07-11: a Shoot whose spoofed origin sits
+-- more than ~11 studs from our replicated body makes the server fire
+-- MainEvent WarningIndicator "SUSPENDED_BY_ANTICHEAT" and write a FUTURE server-time into
+-- Character.BodyEffects.AnticheatEffects.INTERACTION_SUSPENDED. The game's OWN client reads
+-- that (MainModule.canInteract) and freezes all actions until it lapses (~5-6s). Firing
+-- THROUGH the suspension is the one thing a legit client physically can't do -> the server
+-- escalates to a KICK after a few. So we mirror the legit client: while suspended, hold
+-- fire. Returns seconds remaining (0 = clear). Cached ~0.1s since the shot paths poll it.
+function PC.suspendedFor()
+    local now = os.clock()
+    if now - PC.suspT < 0.1 then return PC.suspC end
+    PC.suspT = now
+    local rem = 0
+    local c = LocalPlayer.Character
+    local be = c and c:FindFirstChild("BodyEffects")
+    local ae = be and be:FindFirstChild("AnticheatEffects")
+    local v = ae and ae:FindFirstChild("INTERACTION_SUSPENDED")
+    if v then
+        local ok, srv = pcall(function() return Workspace:GetServerTimeNow() end)
+        if ok then rem = math.max(0, (tonumber(v.Value) or 0) - srv) end
+    end
+    PC.suspC = rem
+    return rem
 end
 -- memoized: this gets hammered every frame from targeting/radar/checks, and the raw
 -- folder scan + FindFirstChild-by-name is expensive at 40 players. 0.3s TTL + a
@@ -124,6 +150,7 @@ local HC = {
     checkKnocked = false, checkGrabbed = false, checkFF = false, checkLoaded = false,
     -- force hit (fire the witherhook no-kick synth at the target on click) + FX
     forceHit = false, hitPart = "Head", forceHitCooldown = 0.18, wallbang = false, wallbangOffset = 10,
+    respectSuspension = true,      -- hold fire while the anti-cheat suspends us (kick avoider)
     wbVisualize = false,  -- marker at the spot the wallbang would spoof the origin to
     tracerEnabled = true, tracerColor = Color3.fromRGB(0, 255, 80),
     tracerStyle = "Standard", tracerLifetime = 0.2, tracerThickness = 0.12,
@@ -465,9 +492,13 @@ end
 -- budget, (b) in OPEN AIR -- not embedded in a wall -- and (c) have clear LoS to the target.
 -- We gather candidates (straight through the wall, UP into the sky to shoot someone below,
 -- and peeks around cover) and pick the CLOSEST valid one. nil = skip the shot (no error).
--- HARD CAP 11 (vampire raised it back 2026-07-05; a 2026-07-04 live test saw 11 trip
--- "origin mismatch" -- if the error returns, drop to 10).
-local WB_HARD_CAP = 11
+-- CAP 20. Live-decoded 2026-07-11: offsets past ~11 studs make the server SUSPEND us
+-- (SUSPENDED_BY_ANTICHEAT -> INTERACTION_SUSPENDED), NOT hard-reject the shot. That
+-- suspension is survivable on its own -- it only escalates to a KICK if we keep firing
+-- through it, which PC.suspendedFor() now prevents. So the cap can sit past 11 for longer
+-- wallbangs; the offset slider (default 11) is the real knob, and every over-~11 shot
+-- costs a brief hold-fire. Keep 11 or below for zero suspensions; raise it to reach further.
+local WB_HARD_CAP = 20
 -- The server rejects a shot whose ORIGIN is farther than this from the hit ("range too long").
 -- The origin-spoof (<=WB_HARD_CAP studs) can therefore extend our effective reach: sit up to
 -- WB_HARD_CAP studs past this, and pull the spoofed origin back inside it. 2-stud safety margin.
@@ -572,6 +603,12 @@ local _fhSpoofOrigin, _fhSpoofAt = nil, 0
 local _tpsWallbang = false   -- TP-shoot "Wallbang" mode: force the origin-spoof for this shot
 local function fireShootAt(part)
     if not part then return false end
+    -- while the anti-cheat has us suspended, DON'T fire (a legit client can't either) --
+    -- shooting through the suspension is what escalates a survivable suspension into a kick.
+    -- Also hold for ~0.5s after an over-threshold shot: the suspension flag lands a server
+    -- round-trip late, and stacking more bad shots into that blind window is what kicks.
+    if HC.respectSuspension and (PC.suspendedFor() > 0
+        or os.clock() - (PC.riskyShotAt or 0) < 0.5) then return false end
     local me = getMainEvent(); if not me then return false end
     local c = LocalPlayer.Character
     local root = c and c:FindFirstChild("HumanoidRootPart"); if not root then return false end
@@ -602,7 +639,13 @@ local function fireShootAt(part)
     end
     -- aim == origin keeps the spread PRNG check happy (degenerate ray).
     local payload = { hits, targets, origin, origin, Workspace:GetServerTimeNow() }
-    return pcall(function() me:FireServer("Shoot", payload) end)
+    local ok = pcall(function() me:FireServer("Shoot", payload) end)
+    -- past ~11 studs of spoof the server will suspend us ~0.5s from now; arm the pre-flag
+    -- hold so the next shots don't stack into the blind window before the flag lands
+    if ok and HC.respectSuspension and (origin - realOrigin).Magnitude > 11 then
+        PC.riskyShotAt = os.clock()
+    end
+    return ok
 end
 
 -- ============================================================
@@ -2681,8 +2724,11 @@ do
         Callback = function(v) HC.forceHitCooldown = v / 1000 end })
     Sec2:Toggle({ Name = "Wallbang if possible", Flag = "HC_Wallbang", Default = false,
         Callback = function(v) HC.wallbang = v end })
-    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 11, Default = 11, Decimals = 0, Suffix = " studs",
+    Sec2:Slider({ Name = "Max origin offset", Flag = "HC_WallbangOffset", Min = 0, Max = 20, Default = 11, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.wallbangOffset = v end })
+    Sec2:Toggle({ Name = "Respect anticheat (no kick)", Flag = "HC_RespectSusp", Default = true,
+        Callback = function(v) HC.respectSuspension = v end })
+    Sec2:Label({ Name = "<=11 = no suspensions; >11 reaches further but holds fire briefly each trip." })
     Sec2:Toggle({ Name = "Visualize wallbang spot", Flag = "HC_WbVisualize", Default = false,
         Callback = function(v) HC.wbVisualize = v end })
     Sec2:Toggle({ Name = "Fake ammo HUD (real ammo)", Flag = "HC_AmmoHud", Default = false,
