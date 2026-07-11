@@ -1013,7 +1013,7 @@ local function nhackPanel(frame)
     acc.BorderSizePixel = 0
     acc.Position = UDim2.new(0, 0, 0, 0)
     acc.Size = UDim2.new(1, 0, 0, 1)
-    acc.BackgroundColor3 = themeC("Accent", Color3.fromRGB(200, 183, 247))
+    acc.BackgroundColor3 = themeC("Accent", Color3.fromRGB(248, 212, 255))
     acc.Parent = frame
     local grad = Instance.new("UIGradient")
     grad.Transparency = NumberSequence.new({
@@ -1193,7 +1193,7 @@ local function ensureRadar()
     arm.AnchorPoint = Vector2.new(0, 0.5)
     arm.Position = UDim2.fromScale(0.5, 0.5)
     arm.Size = UDim2.new(0.5, 0, 0, 1)
-    arm.BackgroundColor3 = themeC("Accent", Color3.fromRGB(200, 183, 247))
+    arm.BackgroundColor3 = themeC("Accent", Color3.fromRGB(248, 212, 255))
     arm.Parent = radarSweep
     local ag = Instance.new("UIGradient")
     ag.Transparency = NumberSequence.new({
@@ -1224,7 +1224,7 @@ local function ensureRadar()
     me.AnchorPoint = Vector2.new(0.5, 0.5)
     me.Position = UDim2.fromScale(0.5, 0.5)
     me.Size = UDim2.fromOffset(6, 6)
-    me.BackgroundColor3 = themeC("Accent", Color3.fromRGB(200, 183, 247))
+    me.BackgroundColor3 = themeC("Accent", Color3.fromRGB(248, 212, 255))
     me.BorderSizePixel = 0
     me.Parent = radarFrame
     local ms = Instance.new("UIStroke")
@@ -1390,7 +1390,7 @@ local function killfeedAdd(plr, model)
         return lbl
     end
     -- plain text, no glyphs: "name  gun  distance"
-    seg("  " .. plr.Name, "Accent", Color3.fromRGB(200, 183, 247))
+    seg("  " .. plr.Name, "Accent", Color3.fromRGB(248, 212, 255))
     seg(("  %s  %dm  "):format(gun, dist), "Text", Color3.fromRGB(240, 240, 242))
     -- cap the feed at 6 entries: kill the oldest
     local entries = {}

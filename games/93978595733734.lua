@@ -89,7 +89,7 @@ end
 local T = (Library and Library.Theme) or {}
 local PAL = {
     killer  = T["Risky"] or Color3.fromRGB(255, 70, 80),
-    accent  = T["Accent"] or Color3.fromRGB(200, 183, 247),
+    accent  = T["Accent"] or Color3.fromRGB(248, 212, 255),
     muted   = T["Inactive Text"] or Color3.fromRGB(131, 120, 162),
     text    = T["Text"] or Color3.fromRGB(240, 240, 242),
     bg      = T["Background"] or Color3.fromRGB(22, 22, 25),

@@ -62,7 +62,7 @@ end
 local function uiParent() return (gethui and gethui()) or game:GetService("CoreGui") end
 -- GUI theme accent so world visuals match the menu (live: themes can change)
 local function accent()
-    return (Library.Theme and Library.Theme["Accent"]) or Color3.fromRGB(200, 183, 247)
+    return (Library.Theme and Library.Theme["Accent"]) or Color3.fromRGB(248, 212, 255)
 end
 
 -- ============================================================
@@ -80,7 +80,7 @@ do
     end
     table.sort(catList)
     -- distinct hue per category, nudged toward the GUI accent so it fits the theme
-    local acc = Color3.fromRGB(200, 183, 247)
+    local acc = Color3.fromRGB(248, 212, 255)
     for i, name in ipairs(catList) do
         catColor[name] = Color3.fromHSV((i * 0.618034) % 1, 0.6, 1):Lerp(acc, 0.2)
     end

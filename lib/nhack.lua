@@ -213,14 +213,14 @@ do
     end
 
     local Themes = {
-        -- [wh] Neutral dark-gray UI with the purple palette as accents:
-        -- #c8b7f7 = Accent, #3e394d = Outline, #8378a2 = Inactive Text.
+        -- [wh] Neutral dark-gray UI accented with the anxious.sh pink:
+        -- #f8d4ff = Accent, #3e394d = Outline, #8378a2 = Inactive Text.
         -- Background/elements are neutral grays; Text is white.
         ["Preset"] = {
             ["Background"] = Color3.fromRGB(22, 22, 25),
             ["Outline"] = Color3.fromRGB(62, 57, 77),        -- #3e394d
             ["Border"] = Color3.fromRGB(10, 10, 12),
-            ["Accent"] = Color3.fromRGB(200, 183, 247),      -- #c8b7f7
+            ["Accent"] = Color3.fromRGB(248, 212, 255),      -- #f8d4ff
             ["Risky"] = Color3.fromRGB(255, 70, 80),
             ["Light Border"] = Color3.fromRGB(16, 16, 19),
             ["Border 2"] = Color3.fromRGB(7, 7, 9),
@@ -1620,7 +1620,7 @@ do
     -- ============================================================
     Library.FOV = {
         Settings = {
-            Color = Color3.fromRGB(200, 183, 247),   -- ~GUI accent
+            Color = Color3.fromRGB(248, 212, 255),   -- ~GUI accent
             Gradient = true,
             Color2 = Color3.fromRGB(120, 120, 130),   -- gray
             Thickness = 1,
@@ -1744,7 +1744,7 @@ do
         Settings = {
             Enabled = false,
             Style = "Arrow",     -- Arrow | Circle | Dot | Crosshair
-            Color = Color3.fromRGB(200, 183, 247),
+            Color = Color3.fromRGB(248, 212, 255),
             Size = 16,
             Outline = true,
             Opacity = 1,          -- 1 = solid
@@ -3880,14 +3880,14 @@ do
             -- limb positions.)
             local OverlayBox = Library:Create("Frame", {
                 Name = "\0", Parent = Items["Background"].Instance, ZIndex = 5,
-                BackgroundColor3 = Color3.fromRGB(200, 183, 247),
+                BackgroundColor3 = Color3.fromRGB(248, 212, 255),
                 BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
                 AnchorPoint = Vector2.new(0.5, 0),
                 Position = UDim2.new(0.5, 0, 0.34, 0), Size = UDim2.new(0.24, 0, 0.42, 0),
             })
             local OverlayStroke = Library:Create("UIStroke", {
                 Name = "\0", Parent = OverlayBox.Instance, Thickness = 1,
-                Color = Color3.fromRGB(200, 183, 247),
+                Color = Color3.fromRGB(248, 212, 255),
             })
             -- corner brackets (shown for the "Corner" style)
             local Corners = {}
@@ -3906,7 +3906,7 @@ do
                     Corners[i] = Library:Create("Frame", {
                         Name = "\0", Parent = OverlayBox.Instance, ZIndex = 6,
                         BorderSizePixel = 0, Visible = false,
-                        BackgroundColor3 = Color3.fromRGB(200, 183, 247),
+                        BackgroundColor3 = Color3.fromRGB(248, 212, 255),
                         AnchorPoint = sp[1], Position = sp[2], Size = sp[3],
                     })
                 end
@@ -3936,7 +3936,7 @@ do
             local OverlayTracer = Library:Create("Frame", {
                 Name = "\0", Parent = Items["Background"].Instance, ZIndex = 4,
                 BorderSizePixel = 0, Visible = false,
-                BackgroundColor3 = Color3.fromRGB(200, 183, 247),
+                BackgroundColor3 = Color3.fromRGB(248, 212, 255),
                 AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, 0),
                 Size = UDim2.new(0, 1, 0.24, 0),
             })
@@ -3944,7 +3944,7 @@ do
             Library:Connect(RunService.RenderStepped, function()
                 local s = getgenv and getgenv().WH and getgenv().WH.espPreview
                 local on = (s and s.enabled and Items["ESPPreview"].Instance.Visible) and true or false
-                local col = (s and s.color) or Color3.fromRGB(200, 183, 247)
+                local col = (s and s.color) or Color3.fromRGB(248, 212, 255)
                 local style = (s and s.boxType) or "Full"
                 local showBox = on and (not s or s.box ~= false)
 

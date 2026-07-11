@@ -337,12 +337,12 @@ end
 -- ============================================================
 local Esp = {
     enabled = false, box = true, names = false, distance = false, health = false,
-    teamCheck = false, color = Color3.fromRGB(200, 183, 247),
+    teamCheck = false, color = Color3.fromRGB(248, 212, 255),
     boxType = "Full",                 -- "Full" | "Corner" | "Solid"
     fillOpacity = 0.4,                -- Drawing alpha for the "Solid" filled box
     tracer = false, tracerOrigin = "Bottom",   -- "Bottom" | "Top" | "Mouse"
     chams = false,                    -- in-game Highlight
-    chamsFill = Color3.fromRGB(200, 183, 247),
+    chamsFill = Color3.fromRGB(248, 212, 255),
     chamsOutline = Color3.fromRGB(255, 255, 255),
     chamsTransparency = 0.6,          -- Highlight FillTransparency (0 = solid)
     skeleton = false,
@@ -1437,13 +1437,13 @@ do
         Items = { "Bottom", "Top", "Mouse" },
         Callback = function(v) Esp.tracerOrigin = (type(v) == "table" and v[1]) or v or "Bottom" end })
     Sec2:Label({ Name = "ESP color" }):Colorpicker({
-        Flag = "EspColor", Default = Color3.fromRGB(200, 183, 247),
+        Flag = "EspColor", Default = Color3.fromRGB(248, 212, 255),
         Callback = function(c) Esp.color = c end })
     Sec2:Slider({ Name = "Solid box opacity", Flag = "EspFillOp",
         Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
         Callback = function(v) Esp.fillOpacity = v / 100 end })
     Sec2:Label({ Name = "Chams fill" }):Colorpicker({
-        Flag = "EspChamsFill", Default = Color3.fromRGB(200, 183, 247),
+        Flag = "EspChamsFill", Default = Color3.fromRGB(248, 212, 255),
         Callback = function(c) Esp.chamsFill = c end })
     Sec2:Label({ Name = "Chams outline" }):Colorpicker({
         Flag = "EspChamsOutline", Default = Color3.fromRGB(255, 255, 255),
