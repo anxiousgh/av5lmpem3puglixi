@@ -1960,9 +1960,11 @@ do
             P.DotStroke.Transparency = Trans
         elseif Style == "Crosshair" then
             P.CrossHolder.Rotation = Rot
-            local Gap = math.max(0, S.CrossGap or 4)
-            local Len = math.max(1, S.CrossLength or 8)
-            local Th  = math.max(1, S.CrossThickness or 2)
+            -- when pulsing, scale the crosshair proportionally to the pulsed size
+            local Scale = (S.Pulse and (Size / math.max(1, S.Size or 16))) or 1
+            local Gap = math.max(0, (S.CrossGap or 4) * Scale)
+            local Len = math.max(1, (S.CrossLength or 8) * Scale)
+            local Th  = math.max(1, (S.CrossThickness or 2) * Scale)
             local A = P.CrossArms
             A.Top.Frame.Position    = UDim2.fromOffset(0, -Gap); A.Top.Frame.Size    = UDim2.fromOffset(Th, Len)
             A.Bottom.Frame.Position = UDim2.fromOffset(0, Gap);  A.Bottom.Frame.Size = UDim2.fromOffset(Th, Len)
