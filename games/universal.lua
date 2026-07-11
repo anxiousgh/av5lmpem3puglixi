@@ -343,7 +343,7 @@ local Esp = {
     avatar = false, avatarSize = 24,  -- round headshot chip above the box
     -- fill / motion: same knobs as Library.FOV.Settings (the box is a GUI frame
     -- + UIStroke so the fill AND outline can carry a spinning gradient)
-    fill = false, fillOpacity = 0.4,
+    fill = true, fillOpacity = 0.29,
     gradient = true, color2 = Color3.fromRGB(50, 50, 50),
     spin = true, spinSpeed = 114,     -- degrees / second
     rainbow = false, rainbowSpeed = 1,
@@ -1589,10 +1589,10 @@ do
         Callback = function(v) Esp.avatarSize = v end })
 
     local Sec3 = EspSub:Section({ Name = "Fill & Motion", Side = 2 })
-    Sec3:Toggle({ Name = "Fill", Flag = "EspFill", Default = false,
+    Sec3:Toggle({ Name = "Fill", Flag = "EspFill", Default = true,
         Callback = function(v) Esp.fill = v end })
     Sec3:Slider({ Name = "Fill opacity", Flag = "EspFillOp",
-        Min = 0, Max = 100, Default = 40, Decimals = 0, Suffix = "%",
+        Min = 0, Max = 100, Default = 29, Decimals = 0, Suffix = "%",
         Callback = function(v) Esp.fillOpacity = v / 100 end })
     Sec3:Toggle({ Name = "Spin", Flag = "EspSpin", Default = true,
         Callback = function(v) Esp.spin = v end })
