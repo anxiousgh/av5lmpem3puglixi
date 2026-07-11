@@ -1622,7 +1622,7 @@ do
         Settings = {
             Color = Color3.fromRGB(248, 212, 255),   -- ~GUI accent
             Gradient = true,
-            Color2 = Color3.fromRGB(120, 120, 130),   -- gray
+            Color2 = Color3.fromRGB(80, 80, 90),   -- darker gray
             Thickness = 1,
             Fill = true,
             FillOpacity = 0.29,
