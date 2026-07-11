@@ -87,6 +87,10 @@ end
 -- be torn down on unload / re-execution (see disableAll at the bottom).
 local Connections = {}
 local function track(c) Connections[#Connections + 1] = c; return c end
+-- Drawing objects live outside the instance tree, so they must be :Remove()'d
+-- explicitly on unload (a Disconnect alone leaves them on screen).
+local Drawings = {}
+local function trackDraw(d) if d then Drawings[#Drawings + 1] = d end; return d end
 
 --  CAMLOCK  (camera lock to the nearest target inside the FOV)
 -- ============================================================
@@ -194,12 +198,21 @@ end
 local CamLock = {
     enabled = false, fov = 120, smoothing = 0.5, sticky = false,
     teamCheck = true, hitPart = "Head", visibleCheck = false, showFov = false,
+    fovFill = false, fovFillOpacity = 0.3,
 }
 do
-    local fovCircle = mkDraw("Circle", {
+    -- accent colour pulled from the live theme so the FOV ring matches the GUI.
+    local accent = (Library and Library.Theme and Library.Theme["Accent"]) or Color3.fromRGB(200, 183, 247)
+    -- filled disc sits UNDER the crisp outline ring (lower ZIndex); its alpha is
+    -- driven by the Fill opacity slider. Drawing transparency: 1 == fully opaque.
+    local fovFillCircle = trackDraw(mkDraw("Circle", {
+        Thickness = 0, NumSides = 64, Filled = true, Visible = false,
+        Transparency = 0.3, Color = accent, ZIndex = 1,
+    }))
+    local fovCircle = trackDraw(mkDraw("Circle", {
         Thickness = 1, NumSides = 64, Filled = false, Visible = false,
-        Transparency = 1, Color = Color3.fromRGB(200, 183, 247),
-    })
+        Transparency = 1, Color = accent, ZIndex = 2,
+    }))
     local stickyTarget = nil   -- Player held while sticky is on
 
     local function resolvePart(plr)
@@ -240,9 +253,16 @@ do
     track(RunService.RenderStepped:Connect(function(dt)
         if fovCircle then
             fovCircle.Visible = CamLock.showFov
+            if fovFillCircle then fovFillCircle.Visible = CamLock.showFov and CamLock.fovFill end
             if CamLock.showFov then
+                local mouse = UserInputService:GetMouseLocation()
                 fovCircle.Radius = CamLock.fov
-                fovCircle.Position = UserInputService:GetMouseLocation()
+                fovCircle.Position = mouse
+                if fovFillCircle and CamLock.fovFill then
+                    fovFillCircle.Radius = CamLock.fov
+                    fovFillCircle.Position = mouse
+                    fovFillCircle.Transparency = CamLock.fovFillOpacity
+                end
             end
         end
         if not CamLock.enabled then stickyTarget = nil; return end
@@ -404,6 +424,11 @@ do
         Callback = function(v) CamLock.visibleCheck = v end })
     Sec2:Toggle({ Name = "Show FOV", Flag = "CamLockShowFov", Default = false,
         Callback = function(v) CamLock.showFov = v end })
+    Sec2:Toggle({ Name = "Fill FOV", Flag = "CamLockFovFill", Default = false,
+        Callback = function(v) CamLock.fovFill = v end })
+    Sec2:Slider({ Name = "Fill opacity", Flag = "CamLockFovFillOpacity",
+        Min = 5, Max = 100, Default = 30, Decimals = 0, Suffix = "%",
+        Callback = function(v) CamLock.fovFillOpacity = v / 100 end })
 end
 
 local TrigSub = CombatPage:SubPage({ Name = "Triggerbot" })
@@ -597,6 +622,7 @@ end
 do
     local function full()
         for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
+        for _, d in ipairs(Drawings) do pcall(function() d.Visible = false end); pcall(function() d:Remove() end) end
         pcall(function() RunService:UnbindFromRenderStep("WH_FlingOrbitRestore") end)
     end
     local g = getgenv and getgenv()

@@ -1416,6 +1416,116 @@ do
         end
     end
 
+    -- ============================================================
+    --  [wh] Shared shimmer engine
+    --
+    --  One throttled RenderStepped drives EVERY animated accent gradient in the
+    --  UI (watermark, window liner, keybind liner, ...). Each widget registers a
+    --  UIGradient instead of spinning up its own render loop, so the whole
+    --  travelling-gloss look costs a single ~30fps pass no matter how many
+    --  liners opt in -- that's the "prettier without eating frames" bargain.
+    -- ============================================================
+    Library.Shimmers = {}
+
+    -- Low-level: hand the shared clock a UIGradient to scroll. Speed scales the
+    -- sweep rate; PhaseOffset staggers layered gradients so they drift for depth.
+    Library.RegisterShimmer = function(Self, GradientInstance, Speed, PhaseOffset)
+        if not GradientInstance then return end
+        table.insert(Library.Shimmers, {
+            Gradient = GradientInstance,
+            Speed = Speed or 1,
+            PhaseOffset = PhaseOffset or 0,
+        })
+        return GradientInstance
+    end
+
+    -- A bright white glint that slides across an accent liner. Rides on its own
+    -- overlay frame (white, additive-looking over the accent) so it can shine
+    -- BRIGHTER than the bar -- a plain UIGradient can only ever darken.
+    Library.AddGlint = function(Self, AccentWrapper, Opts)
+        if not AccentWrapper then return end
+        Opts = Opts or {}
+        local Inst = AccentWrapper.Instance or AccentWrapper
+        if not Inst then return end
+        local Shine = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Inst.Parent,
+            AnchorPoint = Inst.AnchorPoint,
+            Position = Inst.Position,
+            Size = Inst.Size,
+            BorderSizePixel = 0,
+            BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+            ZIndex = (Inst.ZIndex or 1) + 1,
+        })
+        local W = Opts.Width or 0.10
+        local Grad = Library:Create("UIGradient", {
+            Name = "\0",
+            Parent = Shine.Instance,
+            Offset = Vector2.new(0, 0),
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 1),
+                NumberSequenceKeypoint.new(math.clamp(0.5 - W, 0.02, 0.48), 1),
+                NumberSequenceKeypoint.new(0.5, Opts.Alpha or 0.25),
+                NumberSequenceKeypoint.new(math.clamp(0.5 + W, 0.52, 0.98), 1),
+                NumberSequenceKeypoint.new(1, 1),
+            })
+        })
+        Library:RegisterShimmer(Grad.Instance, Opts.Speed or 1, Opts.PhaseOffset or 0)
+        return Shine, Grad
+    end
+
+    -- The full signature liner treatment: the watermark's travelling
+    -- transparency sweep on the bar itself + a bright glint sliding on top.
+    Library.AddShimmer = function(Self, AccentWrapper, Opts)
+        if not AccentWrapper then return end
+        Opts = Opts or {}
+        local Inst = AccentWrapper.Instance or AccentWrapper
+        if not Inst then return end
+        local Sweep = Library:Create("UIGradient", {
+            Name = "\0",
+            Parent = Inst,
+            Offset = Vector2.new(0, 0),
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0),
+                NumberSequenceKeypoint.new(0.5, Opts.SweepDepth or 0.55),
+                NumberSequenceKeypoint.new(1, 0),
+            })
+        })
+        Library:RegisterShimmer(Sweep.Instance, Opts.Speed or 1, Opts.PhaseOffset or 0)
+        if Opts.Glint ~= false then
+            Library:AddGlint(AccentWrapper, Opts)
+        end
+        return Sweep
+    end
+
+    do
+        local ShimmerPhase, ShimmerLast, ShimmerStep = 0, 0, (1 / 30)
+        Library:Connect(RunService.RenderStepped, function()
+            local Shimmers = Library.Shimmers
+            if #Shimmers == 0 then return end
+            local Now = tick()
+            local Delta = Now - ShimmerLast
+            if Delta < ShimmerStep then return end
+            ShimmerLast = Now
+            -- ~1.6s for one full sweep; the modulo keeps phase in [0, 1).
+            ShimmerPhase = (ShimmerPhase + Delta * (1 / 1.6)) % 1
+
+            local Live, Compact = {}, false
+            for Index = 1, #Shimmers do
+                local Entry = Shimmers[Index]
+                local Gradient = Entry.Gradient
+                if Gradient and Gradient.Parent then
+                    local Phase = ((ShimmerPhase * Entry.Speed) + Entry.PhaseOffset) % 1
+                    Gradient.Offset = Vector2.new((Phase * 2) - 1, 0)
+                    Live[#Live + 1] = Entry
+                else
+                    Compact = true
+                end
+            end
+            if Compact then Library.Shimmers = Live end
+        end)
+    end
+
     Library.Holder = Library:Create("ScreenGui", {
         Parent = gethui(),
         Name = "\0",
@@ -2855,6 +2965,12 @@ do
                     })
                 })
 
+                -- Drive the watermark sweep off the shared shimmer clock (one loop
+                -- for the whole UI) and give it the same travelling glint the
+                -- window/keybind liners now wear.
+                Library:RegisterShimmer(Items["AccentGradient"].Instance)
+                Library:AddGlint(Items["AccentLiner"])
+
                 -- [wh] The brand is split across separate labels so the
                 -- extension (e.g. ".cc") can be a different colour. RichText
                 -- <font> markup renders as literal tags in this executor, so
@@ -2996,7 +3112,7 @@ do
                     -- label only shows the dynamic suffix (e.g. " | 737fps | time").
                     local PlainText = DynamicTextProvider and DynamicText or WatermarkStatsText
 
-                    Items["AccentGradient"].Instance.Offset = Vector2.new((WatermarkShimmerPhase * 2) - 1, 0)
+                    -- Accent sweep offset is now advanced by the shared shimmer loop.
                     Items["Text"].Instance.Text = PlainText
                 end
 
@@ -3089,6 +3205,8 @@ do
                     BorderSizePixel = 0,
                     BackgroundColor3 = Library.Theme["Accent"]
                 }):AddToTheme({ BackgroundColor3 = 'Accent' })
+
+                Library:AddShimmer(Items["AccentLiner"])
 
                 Items["Content"] = Library:Create("Frame", {
                     Name = "\0",
@@ -7757,6 +7875,8 @@ do
                     BorderSizePixel = 0,
                     BackgroundColor3 = Library.Theme["Accent"]
                 }):AddToTheme({ BackgroundColor3 = 'Accent' })
+
+                Library:AddShimmer(Items["AccentLiner"])
 
                 Items["DarkLiner"] = Library:Create("Frame", {
                     Name = "\0",
