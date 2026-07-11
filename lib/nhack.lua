@@ -1622,7 +1622,7 @@ do
         Settings = {
             Color = Color3.fromRGB(248, 212, 255),   -- ~GUI accent
             Gradient = true,
-            Color2 = Color3.fromRGB(80, 80, 90),   -- darker gray
+            Color2 = Color3.fromRGB(50, 50, 50),   -- dark gray
             Thickness = 1,
             Fill = true,
             FillOpacity = 0.29,
@@ -2003,7 +2003,7 @@ do
                     Text = "",
                     AutoButtonColor = false,
                     Position = UDim2.new(0, 1056, 0, 203),
-                    Size = UDim2.new(0, 230, 0, 205),
+                    Size = UDim2.new(0, 230, 0, 231),
                     BorderSizePixel = 0,
                     BackgroundColor3 = Library.Theme["Background"]
                 }):AddToTheme({ BackgroundColor3 = 'Background' })
@@ -2050,7 +2050,7 @@ do
                     BackgroundColor3 = Color3.fromRGB(255, 255, 255),
                     AutoButtonColor = false,
                     Position = UDim2.new(0, 10, 0, 12),
-                    Size = UDim2.new(1, -46, 1, -48),
+                    Size = UDim2.new(1, -46, 1, -74),
                     BorderSizePixel = 0,
                 })
 
@@ -2133,7 +2133,7 @@ do
                     AnchorPoint = Vector2.new(1, 0),
                     BackgroundColor3 = Color3.fromRGB(255, 255, 255),
                     Position = UDim2.new(1, -10, 0, 12),
-                    Size = UDim2.new(0, 15, 1, -20),
+                    Size = UDim2.new(0, 15, 1, -46),
                     BorderSizePixel = 0
                 })
 
@@ -2186,7 +2186,7 @@ do
                     Text = "",
                     AutoButtonColor = false,
                     AnchorPoint = Vector2.new(0, 1),
-                    Position = UDim2.new(0, 10, 1, -10),
+                    Position = UDim2.new(0, 10, 1, -36),
                     Size = UDim2.new(1, -46, 0, 15),
                     BorderSizePixel = 0
                 })
@@ -2227,6 +2227,33 @@ do
                 Library:Create("UIStroke", {
                     Name = "\0",
                     Parent = Items["AlphaDragger"].Instance,
+                    ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+                    LineJoinMode = Enum.LineJoinMode.Miter,
+                    Color = Library.Theme["Border"]
+                }):AddToTheme({ Color = 'Border' })
+
+                -- Manual colour entry: type "#f8d4ff" or "248,212,255".
+                Items["HexBox"] = Library:Create("TextBox", {
+                    Name = "\0",
+                    FontFace = Library.Font,
+                    TextSize = Library.FontSize,
+                    Parent = Items["ColorpickerWindow"].Instance,
+                    TextColor3 = Library.Theme["Text"],
+                    PlaceholderText = "#hex or r,g,b",
+                    PlaceholderColor3 = Library.Theme["Inactive Text"],
+                    Text = "",
+                    ClearTextOnFocus = false,
+                    TextXAlignment = Enum.TextXAlignment.Center,
+                    AnchorPoint = Vector2.new(0, 1),
+                    Position = UDim2.new(0, 10, 1, -10),
+                    Size = UDim2.new(1, -20, 0, 15),
+                    BorderSizePixel = 0,
+                    BackgroundColor3 = Library.Theme["Element"]
+                }):AddToTheme({ BackgroundColor3 = 'Element', TextColor3 = 'Text' })
+
+                Library:Create("UIStroke", {
+                    Name = "\0",
+                    Parent = Items["HexBox"].Instance,
                     ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
                     LineJoinMode = Enum.LineJoinMode.Miter,
                     Color = Library.Theme["Border"]
@@ -2376,6 +2403,11 @@ do
 
                 if not IsFromAlpha then
                     Items["AlphaColor"]:Tween({ BackgroundColor3 = Colorpicker.Color })
+                end
+
+                -- keep the hex field in sync, but never clobber what's being typed
+                if Items["HexBox"] and not Items["HexBox"].Instance:IsFocused() then
+                    Items["HexBox"].Instance.Text = "#" .. Colorpicker.HexValue
                 end
 
                 if Data.Callback then
@@ -2685,6 +2717,31 @@ do
                 end
 
                 CopyPasteMenu:SetOpen(false)
+            end)
+
+            -- Manual entry: accept "#f8d4ff" / "f8d4ff" hex or "248,212,255" RGB.
+            local function ApplyHexInput()
+                local Raw = tostring(Items["HexBox"].Instance.Text or ""):gsub("%s+", "")
+                local R, G, B = Raw:match("^(%d+)[,;/](%d+)[,;/](%d+)$")
+                if R then
+                    Colorpicker:Set({
+                        math.clamp(tonumber(R), 0, 255),
+                        math.clamp(tonumber(G), 0, 255),
+                        math.clamp(tonumber(B), 0, 255),
+                    }, Colorpicker.Alpha)
+                    return
+                end
+                local Hex = Raw:gsub("^#", "")
+                if Hex:match("^%x%x%x%x%x%x$") then
+                    pcall(function() Colorpicker:Set("#" .. Hex, Colorpicker.Alpha) end)
+                    return
+                end
+                -- invalid input: restore the field to the current colour
+                Items["HexBox"].Instance.Text = "#" .. Colorpicker.HexValue
+            end
+
+            Items["HexBox"]:Connect("FocusLost", function()
+                ApplyHexInput()
             end)
 
             Items["Palette"]:Connect("InputBegan", function(Input)
