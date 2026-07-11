@@ -134,6 +134,8 @@ local HC = {
     asSpoofCheck = false,   -- while Desync is on: burst-shoot (desync off -> shoot -> back on)
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
+    -- snowball launcher: MainEvent "ShootSnowballLauncher" trusts a client Vector3
+    snowball = false, snowballAutoEquip = true,
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
     tpShootMethod = "Wallbang", autoTpShoot = false, autoTpDist = 500,
     -- stomp / reload
@@ -1803,6 +1805,38 @@ track(RunService.Heartbeat:Connect(function()
 end))
 
 -- ============================================================
+--  SNOWBALL LAUNCHER  (client-authoritative aim)
+--
+--  The tool's LocalScript fires MainEvent:FireServer("ShootSnowballLauncher",
+--  mouse.Hit.Position) -- the server trusts that Vector3 (verified live: arbitrary
+--  positions accepted, no anti-cheat) and enforces only its own ~1.5s cooldown via
+--  the tool's DEBOUNCE BoolValue. So we just feed it the target's part position
+--  every time the cooldown clears = perfect aim, no mouse needed.
+-- ============================================================
+local SNOWBALL_NAME = "[Snowball Launcher]"
+local _sbLast = 0
+track(RunService.Heartbeat:Connect(function()
+    if not HC.snowball then return end
+    local plr = getTarget(); if not plr then return end
+    local char = plr.Character
+    local part = char and targetParts(char); if not part then return end
+    local lc = LocalPlayer.Character; if not lc then return end
+    local tool = lc:FindFirstChildOfClass("Tool")
+    if not (tool and tool.Name == SNOWBALL_NAME) then
+        if HC.snowballAutoEquip then tryEquipNamed(SNOWBALL_NAME) end
+        return
+    end
+    -- honor the server cooldown: it sets the tool's DEBOUNCE while on cd. The 0.3s
+    -- floor covers the ~0.13s replication gap before DEBOUNCE flips to true.
+    local db = tool:FindFirstChild("DEBOUNCE")
+    if db and db.Value == true then return end
+    if tick() - _sbLast < 0.3 then return end
+    _sbLast = tick()
+    local me = getMainEvent(); if not me then return end
+    pcall(function() me:FireServer("ShootSnowballLauncher", part.Position) end)
+end))
+
+-- ============================================================
 --  AUTO STOMP  (+ targets mode = only stomp the ragebot target list)
 -- ============================================================
 local function someoneBelow(onlyTarget)
@@ -2704,6 +2738,13 @@ do
         Callback = function(v) HC.stompTeleport = (((type(v) == "table" and v[1]) or v) == "Teleport") end })
     Sec4:Slider({ Name = "Stomp radius", Flag = "HC_StompRadius", Min = 1, Max = 30, Default = 5, Decimals = 0,
         Callback = function(v) HC.stompRadius = v end })
+
+    local Sec5 = CombatSub:Section({ Name = "Snowball Launcher", Side = 2 })
+    Sec5:Toggle({ Name = "Auto snowball at target", Flag = "HC_Snowball", Default = false,
+        Callback = function(v) HC.snowball = v end })
+    Sec5:Toggle({ Name = "Auto equip launcher", Flag = "HC_SnowballEquip", Default = true,
+        Callback = function(v) HC.snowballAutoEquip = v end })
+    Sec5:Label({ Name = "Aims at Hit part; needs a lock or Auto switch" })
 end
 
 -- 2) Ragebot
