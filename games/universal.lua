@@ -946,21 +946,17 @@ local Desync = {
     voidMin = 5000, voidMax = 20000,
     spinSpeed = 2, velMag = 16384,
     customX = 0, customY = 0, customZ = 0,
-    -- keep-awake: force the server to keep receiving the spoof even when idle.
-    -- The character replicator only pushes an update when HRP's transform changes
-    -- from what it last sent. A grounded character's POSITION nudge is instantly
-    -- physics-corrected back to the floor (nets to 0 -> nothing sent), but ROTATION
-    -- is not resisted -- which is exactly why rotating a hair forces an update.
-    -- So the keep-alive wobbles YAW by a tiny alternating angle every frame: an
-    -- ever-fresh orientation delta that replicates continuously while standing
-    -- still (restored locally each RenderStep, so no visible spin; nets to ~0).
+    -- keep-alive: while idle, push the spoof on RunService.Stepped (before physics)
+    -- so Roblox's async network sampler replicates the fake position continuously
+    -- even when standing still. A Heartbeat-set fake sits too late in the frame to
+    -- be sampled. See the Stepped handler below. Off = spoof only refreshes while
+    -- moving (the old behaviour).
     forceLive = true,
 }
 do
     local RESTORE = "WH_DesyncRestore"
     local realCF, realLV, realAV
     local spinAngle = 0
-    local awakeFlip = 1
 
     -- raknet state lives on getgenv so the hook closure survives reloads
     getgenv()._WH_DESYNC = getgenv()._WH_DESYNC or {}
@@ -1019,6 +1015,36 @@ do
         return ok
     end
 
+    -- idle detection: no movement input == standing still. While idle the fake
+    -- must be pushed on Stepped (see below), because a Heartbeat-set fake sits at
+    -- the very end of the frame and Roblox's async network sampler almost always
+    -- catches the RenderStep-restored REAL position instead -> the spoof never
+    -- reaches the server while idle (root cause of vampire's "doesn't update").
+    local function isIdle()
+        local c = getChar()
+        local hum = c and c:FindFirstChildOfClass("Humanoid")
+        if not hum then return false end
+        return hum.MoveDirection.Magnitude < 0.01
+    end
+    local steppedSpoofed = false
+
+    -- Stepped runs right before physics, so a fake set here occupies the whole
+    -- frame until the next RenderStep restore -> the async sampler replicates it,
+    -- keeping the server on the fake spot even while standing perfectly still.
+    -- LIVE-PROVEN in Desync Playground (server followed a Stepped-set fake; the
+    -- render still showed real). Only runs while idle: setting fake before physics
+    -- freezes real movement, which doesn't matter when you aren't moving. Moving
+    -- hands back to the Heartbeat spoof below (which replicates fine in motion).
+    track(RunService.Stepped:Connect(function()
+        steppedSpoofed = false
+        if not Desync.enabled or Desync.method == "Freeze" or Desync.method == "Velocity" then return end
+        if not Desync.forceLive or SHARED.pause or not realCF then return end
+        if not isIdle() then return end
+        local hrp = getHRP(); if not hrp then return end
+        pcall(applySpoof, hrp)   -- base is realCF (RenderStep just restored it); marks server CF
+        steppedSpoofed = true
+    end))
+
     -- ---- heartbeat spoof + renderstep restore (non-freeze methods) ----
     track(RunService.Heartbeat:Connect(function()
         -- clear realCF when we're not live-spoofing, so a stale value can't make TP-shoot
@@ -1027,22 +1053,16 @@ do
         if not Desync.enabled or Desync.method == "Freeze" then SHARED.realCF = nil; return end
         if SHARED.pause then return end
         local hrp = getHRP(); if not hrp then return end
+        -- while idle-spoofing on Stepped, hrp currently sits at the FAKE spot --
+        -- recapturing realCF from it would poison it with the fake position. We're
+        -- idle, so realCF isn't changing anyway: leave it frozen at the true spot.
+        if steppedSpoofed then
+            SHARED.realCF = realCF
+            return
+        end
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
         SHARED.realCF = realCF   -- expose our TRUE CFrame so TP-shoot can pause + restore cleanly
-        pcall(applySpoof, hrp)
-        -- keep-awake nudge: Velocity mode already floods velocity, so skip it there.
-        -- Wobble YAW by a tiny alternating angle -- position nudges get physics-
-        -- corrected on a grounded body (no delta sent) but rotation always
-        -- survives to the next replicated frame, forcing a continuous update while
-        -- idle. Alternating sign = every frame differs from the last (fresh delta)
-        -- and nets to ~0 so the fake orientation doesn't drift.
-        if Desync.forceLive and Desync.method ~= "Velocity" then
-            pcall(function()
-                awakeFlip = -awakeFlip
-                hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(0.08 * awakeFlip), 0)
-                markServerCF(hrp.CFrame)
-            end)
-        end
+        pcall(applySpoof, hrp)   -- moving/fallback spoof (replicates fine in motion)
     end))
 
     RunService:BindToRenderStep(RESTORE, Enum.RenderPriority.First.Value, function()
@@ -1190,7 +1210,7 @@ do
         Callback = function(state) enabledToggle:Set(state and true or false) end })
     Sec:Toggle({ Name = "Keep alive (idle)", Flag = "DesyncForceLive", Default = true,
         Callback = function(v) Desync.forceLive = v end })
-    Sec:Label({ Name = "spoof stays live even while standing still" })
+    Sec:Label({ Name = "server holds the spoof while standing still" })
 
     -- cross-module handle (HC auto-shoot's desync burst): read/drive the desync from a
     -- game module. Set() goes through the UI toggles so flag, visuals and state stay in
