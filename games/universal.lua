@@ -354,7 +354,6 @@ local Esp = {
     chamsTransparency = 0.6,          -- Highlight FillTransparency (0 = solid)
     skeleton = false,
     rate = 240,                       -- max ESP updates/sec (cap for high-fps rigs)
-    perf = false,                     -- flat Drawing boxes instead of GUI (cheapest)
 }
 -- expose for the ESP Preview widget (it reads these to draw a live preview box)
 if getgenv then
@@ -460,7 +459,7 @@ do
     end
     local function remove(plr)
         local o = objs[plr]; if not o then return end
-        for _, k in ipairs({ "name", "dist", "health", "pbox", "pfill" }) do
+        for _, k in ipairs({ "name", "dist", "health" }) do
             if o[k] then pcall(function() o[k]:Remove() end) end   -- Drawing objects
         end
         if o.tracer then killLine(o.tracer) end
@@ -508,15 +507,6 @@ do
         f.Parent = espGui
         o.frame, o.fillGrad, o.stroke, o.strokeGrad = f, fg, st, sg
         return f
-    end
-    -- performance-mode boxes: two Drawing squares (outline + fill). Drawing
-    -- updates are ~5x cheaper than GUI frames (no stroke/gradient/corner
-    -- subtree to re-tessellate on move) at the cost of the flat look.
-    local function ensurePerfBox(o)
-        if o.pbox then return o.pbox end
-        o.pbox = mkDraw("Square", { Thickness = 1, Filled = false, Visible = false })
-        o.pfill = mkDraw("Square", { Thickness = 1, Filled = true, Visible = false })
-        return o.pbox
     end
     local function ensureAvatar(o, plr)   -- round headshot chip above the box
         if o.avatar then return o.avatar end
@@ -588,15 +578,12 @@ do
         o.name.Visible = false; o.dist.Visible = false
         o.health.Visible = false; o.tracer.Visible = false
         if o.frame then o.frame.Visible = false end
-        if o.pbox then o.pbox.Visible = false end
-        if o.pfill then o.pfill.Visible = false end
         if o.avatar then o.avatar.Visible = false end
         if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
         if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
         -- reset the write-guard flags so the next draw re-applies everything
         o._nameVis, o._distVis, o._hpVis, o._trVis = false, false, false, false
         o._boxVis, o._avVis, o._cornVis, o._skelVis = false, false, false, false
-        o._pbVisO, o._pbVisF = false, false
     end
 
     local espWasActive = false
@@ -687,36 +674,6 @@ do
         if o._cornVis then
             o._cornVis = false
             if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
-        end
-    end
-    local function setPerfBox(o, x, y, w, h, strokeOn, fillOn)
-        local bx = ensurePerfBox(o)
-        if not bx then return end
-        local pf = o.pfill
-        x, y = math.floor(x + 0.5), math.floor(y + 0.5)
-        w, h = math.floor(w + 0.5), math.floor(h + 0.5)
-        if o._pbX ~= x or o._pbY ~= y or o._pbW ~= w or o._pbH ~= h then
-            o._pbX, o._pbY, o._pbW, o._pbH = x, y, w, h
-            local pos, size = Vector2.new(x, y), Vector2.new(w, h)
-            bx.Position, bx.Size = pos, size
-            pf.Position, pf.Size = pos, size
-        end
-        if o._pbCol ~= espCol then
-            o._pbCol = espCol
-            bx.Color = espCol; pf.Color = espCol
-        end
-        if o._pbTh ~= Esp.boxThickness then o._pbTh = Esp.boxThickness; bx.Thickness = Esp.boxThickness end
-        local ft = fillOn and Esp.fillOpacity or 0   -- Drawing: 1 == opaque
-        if o._pbFT ~= ft then o._pbFT = ft; pf.Transparency = ft end
-        local wantO = strokeOn and Esp.boxThickness > 0
-        if o._pbVisO ~= wantO then o._pbVisO = wantO; bx.Visible = wantO end
-        if o._pbVisF ~= fillOn then o._pbVisF = fillOn; pf.Visible = fillOn end
-    end
-    local function hidePerfBox(o)
-        if o._pbVisO or o._pbVisF then
-            o._pbVisO, o._pbVisF = false, false
-            if o.pbox then o.pbox.Visible = false end
-            if o.pfill then o.pfill.Visible = false end
         end
     end
     track(RunService.RenderStepped:Connect(function(dt)
@@ -863,23 +820,15 @@ do
                         setLine(c[i], Vector2.new(p[1], p[2]), Vector2.new(p[3], p[4]), espCol, Esp.boxThickness)
                     end
                     o._cornVis = true
-                    if not Esp.fill then hideBox(o); hidePerfBox(o)
-                    elseif Esp.perf then setPerfBox(o, x, y, width, height, false, true); hideBox(o)
-                    else setBoxFrame(o, x, y, width, height, false, true); hidePerfBox(o) end
+                    if Esp.fill then setBoxFrame(o, x, y, width, height, false, true)
+                    else hideBox(o) end
                 elseif boxOn then
-                    -- Full + Solid share one box (gradient stroke + fill on the GUI
-                    -- frame; flat Drawing squares in performance mode)
+                    -- Full + Solid share one GUI frame (gradient stroke + fill)
                     local solid = Esp.boxType == "Solid"
-                    if Esp.perf then
-                        setPerfBox(o, x, y, width, height, not solid, solid or Esp.fill)
-                        hideBox(o)
-                    else
-                        setBoxFrame(o, x, y, width, height, not solid, solid or Esp.fill)
-                        hidePerfBox(o)
-                    end
+                    setBoxFrame(o, x, y, width, height, not solid, solid or Esp.fill)
                     hideCorners(o)
                 else
-                    hideBox(o); hideCorners(o); hidePerfBox(o)
+                    hideBox(o); hideCorners(o)
                 end
 
                 if on and Esp.avatar then
@@ -1769,9 +1718,6 @@ do
         Min = 60, Max = 480, Default = 240, Decimals = 0, Suffix = "hz",
         Callback = function(v) Esp.rate = v end })
     Sec3:Label({ Name = "lower = more fps on high-hz rigs" })
-    Sec3:Toggle({ Name = "Performance mode", Flag = "EspPerf", Default = false,
-        Callback = function(v) Esp.perf = v end })
-    Sec3:Label({ Name = "flat boxes, no gradient -- cheapest" })
 end
 
 -- ============================================================
