@@ -281,17 +281,20 @@ local function findClaimBtn()
     return nil
 end
 
--- serpentine eraser sweep over a set of frames (real scratch visuals)
-local function sweepFrames(frames, scratchFn, radius)
+-- serpentine eraser sweep over a set of frames (real scratch visuals).
+-- passIdx offsets the grid so repeated passes hit different pixels --
+-- pricier tickets have tougher coating and need several passes.
+local function sweepFrames(frames, scratchFn, radius, passIdx)
     local inset = GuiService:GetGuiInset()
-    local step = math.max(8, (radius or 29) * 0.5)
+    local step = math.max(8, (radius or 29) * 0.45)
+    local off = ((passIdx or 1) % 3) * step / 3
     local rowWait = 0.28 / math.max(1, S.visSpeed)
     for _, f in ipairs(frames) do
         if not (S.autoScratch and alive()) then return false end
         local p, sz = f.AbsolutePosition, f.AbsoluteSize
-        local y = p.Y
+        local y = p.Y + off - step
         while y <= p.Y + sz.Y + step do
-            local x = p.X
+            local x = p.X + off - step
             while x <= p.X + sz.X + step do
                 scratchFn({ X = x + inset.X, Y = y + inset.Y })
                 x += step
@@ -303,6 +306,32 @@ local function sweepFrames(frames, scratchFn, radius)
     return true
 end
 
+-- keep sweeping the open ticket until every cell reports revealed (or it
+-- closes); checkThreshold then auto-submits + auto-claims + closes.
+-- ClaimBtn click is the fallback path (some ticket types keep the button).
+local function scratchOpenTicket(TP, SE, label)
+    S.status = "scratching " .. tostring(label or "ticket")
+    for pass = 1, 20 do
+        if not (S.autoScratch and alive() and TP.getCurrentTicket()) then break end
+        local cells = SE.getFlashCells()
+        if #cells == 0 then break end
+        if not sweepFrames(cells, function(pos)
+            SE.scratchAt(pos, nil, true)
+        end, SE.getEraserRadius(), pass) then return end
+        pcall(TP.checkThreshold)
+        if SE.isValidated() or SE.getScratchedCount() >= SE.getTotalScratch() then break end
+        task.wait(0.1)
+    end
+    pcall(TP.checkThreshold)
+    for _ = 1, 50 do
+        if not TP.getCurrentTicket() then break end
+        local btn = findClaimBtn()
+        if btn then clickButton(btn) end
+        task.wait(0.15)
+    end
+    if TP.getCurrentTicket() then pcall(TP.close, true) end
+end
+
 local function visualTicket(TP, SE, card)
     clickButton(card)
     for _ = 1, 30 do
@@ -311,23 +340,7 @@ local function visualTicket(TP, SE, card)
     end
     if not TP.getCurrentTicket() then return end
     task.wait(0.6)
-
-    S.status = "scratching " .. tostring(card:GetAttribute("Name") or "ticket")
-    local done = sweepFrames(SE.getFlashCells(), function(pos)
-        SE.scratchAt(pos, nil, true)
-    end, SE.getEraserRadius())
-    if not done then return end
-
-    pcall(TP.checkThreshold)
-    -- normally auto-submits + auto-claims + closes; ClaimBtn click is the
-    -- fallback path (some ticket types keep the button)
-    for _ = 1, 50 do
-        if not TP.getCurrentTicket() then break end
-        local btn = findClaimBtn()
-        if btn then clickButton(btn) end
-        task.wait(0.15)
-    end
-    if TP.getCurrentTicket() then pcall(TP.close, true) end
+    scratchOpenTicket(TP, SE, card:GetAttribute("Name"))
 end
 
 local function visualPlate(WP, card)
@@ -340,12 +353,17 @@ local function visualPlate(WP, card)
     task.wait(0.6)
 
     S.status = "washing plate"
-    local overlay = WP.getDirtOverlay and WP.getDirtOverlay()
-    if overlay then
+    for pass = 1, 20 do
+        if not (S.autoScratch and alive() and WP.hasClone()) then break end
+        local overlay = WP.getDirtOverlay and WP.getDirtOverlay()
+        if not overlay then break end
         sweepFrames({ overlay }, function(pos)
             WP.washAt(pos)
             pcall(WP.checkThreshold)
-        end, WP.getEraserRadius and WP.getEraserRadius() or 35)
+        end, WP.getEraserRadius and WP.getEraserRadius() or 35, pass)
+        pcall(WP.checkThreshold)
+        if WP.isValidated and WP.isValidated() then break end
+        task.wait(0.1)
     end
     pcall(WP.checkThreshold)
     for _ = 1, 50 do
@@ -368,19 +386,7 @@ local function visualPass()
 
     -- something already open (e.g. vampire opened it by hand)? finish it
     if TP.getCurrentTicket() then
-        S.status = "scratching open ticket"
-        local done = sweepFrames(SE.getFlashCells(), function(pos)
-            SE.scratchAt(pos, nil, true)
-        end, SE.getEraserRadius())
-        if done then
-            pcall(TP.checkThreshold)
-            for _ = 1, 50 do
-                if not TP.getCurrentTicket() then break end
-                local btn = findClaimBtn()
-                if btn then clickButton(btn) end
-                task.wait(0.15)
-            end
-        end
+        scratchOpenTicket(TP, SE, "open ticket")
         return
     end
 
