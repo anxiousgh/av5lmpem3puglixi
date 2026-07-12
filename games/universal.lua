@@ -1238,15 +1238,19 @@ do
     local spin = Sec:Slider({ Name = "Spin speed", Flag = "DesyncSpin",
         Min = 1, Max = 90, Default = 2, Decimals = 0,
         Callback = function(v) Desync.spinSpeed = v end })
-    local cx = Sec:Textbox({ Name = "Custom X", Flag = "DesyncX", Default = "0",
+    -- Finished = true: commit on Enter, NOT on every keystroke. The per-keystroke
+    -- Numeric filter reverts any incomplete value, so a lone "-" is erased instantly
+    -- -> you could never type a negative coordinate. Enter-to-commit types freely.
+    local cx = Sec:Textbox({ Name = "Custom X", Flag = "DesyncX", Default = "0", Finished = true,
         Numeric = true, Placeholder = "X", Callback = function(v) Desync.customX = tonumber(v) or 0 end })
-    local cy = Sec:Textbox({ Name = "Custom Y", Flag = "DesyncY", Default = "0",
+    local cy = Sec:Textbox({ Name = "Custom Y", Flag = "DesyncY", Default = "0", Finished = true,
         Numeric = true, Placeholder = "Y", Callback = function(v) Desync.customY = tonumber(v) or 0 end })
-    local cz = Sec:Textbox({ Name = "Custom Z", Flag = "DesyncZ", Default = "0",
+    local cz = Sec:Textbox({ Name = "Custom Z", Flag = "DesyncZ", Default = "0", Finished = true,
         Numeric = true, Placeholder = "Z", Callback = function(v) Desync.customZ = tonumber(v) or 0 end })
+    local cHint = Sec:Label({ Name = "type a coord, press Enter to apply" })
 
     local VALUE_CONTROLS = {
-        Void = { voidMin, voidMax }, Spin = { spin }, Custom = { cx, cy, cz },
+        Void = { voidMin, voidMax }, Spin = { spin }, Custom = { cx, cy, cz, cHint },
     }
     function showFor(method)
         local isFreeze = (method == "Freeze")
