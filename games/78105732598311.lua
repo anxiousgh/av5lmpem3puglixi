@@ -45,8 +45,11 @@ local ClaimTicket    = Functions:WaitForChild("ClaimTicket")
 local WashPlate      = Functions:WaitForChild("WashPlate")
 local GetTickets     = Functions:WaitForChild("GetTickets")
 local GetPlayerStats = Functions:WaitForChild("GetPlayerStats")
+local BuyGadget      = Functions:WaitForChild("BuyGadget")
+local DeleteTicket   = RS.Remotes:WaitForChild("DeleteTicket")
 
-local TicketConfig = require(RS.Modules.ScratchTickets.ScratchTicketConfig)
+local TicketConfig  = require(RS.Modules.ScratchTickets.ScratchTicketConfig)
+local GadgetsClient = require(RS.Modules.Client.GadgetsClient)
 
 -- generation token: re-executing the hub kills the old loops
 local gen = (getgenv()._WH_SL_gen or 0) + 1
@@ -62,6 +65,7 @@ local S = {
     buyType       = "Best affordable",
     plateFallback = true,
     autoPlates    = false,
+    buyTrash      = true,
     earned        = 0,
     status        = "idle",
 }
@@ -131,18 +135,57 @@ local function refreshBuyList(force)
     buyList = list
 end
 
-local function washPlateInstant(plateId)
-    pcall(function() WashPlate:InvokeServer(plateId) end)
-    return claim(plateId)
+-- card lookup by numeric id (card names are full-precision float strings;
+-- tostring() would reformat, so compare parsed numbers instead)
+local function findCard(id)
+    local tc = ticketsContainer()
+    if not tc then return nil end
+    for _, card in ipairs(tc:GetChildren()) do
+        if card:IsA("ImageButton") and card.Name ~= "Template" then
+            local n = tonumber(card.Name)
+            if n and math.abs(n - id) < 1e-3 then return card end
+        end
+    end
+    return nil
 end
 
--- one free day-job plate: buy -> wash -> claim
+-- trash a finished ticket/plate: the game's own delete remote (clears the
+-- server entry, same as dragging it onto the bin) + local card removal
+-- (card add/remove is client-driven, so remote claims leave ghosts otherwise)
+local function trashTicket(id, waitForCard)
+    pcall(function() DeleteTicket:FireServer(id) end)
+    local deadline = os.clock() + (waitForCard and 2 or 0)
+    repeat
+        local card = findCard(id)
+        if card then card:Destroy() return end
+        if os.clock() >= deadline then return end
+        task.wait(0.1)
+    until false
+end
+
+local function washPlateInstant(plateId)
+    pcall(function() WashPlate:InvokeServer(plateId) end)
+    local got = claim(plateId)
+    trashTicket(plateId, true)
+    return got
+end
+
+-- one free day-job plate: buy -> wash -> claim -> trash
 local function plateCycle()
     local ok, buy = pcall(function() return BuyTicket:InvokeServer("Plate") end)
     if not ok or type(buy) ~= "table" or not buy.success then return false end
     S.status = "washing plate"
     washPlateInstant(buy.plateId)
     return true
+end
+
+-- Trash Can gadget: rebuy whenever it's purchasable (resets on prestige)
+local function buyTrashCan()
+    local ok, state = pcall(function() return GadgetsClient.getState().Trash end)
+    if not ok or type(state) ~= "table" then return end
+    if state.atMax or state.locked or not state.price then return end
+    S.status = "buying Trash Can"
+    pcall(function() BuyGadget:InvokeServer("Trash") end)
 end
 
 -- ============================================================
@@ -158,7 +201,9 @@ local function instantPass()
                 if not tk.scratched then
                     pcall(function() ScratchTicket:InvokeServer(tk.ticketId, indicesFor(tk)) end)
                 end
-                claim(tk.ticketId)
+                if claim(tk.ticketId) ~= nil then
+                    trashTicket(tk.ticketId, false)
+                end
                 task.wait(0.1)
             end
         end
@@ -175,6 +220,27 @@ local function instantPass()
                     S.status = "washing plate"
                     washPlateInstant(id)
                     task.wait(0.1)
+                end
+            end
+        end
+    end
+    -- ghost sweep: ticket cards whose server ticket no longer exists
+    local ok2, live = pcall(function() return GetTickets:InvokeServer() end)
+    if ok2 and type(live) == "table" and tc then
+        local exists = {}
+        for _, tk in pairs(live) do
+            if type(tk) == "table" and tk.ticketId then exists[#exists + 1] = tk.ticketId end
+        end
+        for _, card in ipairs(tc:GetChildren()) do
+            if card:IsA("ImageButton") and card.Name ~= "Template"
+                and not card:GetAttribute("IsPlate") and not card:GetAttribute("Placing") then
+                local id = tonumber(card.Name)
+                if id then
+                    local found = false
+                    for _, e in ipairs(exists) do
+                        if math.abs(e - id) < 1e-3 then found = true break end
+                    end
+                    if not found then card:Destroy() end
                 end
             end
         end
@@ -386,6 +452,13 @@ task.spawn(function()
     end
 end)
 
+task.spawn(function()
+    while alive() do
+        if S.buyTrash then pcall(buyTrashCan) end
+        task.wait(10)
+    end
+end)
+
 -- anti-AFK
 local idleConn = LocalPlayer.Idled:Connect(function()
     local vu = game:GetService("VirtualUser")
@@ -446,6 +519,10 @@ SecP:Toggle({
     Callback = function(v) S.autoPlates = v end,
 })
 SecP:Label({ Name = "free money loop -- works in loan debt" })
+SecP:Toggle({
+    Name = "Auto buy Trash Can", Flag = "SL_BuyTrash", Default = true,
+    Callback = function(v) S.buyTrash = v end,
+})
 
 local SecI = Sub:Section({ Name = "Info", Side = 1 })
 local lblStatus  = SecI:Label({ Name = "status: idle" })
