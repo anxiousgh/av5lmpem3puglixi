@@ -947,11 +947,13 @@ local Desync = {
     spinSpeed = 2, velMag = 16384,
     customX = 0, customY = 0, customZ = 0,
     -- keep-awake: force the server to keep receiving the spoof even when idle.
-    -- Roblox sleeps the root assembly after ~1s of ~0 velocity, and a sleeping
-    -- assembly stops sending outbound physics packets -> the fake position goes
-    -- stale until you move. A sub-stud jitter + a tiny alternating velocity keep
-    -- the body "moving" so replication never stops (net drift ~0; CFrame is
-    -- rewritten every frame anyway so the jitter never accumulates).
+    -- The character replicator only pushes an update when HRP's transform changes
+    -- from what it last sent. A grounded character's POSITION nudge is instantly
+    -- physics-corrected back to the floor (nets to 0 -> nothing sent), but ROTATION
+    -- is not resisted -- which is exactly why rotating a hair forces an update.
+    -- So the keep-alive wobbles YAW by a tiny alternating angle every frame: an
+    -- ever-fresh orientation delta that replicates continuously while standing
+    -- still (restored locally each RenderStep, so no visible spin; nets to ~0).
     forceLive = true,
 }
 do
@@ -1029,16 +1031,15 @@ do
         SHARED.realCF = realCF   -- expose our TRUE CFrame so TP-shoot can pause + restore cleanly
         pcall(applySpoof, hrp)
         -- keep-awake nudge: Velocity mode already floods velocity, so skip it there.
-        -- Everything else writes a (possibly static) CFrame -> jitter it + hold a
-        -- tiny non-zero velocity so the assembly never sleeps and keeps replicating.
+        -- Wobble YAW by a tiny alternating angle -- position nudges get physics-
+        -- corrected on a grounded body (no delta sent) but rotation always
+        -- survives to the next replicated frame, forcing a continuous update while
+        -- idle. Alternating sign = every frame differs from the last (fresh delta)
+        -- and nets to ~0 so the fake orientation doesn't drift.
         if Desync.forceLive and Desync.method ~= "Velocity" then
             pcall(function()
-                hrp.CFrame = hrp.CFrame + Vector3.new(
-                    (math.random() - 0.5) * 0.06,
-                    (math.random() - 0.5) * 0.06,
-                    (math.random() - 0.5) * 0.06)
                 awakeFlip = -awakeFlip
-                hrp.AssemblyLinearVelocity = Vector3.new(awakeFlip * 0.1, 0, awakeFlip * 0.1)
+                hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(0.08 * awakeFlip), 0)
                 markServerCF(hrp.CFrame)
             end)
         end
