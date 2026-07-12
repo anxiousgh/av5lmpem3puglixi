@@ -135,7 +135,7 @@ local HC = {
     autoEquip = false, autoEquipTool = "",
     voidshoot = false,
     -- tp shoot (keybind: teleport to an advantage on the target, shoot, return)
-    tpShootMethod = "Wallbang", autoTpShoot = false, autoTpDist = 500,
+    tpShootMethod = "Wallbang", autoTpShoot = false, autoTpDist = 500, tpShootSpoof = false,
     -- stomp / reload
     stomp = false, stompTargets = false, stompRadius = 5, stompTeleport = false,
     reload = false, reloadKey = Enum.KeyCode.R, reloadThreshold = 0,
@@ -164,6 +164,16 @@ local HC = {
 -- (force hit, auto shoot, knife) is suppressed -- shooting/stabbing cancels the stomp.
 local _stomping = false
 local _tpsActive = false   -- TP-shoot burst in progress (suppresses the auto-shoot loop)
+local _tpsSpoofActive, _tpsSpoofReturn = false, nil   -- TP-shoot in SPOOF mode (server sees us there, we stay put)
+
+-- desync keep-alive: standing still lets the physics assembly SLEEP, and a sleeping
+-- assembly stops replicating -> the server freezes on our last (real) position and the
+-- spoof goes stale. A negligible upward impulse each Heartbeat keeps it awake so every
+-- root-spoof below (voidshoot / stomp / TP-shoot spoof) keeps updating the server while
+-- idle. Same fix as the universal Desync page. ~0.0006 studs/s velocity change = no drift.
+local function wakeRoot(part)
+    if part then pcall(function() part:ApplyImpulse(Vector3.new(0, 0.01, 0)) end) end
+end
 
 -- ============================================================
 --  Target system  (MULTI-target lock list -- Lock adds the priority pick to the
@@ -1708,6 +1718,7 @@ local function voidGlue(targetHrp)
     _vsSaved = lhrp.CFrame
     local onTop = CFrame.new(targetHrp.Position)
     pcall(function() lhrp.CFrame = onTop end)
+    wakeRoot(lhrp)   -- keep the assembly awake so the spoof keeps replicating while idle
     local g = gv(); if g then g._WH_HC_SENT = onTop end
     if g and g.WH and g.WH.markServerCF then g.WH.markServerCF(onTop) end   -- Server Pos clone follows the voidshoot
 end
@@ -1859,6 +1870,7 @@ local function stompGlue(hrp)
         if sethiddenproperty then pcall(function() sethiddenproperty(lhrp, "PhysicsRepRootPart", hrp) end) end
         _stompSavedCF = lhrp.CFrame                   -- our real spot (restored each RenderStep)
         pcall(function() lhrp.CFrame = stompCF end)
+        wakeRoot(lhrp)   -- keep the assembly awake so the server keeps seeing us on the victim while idle
     end
     local g = gv(); if g and g.WH and g.WH.markServerCF then g.WH.markServerCF(stompCF) end   -- Server Pos clone follows the stomp
 end
@@ -2073,6 +2085,12 @@ local function tpShoot()
     local SHARED = g and g._WH_DESYNC
     if SHARED then SHARED.pause = true end
     local saved = (SHARED and SHARED.realCF) or lhrp.CFrame
+    -- SPOOF mode: don't actually teleport -- keep us at our real spot locally (restored
+    -- each RenderStep by WH_HC_TPS_SPOOF) while the server sees us at the TP-shoot pose.
+    -- place() sets the pose on Heartbeat + wakeRoot keeps it replicating; the shot origin
+    -- still validates against the spoofed pose exactly like a real teleport, nobody sees us move.
+    local spoofMode = HC.tpShootSpoof
+    if spoofMode then _tpsSpoofActive, _tpsSpoofReturn = true, saved end
     local savedWbOffset = HC.wallbangOffset
     if method == "Wallbang" or method == "Max Range" then HC.wallbangOffset = 9 end   -- tighter origin-spoof budget for TP-shoot (stay well under the 10-stud mismatch cap)
     local function curHRP()
@@ -2084,6 +2102,7 @@ local function tpShoot()
         -- zero velocity each frame so gluing inside / above a colliding target doesn't build
         -- up momentum that flings us back toward them the instant we restore our real CFrame
         if h then pcall(function() h.CFrame = cf; h.AssemblyLinearVelocity = Vector3.zero end) end
+        if spoofMode then wakeRoot(h) end   -- keep the assembly awake so the spoofed pose keeps replicating
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(cf) end) end
     end
     local function fire()
@@ -2201,9 +2220,20 @@ local function tpShoot()
         end) end
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(saved) end) end
         if SHARED then SHARED.pause = false end   -- resume desync from our restored real position
+        _tpsSpoofActive, _tpsSpoofReturn = false, nil   -- stop the spoof restore (no-op if we never moved)
         _tpsActive = false
     end)
 end
+-- SPOOF mode restore: keep us at our real spot locally each frame while the server sees
+-- us at the TP-shoot pose (place() sets that pose on Heartbeat). Same desync structure as
+-- voidshoot/stomp -- render shows real, Heartbeat shows the spoof, wakeRoot keeps it live.
+RunService:BindToRenderStep("WH_HC_TPS_SPOOF", Enum.RenderPriority.First.Value, function()
+    if _tpsSpoofActive and _tpsSpoofReturn then
+        local lc = LocalPlayer.Character
+        local lhrp = lc and lc:FindFirstChild("HumanoidRootPart")
+        if lhrp then pcall(function() lhrp.CFrame = _tpsSpoofReturn end) end
+    end
+end)
 
 -- ---- Auto TP-shoot: run a full tpShoot burst on the current target whenever they're
 --      within 500 studs of our REAL position. While the desync is spoofing, the live
@@ -2733,6 +2763,9 @@ do
         Callback = function(v) HC.tpShootMethod = (type(v) == "table" and v[1]) or v or "Wallbang" end })
     Sec3:Toggle({ Name = "Auto TPShoot", Flag = "HC_AutoTpShoot", Default = false,
         Callback = function(v) HC.autoTpShoot = v end })
+    Sec3:Toggle({ Name = "TP Shoot (spoof)", Flag = "HC_TpShootSpoof", Default = false,
+        Callback = function(v) HC.tpShootSpoof = v end })
+    Sec3:Label({ Name = "spoof the pose instead of teleporting you" })
     Sec3:Slider({ Name = "Auto TPShoot distance", Flag = "HC_AutoTpDist", Min = 100, Max = 2000, Default = 500, Decimals = 0, Suffix = " studs",
         Callback = function(v) HC.autoTpDist = v end })
     Sec3:Label({ Name = "TP shoot" }):Keybind({
