@@ -191,6 +191,8 @@ end
 -- ============================================================
 --  instant mode -- pure remotes, clears the whole table per pass
 -- ============================================================
+local ghostStrikes = {}
+
 local function instantPass()
     local ok, tickets = pcall(function() return GetTickets:InvokeServer() end)
     if ok and type(tickets) == "table" then
@@ -213,8 +215,11 @@ local function instantPass()
     if tc then
         for _, card in ipairs(tc:GetChildren()) do
             if not (S.autoScratch and S.mode == "Instant" and alive()) then return end
+            -- wash even while Placing: a remote-washed plate's card can stay
+            -- stuck mid fly-in forever; washing a ghost fails harmlessly and
+            -- washPlateInstant's trash step removes the card either way
             if card:IsA("ImageButton") and card.Name ~= "Template"
-                and card:GetAttribute("IsPlate") and not card:GetAttribute("Placing") then
+                and card:GetAttribute("IsPlate") then
                 local id = tonumber(card.Name)
                 if id then
                     S.status = "washing plate"
@@ -224,7 +229,9 @@ local function instantPass()
             end
         end
     end
-    -- ghost sweep: ticket cards whose server ticket no longer exists
+    -- ghost sweep: ticket cards whose server ticket no longer exists.
+    -- Two-strike rule: a just-bought ticket can miss the snapshot (bought
+    -- between fetch and sweep), so only destroy after 2 consecutive misses.
     local ok2, live = pcall(function() return GetTickets:InvokeServer() end)
     if ok2 and type(live) == "table" and tc then
         local exists = {}
@@ -233,14 +240,22 @@ local function instantPass()
         end
         for _, card in ipairs(tc:GetChildren()) do
             if card:IsA("ImageButton") and card.Name ~= "Template"
-                and not card:GetAttribute("IsPlate") and not card:GetAttribute("Placing") then
+                and not card:GetAttribute("IsPlate") then
                 local id = tonumber(card.Name)
                 if id then
                     local found = false
                     for _, e in ipairs(exists) do
                         if math.abs(e - id) < 1e-3 then found = true break end
                     end
-                    if not found then card:Destroy() end
+                    if found then
+                        ghostStrikes[card.Name] = nil
+                    else
+                        ghostStrikes[card.Name] = (ghostStrikes[card.Name] or 0) + 1
+                        if ghostStrikes[card.Name] >= 2 then
+                            ghostStrikes[card.Name] = nil
+                            card:Destroy()
+                        end
+                    end
                 end
             end
         end
