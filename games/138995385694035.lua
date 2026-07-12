@@ -165,6 +165,7 @@ local HC = {
 local _stomping = false
 local _tpsActive = false   -- TP-shoot burst in progress (suppresses the auto-shoot loop)
 local _tpsSpoofActive, _tpsSpoofReturn = false, nil   -- TP-shoot in SPOOF mode (server sees us there, we stay put)
+local _tpsSpoofPose = nil   -- the spoofed pose position the server sees us at (shot origin base in spoof mode)
 
 -- desync keep-alive: standing still lets the physics assembly SLEEP, and a sleeping
 -- assembly stops replicating -> the server freezes on our last (real) position and the
@@ -590,7 +591,12 @@ local function fireShootAt(part)
     -- It MUST equal our replicated position or the server throws "origin mismatch".
     local g = gv()
     local sent = g and g._WH_HC_SENT
-    local realOrigin = (sent and sent.Position) or root.Position
+    -- In TP-shoot SPOOF mode the body is restored to our real spot each RenderStep, but the
+    -- server sees us at the spoofed pose (_tpsSpoofPose, replicated on Heartbeat). The shot
+    -- origin MUST match the server's view, so use the spoofed pose -- reading root.Position
+    -- here would send our real spot and the server rejects it as an origin mismatch (== the
+    -- "puts me there but doesn't shoot" bug). Wallbang still spoofs FROM this pose below.
+    local realOrigin = (sent and sent.Position) or (_tpsSpoofActive and _tpsSpoofPose) or root.Position
     local origin = realOrigin
     local spoofed = (sent ~= nil)   -- voidshoot is always a real displacement
     -- Wallbang: spoof the origin just enough to clear the wall (within the server's
@@ -2102,7 +2108,10 @@ local function tpShoot()
         -- zero velocity each frame so gluing inside / above a colliding target doesn't build
         -- up momentum that flings us back toward them the instant we restore our real CFrame
         if h then pcall(function() h.CFrame = cf; h.AssemblyLinearVelocity = Vector3.zero end) end
-        if spoofMode then wakeRoot(h) end   -- keep the assembly awake so the spoofed pose keeps replicating
+        if spoofMode then
+            _tpsSpoofPose = cf.Position   -- server-visible origin for fireShootAt (matches what we replicate)
+            wakeRoot(h)                   -- keep the assembly awake so the spoofed pose keeps replicating
+        end
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(cf) end) end
     end
     local function fire()
@@ -2220,7 +2229,7 @@ local function tpShoot()
         end) end
         if g and g.WH and g.WH.markServerCF then pcall(function() g.WH.markServerCF(saved) end) end
         if SHARED then SHARED.pause = false end   -- resume desync from our restored real position
-        _tpsSpoofActive, _tpsSpoofReturn = false, nil   -- stop the spoof restore (no-op if we never moved)
+        _tpsSpoofActive, _tpsSpoofReturn, _tpsSpoofPose = false, nil, nil   -- stop the spoof restore (no-op if we never moved)
         _tpsActive = false
     end)
 end
@@ -2763,7 +2772,7 @@ do
         Callback = function(v) HC.tpShootMethod = (type(v) == "table" and v[1]) or v or "Wallbang" end })
     Sec3:Toggle({ Name = "Auto TPShoot", Flag = "HC_AutoTpShoot", Default = false,
         Callback = function(v) HC.autoTpShoot = v end })
-    Sec3:Toggle({ Name = "TP Shoot (spoof)", Flag = "HC_TpShootSpoof", Default = false,
+    Sec3:Toggle({ Name = "Desync", Flag = "HC_TpShootSpoof", Default = false,
         Callback = function(v) HC.tpShootSpoof = v end })
     Sec3:Label({ Name = "spoof the pose instead of teleporting you" })
     Sec3:Slider({ Name = "Auto TPShoot distance", Flag = "HC_AutoTpDist", Min = 100, Max = 2000, Default = 500, Decimals = 0, Suffix = " studs",
