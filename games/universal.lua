@@ -423,12 +423,17 @@ do
     -- aim a line from screen-point a to screen-point b. Drawing.Line takes the two
     -- endpoints directly; the GUI-frame fallback is a thin rotated bar centered on a
     -- pixel (floor + 0.5) so a 1px line renders crisp instead of smearing to ~2px.
+    -- PERF: endpoint/geometry writes run every frame (they change every frame
+    -- anyway), but color/thickness/visibility only change rarely -- guard them
+    -- with a read-compare so redundant writes don't run the invalidation path
+    -- hundreds of times a second at high fps.
     local function setLine(f, a, b, color, thickness)
         if USE_DRAW_LINES then
             f.From, f.To = a, b
-            f.Color = color
-            f.Thickness = thickness or 1
-            f.Visible = true
+            if f.Color ~= color then f.Color = color end
+            thickness = thickness or 1
+            if f.Thickness ~= thickness then f.Thickness = thickness end
+            if not f.Visible then f.Visible = true end
             return
         end
         local d = b - a
@@ -436,8 +441,8 @@ do
         f.Position = UDim2.fromOffset(
             math.floor((a.X + b.X) / 2) + 0.5, math.floor((a.Y + b.Y) / 2) + 0.5)
         f.Rotation = math.deg(math.atan2(d.Y, d.X))
-        f.BackgroundColor3 = color
-        f.Visible = true
+        if f.BackgroundColor3 ~= color then f.BackgroundColor3 = color end
+        if not f.Visible then f.Visible = true end
     end
 
     local function add(plr)
@@ -576,32 +581,81 @@ do
         if o.avatar then o.avatar.Visible = false end
         if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
         if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
+        -- reset the write-guard flags so the next draw re-applies everything
+        o._nameVis, o._distVis, o._hpVis, o._trVis = false, false, false, false
+        o._boxVis, o._avVis, o._cornVis, o._skelVis = false, false, false, false
     end
 
     local espWasActive = false
     local chamsTopC, glowTopC, chamsTopT = nil, nil, 0
-    -- per-frame shared look (mirrors the Library.FOV render loop): one gradient
-    -- sequence + rotation + rainbow hue computed once, applied to every target
-    local espRot, espHue = 0, 0
-    local espSeq, espCol = nil, Esp.color
+    -- shared look (one gradient sequence + rotation + hue for every target).
+    -- PERF (2026-07-12, vampire lost ~200fps of 700): this loop runs at RENDER
+    -- rate, so at 700fps every redundant Instance write ran the invalidation
+    -- path 700x/s per player -- worst of all a FRESH ColorSequence written into
+    -- both UIGradients per box per frame (forces a gradient re-render each
+    -- time). Look values now refresh at 20Hz and every look write is guarded
+    -- by a Lua-side "applied" compare; geometry still updates every frame.
+    local espRot, espHue, espRotQ = 0, 0, 0
+    local espSeq, espCol = ColorSequence.new(Esp.color), Esp.color
+    local lastLookT, lastC1, lastC2, lastGrad = 0, nil, nil, nil
+    local function refreshLook(dt)
+        espRot = (espRot + (Esp.spin and (Esp.spinSpeed * dt) or 0)) % 360
+        if Esp.rainbow then
+            espHue = (espHue + (Esp.rainbowSpeed or 1) * dt * 0.15) % 1
+        end
+        local now = os.clock()
+        if now - lastLookT < 0.05 then return end
+        lastLookT = now
+        espRotQ = math.floor(espRot / 2 + 0.5) * 2 % 360
+        local c1, c2
+        if Esp.rainbow then
+            c1 = Color3.fromHSV(espHue, 0.8, 1)
+            c2 = Color3.fromHSV((espHue + 0.15) % 1, 0.8, 1)
+        else
+            c1, c2 = Esp.color, Esp.color2
+        end
+        if c1 ~= lastC1 or c2 ~= lastC2 or Esp.gradient ~= lastGrad then
+            lastC1, lastC2, lastGrad = c1, c2, Esp.gradient
+            espSeq = Esp.gradient and ColorSequence.new(c1, c2) or ColorSequence.new(c1)
+            espCol = c1
+        end
+    end
     local function setBoxFrame(o, x, y, w, h, strokeOn, fillOn)
         local f = ensureBoxFrame(o)
         f.Position = UDim2.fromOffset(x, y)
         f.Size = UDim2.fromOffset(w, h)
-        f.BackgroundTransparency = fillOn and math.clamp(1 - Esp.fillOpacity, 0, 1) or 1
-        o.fillGrad.Color = espSeq
-        o.fillGrad.Rotation = espRot
-        local st = o.stroke
-        st.Enabled = strokeOn and Esp.boxThickness > 0
-        if st.Enabled then
-            st.Thickness = Esp.boxThickness
+        local bt = fillOn and math.clamp(1 - Esp.fillOpacity, 0, 1) or 1
+        if o._boxBT ~= bt then o._boxBT = bt; f.BackgroundTransparency = bt end
+        if o._boxSeq ~= espSeq then
+            o._boxSeq = espSeq
+            o.fillGrad.Color = espSeq
             o.strokeGrad.Color = espSeq
-            o.strokeGrad.Rotation = espRot
         end
-        if o.frameCorner.CornerRadius.Offset ~= Esp.cornerRadius then
+        if o._boxRot ~= espRotQ then
+            o._boxRot = espRotQ
+            o.fillGrad.Rotation = espRotQ
+            o.strokeGrad.Rotation = espRotQ
+        end
+        local stOn = strokeOn and Esp.boxThickness > 0
+        if o._boxStroke ~= stOn then o._boxStroke = stOn; o.stroke.Enabled = stOn end
+        if stOn and o._boxTh ~= Esp.boxThickness then
+            o._boxTh = Esp.boxThickness
+            o.stroke.Thickness = Esp.boxThickness
+        end
+        if o._boxCr ~= Esp.cornerRadius then
+            o._boxCr = Esp.cornerRadius
             o.frameCorner.CornerRadius = UDim.new(0, Esp.cornerRadius)
         end
-        f.Visible = true
+        if not o._boxVis then o._boxVis = true; f.Visible = true end
+    end
+    local function hideBox(o)
+        if o._boxVis then o._boxVis = false; o.frame.Visible = false end
+    end
+    local function hideCorners(o)
+        if o._cornVis then
+            o._cornVis = false
+            if o.corners then for _, d in ipairs(o.corners) do d.Visible = false end end
+        end
     end
     track(RunService.RenderStepped:Connect(function(dt)
         -- ESP off: hide everything ONCE, then the loop is a single cheap check per
@@ -619,17 +673,7 @@ do
         end
         espWasActive = true
         dt = dt or (1 / 60)
-        espRot = (espRot + (Esp.spin and (Esp.spinSpeed * dt) or 0)) % 360
-        local c1, c2
-        if Esp.rainbow then
-            espHue = (espHue + (Esp.rainbowSpeed or 1) * dt * 0.15) % 1
-            c1 = Color3.fromHSV(espHue, 0.8, 1)
-            c2 = Color3.fromHSV((espHue + 0.15) % 1, 0.8, 1)
-        else
-            c1, c2 = Esp.color, Esp.color2
-        end
-        espSeq = Esp.gradient and ColorSequence.new(c1, c2) or ColorSequence.new(c1)
-        espCol = c1
+        refreshLook(dt)
         local cam = Workspace.CurrentCamera
         local vp = cam.ViewportSize
         local mouse = UserInputService:GetMouseLocation()
@@ -670,10 +714,6 @@ do
 
         for plr, o in pairs(objs) do
             if not o.name then continue end
-            -- hide everything first -- but only if something was drawn last frame
-            -- (spares the full Visible=false sweep for off/inactive players)
-            if o._shown then o._shown = false; hideObjs(o) end
-
             local active = teamOk(plr, Esp.teamCheck)
             local char, hum = nil, nil
             if active then char, hum = aliveChar(plr) end
@@ -704,7 +744,10 @@ do
             end
 
             if active and hrp then
-                o._shown = true   -- something below may draw; next frame's hide sweep runs
+                -- transitions handle hiding now: elements hide themselves the
+                -- frame their condition stops, not via a blanket per-frame
+                -- hide-then-reshow sweep (that doubled every property write)
+                o._shown = true
                 local center, on = cam:WorldToViewportPoint(hrp.Position)
                 local top = cam:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
                 local bot = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
@@ -723,61 +766,86 @@ do
                     elseif Esp.tracerOrigin == "Mouse" then origin = mouse
                     else origin = Vector2.new(vp.X / 2, vp.Y) end
                     setLine(o.tracer, origin, Vector2.new(center.X, y + height), espCol, 1)
+                    o._trVis = true
+                elseif o._trVis then
+                    o._trVis = false; o.tracer.Visible = false
                 end
 
-                if on then
-                    -- box: full outline / corner brackets / solid filled box.
-                    -- Full + Solid share one GUI frame (gradient stroke + fill);
-                    -- Corner keeps the bracket lines and can add the fill under them.
-                    if not Esp.box then
-                        -- box disabled; leave it hidden
-                    elseif Esp.boxType == "Corner" then
-                        local c = ensureCorners(o)
-                        local cl = math.min(width, height) * 0.3
-                        local pts = {
-                            { x, y, x + cl, y }, { x, y, x, y + cl },                              -- TL
-                            { x + width, y, x + width - cl, y }, { x + width, y, x + width, y + cl }, -- TR
-                            { x, y + height, x + cl, y + height }, { x, y + height, x, y + height - cl }, -- BL
-                            { x + width, y + height, x + width - cl, y + height }, { x + width, y + height, x + width, y + height - cl }, -- BR
-                        }
-                        for i, p in ipairs(pts) do
-                            setLine(c[i], Vector2.new(p[1], p[2]), Vector2.new(p[3], p[4]), espCol, Esp.boxThickness)
-                        end
-                        if Esp.fill then setBoxFrame(o, x, y, width, height, false, true) end
-                    else
-                        local solid = Esp.boxType == "Solid"
-                        setBoxFrame(o, x, y, width, height, not solid, solid or Esp.fill)
+                local boxOn = on and Esp.box
+                if boxOn and Esp.boxType == "Corner" then
+                    -- corner brackets + optional fill under them
+                    local c = ensureCorners(o)
+                    local cl = math.min(width, height) * 0.3
+                    local pts = {
+                        { x, y, x + cl, y }, { x, y, x, y + cl },                              -- TL
+                        { x + width, y, x + width - cl, y }, { x + width, y, x + width, y + cl }, -- TR
+                        { x, y + height, x + cl, y + height }, { x, y + height, x, y + height - cl }, -- BL
+                        { x + width, y + height, x + width - cl, y + height }, { x + width, y + height, x + width, y + height - cl }, -- BR
+                    }
+                    for i, p in ipairs(pts) do
+                        setLine(c[i], Vector2.new(p[1], p[2]), Vector2.new(p[3], p[4]), espCol, Esp.boxThickness)
                     end
+                    o._cornVis = true
+                    if Esp.fill then setBoxFrame(o, x, y, width, height, false, true)
+                    else hideBox(o) end
+                elseif boxOn then
+                    -- Full + Solid share one GUI frame (gradient stroke + fill)
+                    local solid = Esp.boxType == "Solid"
+                    setBoxFrame(o, x, y, width, height, not solid, solid or Esp.fill)
+                    hideCorners(o)
+                else
+                    hideBox(o); hideCorners(o)
+                end
 
-                    if Esp.avatar then
-                        local av = ensureAvatar(o, plr)
-                        if av.Size.X.Offset ~= Esp.avatarSize then
-                            av.Size = UDim2.fromOffset(Esp.avatarSize, Esp.avatarSize)
-                        end
-                        av.Position = UDim2.fromOffset(
-                            center.X, y - (Esp.names and (Esp.textSize + 4) or 2))
-                        o.avatarStroke.Color = espCol
-                        av.Visible = true
+                if on and Esp.avatar then
+                    local av = ensureAvatar(o, plr)
+                    if o._avSize ~= Esp.avatarSize then
+                        o._avSize = Esp.avatarSize
+                        av.Size = UDim2.fromOffset(Esp.avatarSize, Esp.avatarSize)
                     end
-                    if Esp.names then
-                        o.name.Text = plr.Name; o.name.Color = espCol
-                        o.name.Size = Esp.textSize
-                        o.name.Position = Vector2.new(center.X, y - Esp.textSize - 1)
-                        o.name.Visible = true
-                    end
-                    if Esp.distance then
-                        local d = myHRP and math.floor((myHRP.Position - hrp.Position).Magnitude) or 0
-                        o.dist.Text = tostring(d) .. "m"; o.dist.Color = espCol
-                        o.dist.Size = math.max(Esp.textSize - 1, 8)
-                        o.dist.Position = Vector2.new(center.X, y + height + 2); o.dist.Visible = true
-                    end
-                    if Esp.health then
-                        local hp = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-                        o.health.Size = Vector2.new(2, height * hp)
-                        o.health.Position = Vector2.new(x - 4, y + height * (1 - hp))
+                    av.Position = UDim2.fromOffset(
+                        center.X, y - (Esp.names and (Esp.textSize + 4) or 2))
+                    if o._avCol ~= espCol then o._avCol = espCol; o.avatarStroke.Color = espCol end
+                    if not o._avVis then o._avVis = true; av.Visible = true end
+                elseif o._avVis then
+                    o._avVis = false; o.avatar.Visible = false
+                end
+
+                if on and Esp.names then
+                    local n = o.name
+                    if o._nameTxt ~= plr.Name then o._nameTxt = plr.Name; n.Text = plr.Name end
+                    if o._nameCol ~= espCol then o._nameCol = espCol; n.Color = espCol end
+                    if o._nameTS ~= Esp.textSize then o._nameTS = Esp.textSize; n.Size = Esp.textSize end
+                    n.Position = Vector2.new(center.X, y - Esp.textSize - 1)
+                    if not o._nameVis then o._nameVis = true; n.Visible = true end
+                elseif o._nameVis then
+                    o._nameVis = false; o.name.Visible = false
+                end
+
+                if on and Esp.distance then
+                    local d = myHRP and math.floor((myHRP.Position - hrp.Position).Magnitude) or 0
+                    if o._distD ~= d then o._distD = d; o.dist.Text = d .. "m" end
+                    if o._distCol ~= espCol then o._distCol = espCol; o.dist.Color = espCol end
+                    local ds = math.max(Esp.textSize - 1, 8)
+                    if o._distTS ~= ds then o._distTS = ds; o.dist.Size = ds end
+                    o.dist.Position = Vector2.new(center.X, y + height + 2)
+                    if not o._distVis then o._distVis = true; o.dist.Visible = true end
+                elseif o._distVis then
+                    o._distVis = false; o.dist.Visible = false
+                end
+
+                if on and Esp.health then
+                    local hp = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                    o.health.Size = Vector2.new(2, height * hp)
+                    o.health.Position = Vector2.new(x - 4, y + height * (1 - hp))
+                    local hpq = math.floor(hp * 50 + 0.5)
+                    if o._hpQ ~= hpq then
+                        o._hpQ = hpq
                         o.health.Color = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(80, 255, 80), hp)
-                        o.health.Visible = true
                     end
+                    if not o._hpVis then o._hpVis = true; o.health.Visible = true end
+                elseif o._hpVis then
+                    o._hpVis = false; o.health.Visible = false
                 end
 
                 -- skeleton (per-part on-screen). It's ~18 GUI frames per player, so only
@@ -786,6 +854,7 @@ do
                 if Esp.skeleton and char and on
                    and (not myHRP or (myHRP.Position - hrp.Position).Magnitude <= 350) then
                     local s = ensureSkel(o)
+                    o._skelVis = true
                     local vpCache = {}
                     local function vpOf(part)
                         local v = vpCache[part]
@@ -804,20 +873,27 @@ do
                             -- which stretches its bone across the whole screen. A real bone
                             -- segment is only a few studs -- drop anything implausibly long.
                             if (p1.Position - p2.Position).Magnitude > 12 then
-                                line.Visible = false
+                                if line.Visible then line.Visible = false end
                             else
                                 local a, b = vpOf(p1), vpOf(p2)
                                 if a and b then
                                     setLine(line, a, b, espCol)
-                                else
+                                elseif line.Visible then
                                     line.Visible = false
                                 end
                             end
-                        elseif line then
+                        elseif line and line.Visible then
                             line.Visible = false
                         end
                     end
+                elseif o._skelVis then
+                    o._skelVis = false
+                    if o.skel then for _, d in ipairs(o.skel) do d.Visible = false end end
                 end
+            elseif o._shown then
+                -- player stopped being drawable: one full hide, then nothing
+                o._shown = false
+                hideObjs(o)
             end
         end
     end))
