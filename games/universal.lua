@@ -946,11 +946,19 @@ local Desync = {
     voidMin = 5000, voidMax = 20000,
     spinSpeed = 2, velMag = 16384,
     customX = 0, customY = 0, customZ = 0,
+    -- keep-awake: force the server to keep receiving the spoof even when idle.
+    -- Roblox sleeps the root assembly after ~1s of ~0 velocity, and a sleeping
+    -- assembly stops sending outbound physics packets -> the fake position goes
+    -- stale until you move. A sub-stud jitter + a tiny alternating velocity keep
+    -- the body "moving" so replication never stops (net drift ~0; CFrame is
+    -- rewritten every frame anyway so the jitter never accumulates).
+    forceLive = true,
 }
 do
     local RESTORE = "WH_DesyncRestore"
     local realCF, realLV, realAV
     local spinAngle = 0
+    local awakeFlip = 1
 
     -- raknet state lives on getgenv so the hook closure survives reloads
     getgenv()._WH_DESYNC = getgenv()._WH_DESYNC or {}
@@ -1020,6 +1028,20 @@ do
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
         SHARED.realCF = realCF   -- expose our TRUE CFrame so TP-shoot can pause + restore cleanly
         pcall(applySpoof, hrp)
+        -- keep-awake nudge: Velocity mode already floods velocity, so skip it there.
+        -- Everything else writes a (possibly static) CFrame -> jitter it + hold a
+        -- tiny non-zero velocity so the assembly never sleeps and keeps replicating.
+        if Desync.forceLive and Desync.method ~= "Velocity" then
+            pcall(function()
+                hrp.CFrame = hrp.CFrame + Vector3.new(
+                    (math.random() - 0.5) * 0.06,
+                    (math.random() - 0.5) * 0.06,
+                    (math.random() - 0.5) * 0.06)
+                awakeFlip = -awakeFlip
+                hrp.AssemblyLinearVelocity = Vector3.new(awakeFlip * 0.1, 0, awakeFlip * 0.1)
+                markServerCF(hrp.CFrame)
+            end)
+        end
     end))
 
     RunService:BindToRenderStep(RESTORE, Enum.RenderPriority.First.Value, function()
@@ -1165,6 +1187,9 @@ do
         Callback = function(v) Desync.setEnabled(v) end })
     Sec:Label({ Name = "Toggle key" }):Keybind({ Name = "Desync", Flag = "DesyncKey", Mode = "Toggle",
         Callback = function(state) enabledToggle:Set(state and true or false) end })
+    Sec:Toggle({ Name = "Keep alive (idle)", Flag = "DesyncForceLive", Default = true,
+        Callback = function(v) Desync.forceLive = v end })
+    Sec:Label({ Name = "spoof stays live even while standing still" })
 
     -- cross-module handle (HC auto-shoot's desync burst): read/drive the desync from a
     -- game module. Set() goes through the UI toggles so flag, visuals and state stay in
