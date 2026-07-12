@@ -537,6 +537,10 @@ do
             -- DON'T touch velocity here: zeroing it kills your walk speed + animations.
             _orbitReal = hrp.CFrame   -- our real home (RenderStep restored it last frame)
             pcall(function() hrp.CFrame = cf end)
+            -- idle keep-alive: a negligible upward impulse keeps the physics assembly
+            -- awake so the server keeps receiving this spoof while we stand still (a
+            -- sleeping assembly stops replicating -> server rubber-bands to real).
+            pcall(function() hrp:ApplyImpulse(Vector3.new(0, 0.01, 0)) end)
             markServerCF(cf)          -- report orbit pos so the Server Pos clone follows it
         else
             orbitRestoreReal()   -- in case desync was just turned off

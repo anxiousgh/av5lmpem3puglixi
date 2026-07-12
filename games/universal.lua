@@ -946,12 +946,6 @@ local Desync = {
     voidMin = 5000, voidMax = 20000,
     spinSpeed = 2, velMag = 16384,
     customX = 0, customY = 0, customZ = 0,
-    -- keep-alive: a tiny per-frame ApplyImpulse keeps the physics assembly awake
-    -- while idle so the server keeps receiving the Heartbeat spoof (a sleeping
-    -- assembly stops replicating -> server freezes on the real position). Keeps the
-    -- classic Heartbeat/RenderStep structure intact. Off = old behaviour (spoof
-    -- only refreshes while moving). See the Heartbeat handler below.
-    forceLive = true,
 }
 do
     local RESTORE = "WH_DesyncRestore"
@@ -1041,9 +1035,11 @@ do
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
         SHARED.realCF = realCF   -- expose our TRUE CFrame so TP-shoot can pause + restore cleanly
         pcall(applySpoof, hrp)
-        -- idle keep-alive: wake the assembly so the fake keeps replicating while
-        -- standing still. Velocity mode already floods velocity (self-awake), skip it.
-        if Desync.forceLive and Desync.method ~= "Velocity" then
+        -- idle keep-alive (ALWAYS ON): a negligible upward impulse keeps the physics
+        -- assembly awake so the server keeps receiving the Heartbeat spoof while you
+        -- stand still (a sleeping assembly stops replicating -> the server freezes on
+        -- the restored REAL position). Velocity mode floods velocity (self-awake), skip.
+        if Desync.method ~= "Velocity" then
             pcall(function() hrp:ApplyImpulse(Vector3.new(0, 0.01, 0)) end)
         end
     end))
@@ -1191,9 +1187,6 @@ do
         Callback = function(v) Desync.setEnabled(v) end })
     Sec:Label({ Name = "Toggle key" }):Keybind({ Name = "Desync", Flag = "DesyncKey", Mode = "Toggle",
         Callback = function(state) enabledToggle:Set(state and true or false) end })
-    Sec:Toggle({ Name = "Keep alive (idle)", Flag = "DesyncForceLive", Default = true,
-        Callback = function(v) Desync.forceLive = v end })
-    Sec:Label({ Name = "server holds the spoof while standing still" })
 
     -- cross-module handle (HC auto-shoot's desync burst): read/drive the desync from a
     -- game module. Set() goes through the UI toggles so flag, visuals and state stay in
