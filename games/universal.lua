@@ -353,6 +353,7 @@ local Esp = {
     chamsOutline = Color3.fromRGB(255, 255, 255),
     chamsTransparency = 0.6,          -- Highlight FillTransparency (0 = solid)
     skeleton = false,
+    rate = 240,                       -- max ESP updates/sec (cap for high-fps rigs)
 }
 -- expose for the ESP Preview widget (it reads these to draw a live preview box)
 if getgenv then
@@ -598,6 +599,7 @@ do
     local espRot, espHue, espRotQ = 0, 0, 0
     local espSeq, espCol = ColorSequence.new(Esp.color), Esp.color
     local lastLookT, lastC1, lastC2, lastGrad = 0, nil, nil, nil
+    local espAcc = 0
     local function refreshLook(dt)
         espRot = (espRot + (Esp.spin and (Esp.spinSpeed * dt) or 0)) % 360
         if Esp.rainbow then
@@ -622,8 +624,19 @@ do
     end
     local function setBoxFrame(o, x, y, w, h, strokeOn, fillOn)
         local f = ensureBoxFrame(o)
-        f.Position = UDim2.fromOffset(x, y)
-        f.Size = UDim2.fromOffset(w, h)
+        -- integer-quantized + change-guarded: a GUI Frame size write forces the
+        -- stroke/gradient/corner subtree to re-tessellate, so only write when
+        -- the box actually moved a whole pixel (stationary targets = zero writes)
+        x, y = math.floor(x + 0.5), math.floor(y + 0.5)
+        w, h = math.floor(w + 0.5), math.floor(h + 0.5)
+        if o._boxX ~= x or o._boxY ~= y then
+            o._boxX, o._boxY = x, y
+            f.Position = UDim2.fromOffset(x, y)
+        end
+        if o._boxW ~= w or o._boxH ~= h then
+            o._boxW, o._boxH = w, h
+            f.Size = UDim2.fromOffset(w, h)
+        end
         local bt = fillOn and math.clamp(1 - Esp.fillOpacity, 0, 1) or 1
         if o._boxBT ~= bt then o._boxBT = bt; f.BackgroundTransparency = bt end
         if o._boxSeq ~= espSeq then
@@ -673,6 +686,13 @@ do
         end
         espWasActive = true
         dt = dt or (1 / 60)
+        -- update-rate cap: at very high fps (vampire runs 700+) re-drawing the
+        -- ESP every render frame is pure waste -- the whole update runs at most
+        -- Esp.rate times/sec (default 240; boxes lag the camera by <=1 update
+        -- interval, imperceptible). At or below Esp.rate fps this is a no-op.
+        espAcc = espAcc + dt
+        if espAcc < 1 / (Esp.rate or 240) then return end
+        dt, espAcc = espAcc, 0
         refreshLook(dt)
         local cam = Workspace.CurrentCamera
         local vp = cam.ViewportSize
@@ -1680,6 +1700,10 @@ do
     Sec3:Slider({ Name = "Rainbow speed", Flag = "EspRainbowSpeed",
         Min = 1, Max = 20, Default = 1, Decimals = 0,
         Callback = function(v) Esp.rainbowSpeed = v end })
+    Sec3:Slider({ Name = "Update rate", Flag = "EspRate",
+        Min = 60, Max = 480, Default = 240, Decimals = 0, Suffix = "hz",
+        Callback = function(v) Esp.rate = v end })
+    Sec3:Label({ Name = "lower = more fps on high-hz rigs" })
 end
 
 -- ============================================================
