@@ -946,11 +946,11 @@ local Desync = {
     voidMin = 5000, voidMax = 20000,
     spinSpeed = 2, velMag = 16384,
     customX = 0, customY = 0, customZ = 0,
-    -- keep-alive: while idle, push the spoof on RunService.Stepped (before physics)
-    -- so Roblox's async network sampler replicates the fake position continuously
-    -- even when standing still. A Heartbeat-set fake sits too late in the frame to
-    -- be sampled. See the Stepped handler below. Off = spoof only refreshes while
-    -- moving (the old behaviour).
+    -- keep-alive: a tiny per-frame ApplyImpulse keeps the physics assembly awake
+    -- while idle so the server keeps receiving the Heartbeat spoof (a sleeping
+    -- assembly stops replicating -> server freezes on the real position). Keeps the
+    -- classic Heartbeat/RenderStep structure intact. Off = old behaviour (spoof
+    -- only refreshes while moving). See the Heartbeat handler below.
     forceLive = true,
 }
 do
@@ -1020,32 +1020,17 @@ do
     -- the very end of the frame and Roblox's async network sampler almost always
     -- catches the RenderStep-restored REAL position instead -> the spoof never
     -- reaches the server while idle (root cause of vampire's "doesn't update").
-    local function isIdle()
-        local c = getChar()
-        local hum = c and c:FindFirstChildOfClass("Humanoid")
-        if not hum then return false end
-        return hum.MoveDirection.Magnitude < 0.01
-    end
-    local steppedSpoofed = false
-
-    -- Stepped runs right before physics, so a fake set here occupies the whole
-    -- frame until the next RenderStep restore -> the async sampler replicates it,
-    -- keeping the server on the fake spot even while standing perfectly still.
-    -- LIVE-PROVEN in Desync Playground (server followed a Stepped-set fake; the
-    -- render still showed real). Only runs while idle: setting fake before physics
-    -- freezes real movement, which doesn't matter when you aren't moving. Moving
-    -- hands back to the Heartbeat spoof below (which replicates fine in motion).
-    track(RunService.Stepped:Connect(function()
-        steppedSpoofed = false
-        if not Desync.enabled or Desync.method == "Freeze" or Desync.method == "Velocity" then return end
-        if not Desync.forceLive or SHARED.pause or not realCF then return end
-        if not isIdle() then return end
-        local hrp = getHRP(); if not hrp then return end
-        pcall(applySpoof, hrp)   -- base is realCF (RenderStep just restored it); marks server CF
-        steppedSpoofed = true
-    end))
 
     -- ---- heartbeat spoof + renderstep restore (non-freeze methods) ----
+    -- Classic structure: fake on Heartbeat, real restored on RenderStep. The idle
+    -- keep-alive is a tiny per-frame ApplyImpulse (NOT a timing flip): standing
+    -- still lets the physics assembly sleep, and a sleeping assembly stops
+    -- replicating, so the server freezes on the last position it got (== the
+    -- restored REAL, since RenderStep fills the frame). A negligible upward impulse
+    -- keeps the assembly awake so the network sampler keeps sending the Heartbeat
+    -- fake. LIVE-PROVEN in Desync Playground (server locked to the fake 5/5 samples,
+    -- zero flicker, zero fling on disable -- the RenderStep velocity-restore clears
+    -- the impulse each frame so nothing accumulates).
     track(RunService.Heartbeat:Connect(function()
         -- clear realCF when we're not live-spoofing, so a stale value can't make TP-shoot
         -- (or anything else) restore to an old position. Freeze doesn't move us, so its real
@@ -1053,16 +1038,14 @@ do
         if not Desync.enabled or Desync.method == "Freeze" then SHARED.realCF = nil; return end
         if SHARED.pause then return end
         local hrp = getHRP(); if not hrp then return end
-        -- while idle-spoofing on Stepped, hrp currently sits at the FAKE spot --
-        -- recapturing realCF from it would poison it with the fake position. We're
-        -- idle, so realCF isn't changing anyway: leave it frozen at the true spot.
-        if steppedSpoofed then
-            SHARED.realCF = realCF
-            return
-        end
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
         SHARED.realCF = realCF   -- expose our TRUE CFrame so TP-shoot can pause + restore cleanly
-        pcall(applySpoof, hrp)   -- moving/fallback spoof (replicates fine in motion)
+        pcall(applySpoof, hrp)
+        -- idle keep-alive: wake the assembly so the fake keeps replicating while
+        -- standing still. Velocity mode already floods velocity (self-awake), skip it.
+        if Desync.forceLive and Desync.method ~= "Velocity" then
+            pcall(function() hrp:ApplyImpulse(Vector3.new(0, 0.01, 0)) end)
+        end
     end))
 
     RunService:BindToRenderStep(RESTORE, Enum.RenderPriority.First.Value, function()
