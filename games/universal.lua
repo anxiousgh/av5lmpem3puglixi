@@ -353,7 +353,7 @@ local Esp = {
     chamsOutline = Color3.fromRGB(255, 255, 255),
     chamsTransparency = 0.6,          -- Highlight FillTransparency (0 = solid)
     skeleton = false,
-    rate = 240,                       -- max ESP updates/sec (cap for high-fps rigs)
+    rate = 110,                       -- max ESP updates/sec (cap for high-fps rigs)
 }
 -- expose for the ESP Preview widget (it reads these to draw a live preview box)
 if getgenv then
@@ -694,10 +694,10 @@ do
         dt = dt or (1 / 60)
         -- update-rate cap: at very high fps (vampire runs 700+) re-drawing the
         -- ESP every render frame is pure waste -- the whole update runs at most
-        -- Esp.rate times/sec (default 240; boxes lag the camera by <=1 update
+        -- Esp.rate times/sec (default 110; boxes lag the camera by <=1 update
         -- interval, imperceptible). At or below Esp.rate fps this is a no-op.
         espAcc = espAcc + dt
-        if espAcc < 1 / (Esp.rate or 240) then return end
+        if espAcc < 1 / (Esp.rate or 110) then return end
         dt, espAcc = espAcc, 0
         refreshLook(dt)
         local cam = Workspace.CurrentCamera
@@ -1715,7 +1715,7 @@ do
         Min = 1, Max = 20, Default = 1, Decimals = 0,
         Callback = function(v) Esp.rainbowSpeed = v end })
     Sec3:Slider({ Name = "Update rate", Flag = "EspRate",
-        Min = 60, Max = 480, Default = 240, Decimals = 0, Suffix = "hz",
+        Min = 60, Max = 480, Default = 110, Decimals = 0, Suffix = "hz",
         Callback = function(v) Esp.rate = v end })
     Sec3:Label({ Name = "lower = more fps on high-hz rigs" })
 end
