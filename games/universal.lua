@@ -946,11 +946,13 @@ local Desync = {
     voidMin = 5000, voidMax = 20000,
     spinSpeed = 2, velMag = 16384,
     customX = 0, customY = 0, customZ = 0,
+    spamMinHz = 5, spamMaxHz = 15,
 }
 do
     local RESTORE = "WH_DesyncRestore"
     local realCF, realLV, realAV
     local spinAngle = 0
+    local spamOn, spamNextFlip = false, 0
 
     -- raknet state lives on getgenv so the hook closure survives reloads
     getgenv()._WH_DESYNC = getgenv()._WH_DESYNC or {}
@@ -968,6 +970,22 @@ do
         local m = Desync.method
         if m == "Void" then
             hrp.CFrame = CFrame.new(randVoid())
+            markServerCF(hrp.CFrame)
+        elseif m == "Voidspam" then
+            -- void spoof strobed on/off: each flip picks a random frequency in
+            -- [spamMinHz, spamMaxHz] (hz = full on+off cycles/s, so a half-period
+            -- is 1/(2*hz)). Flips are Heartbeat-quantized, so ~30 hz is the real
+            -- ceiling at 60 fps. Off-phase leaves the root REAL (and marks it) so
+            -- the server ping-pongs between the void and your true spot.
+            local now = os.clock()
+            if now >= spamNextFlip then
+                spamOn = not spamOn
+                local hz = Desync.spamMinHz + math.random() * math.max(Desync.spamMaxHz - Desync.spamMinHz, 0)
+                spamNextFlip = now + 1 / math.max(2 * hz, 0.01)
+            end
+            if spamOn then
+                hrp.CFrame = CFrame.new(randVoid())
+            end
             markServerCF(hrp.CFrame)
         elseif m == "Spin" then
             spinAngle = (spinAngle + Desync.spinSpeed) % 360
@@ -1085,6 +1103,7 @@ do
             -- this stale CFrame (before Heartbeat re-captures) and yanks you back to
             -- the old spot. Cleared = the next enable starts from where you are now.
             realCF, realLV, realAV = nil, nil, nil
+            spamOn, spamNextFlip = false, 0
         end
     end
     function Desync.setMethod(m) Desync.method = m end
@@ -1170,7 +1189,7 @@ do
 
     Sec:Dropdown({
         Name = "Method", Flag = "DesyncMethod", Default = "Void", Multi = false,
-        Items = { "Void", "Spin", "Freeze", "Custom" },
+        Items = { "Void", "Voidspam", "Spin", "Freeze", "Custom" },
         Callback = function(v)
             local m = (type(v) == "table" and v[1]) or v or "Void"
             -- switching method = clean slate: turn both toggles off so a spoof
@@ -1235,6 +1254,12 @@ do
     local voidMax = Sec:Slider({ Name = "Void max", Flag = "DesyncVoidMax",
         Min = 500, Max = 1000000, Default = 20000, Decimals = 0, Suffix = " studs",
         Callback = function(v) Desync.voidMax = v end })
+    local spamMinHz = Sec:Slider({ Name = "Spam min", Flag = "DesyncSpamMinHz",
+        Min = 0.5, Max = 30, Default = 5, Decimals = 1, Suffix = " hz",
+        Callback = function(v) Desync.spamMinHz = v end })
+    local spamMaxHz = Sec:Slider({ Name = "Spam max", Flag = "DesyncSpamMaxHz",
+        Min = 0.5, Max = 30, Default = 15, Decimals = 1, Suffix = " hz",
+        Callback = function(v) Desync.spamMaxHz = v end })
     local spin = Sec:Slider({ Name = "Spin speed", Flag = "DesyncSpin",
         Min = 1, Max = 90, Default = 2, Decimals = 0,
         Callback = function(v) Desync.spinSpeed = v end })
@@ -1250,16 +1275,23 @@ do
     local cHint = Sec:Label({ Name = "type a coord, press Enter to apply" })
 
     local VALUE_CONTROLS = {
-        Void = { voidMin, voidMax }, Spin = { spin }, Custom = { cx, cy, cz, cHint },
+        Void = { voidMin, voidMax },
+        Voidspam = { voidMin, voidMax, spamMinHz, spamMaxHz },
+        Spin = { spin }, Custom = { cx, cy, cz, cHint },
     }
     function showFor(method)
         local isFreeze = (method == "Freeze")
         pcall(function() enabledToggle:SetVisibility(not isFreeze) end)
         pcall(function() freezeToggle:SetVisibility(isFreeze) end)
         pcall(function() freezeWarn:SetVisibility(isFreeze) end)
-        for name, list in pairs(VALUE_CONTROLS) do
+        -- membership check, NOT name == method: voidMin/voidMax live in BOTH the
+        -- Void and Voidspam lists, and a per-list equality write would hide them
+        -- again on whichever list pairs() visits second.
+        local active = {}
+        for _, el in ipairs(VALUE_CONTROLS[method] or {}) do active[el] = true end
+        for _, list in pairs(VALUE_CONTROLS) do
             for _, el in ipairs(list) do
-                pcall(function() el:SetVisibility(name == method) end)
+                pcall(function() el:SetVisibility(active[el] == true) end)
             end
         end
     end
