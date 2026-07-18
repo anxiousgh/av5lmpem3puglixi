@@ -938,8 +938,11 @@ end
 --   void / spin / velocity / custom -> spoof the HRP on Heartbeat (this is
 --     what replicates), then restore your real CFrame each RenderStep so YOU
 --     still see yourself correctly.
---   freeze -> RakNet: block the outbound physics packet (0x1B) so the server
---     stops getting position updates. Needs an executor with a `raknet` API.
+--   freeze -> two paths. "RakNet freeze" blocks the outbound physics packet
+--     (0x1B) so the server stops getting position updates (needs an executor
+--     with a `raknet` API). "Enabled" is the no-raknet fallback: spoofs the
+--     root to the CFrame captured when it was toggled on (Custom-style, coords
+--     frozen at the toggle-on spot) while you move freely locally.
 -- ============================================================
 local Desync = {
     enabled = false, method = "Void",
@@ -953,6 +956,7 @@ do
     local realCF, realLV, realAV
     local spinAngle = 0
     local spamOn, spamNextFlip = false, 0
+    local freezeCF   -- captured at toggle-on; the spoof-freeze pins the server here
 
     -- raknet state lives on getgenv so the hook closure survives reloads
     getgenv()._WH_DESYNC = getgenv()._WH_DESYNC or {}
@@ -997,6 +1001,10 @@ do
         elseif m == "Custom" then
             local rot = hrp.CFrame - hrp.CFrame.Position
             hrp.CFrame = CFrame.new(Desync.customX, Desync.customY, Desync.customZ) * rot
+            markServerCF(hrp.CFrame)
+        elseif m == "Freeze" then
+            freezeCF = freezeCF or hrp.CFrame
+            hrp.CFrame = freezeCF
             markServerCF(hrp.CFrame)
         end
     end
@@ -1045,9 +1053,10 @@ do
     -- the impulse each frame so nothing accumulates).
     track(RunService.Heartbeat:Connect(function()
         -- clear realCF when we're not live-spoofing, so a stale value can't make TP-shoot
-        -- (or anything else) restore to an old position. Freeze doesn't move us, so its real
-        -- position is just the current CFrame -> leave realCF nil there too.
-        if not Desync.enabled or Desync.method == "Freeze" then SHARED.realCF = nil; return end
+        -- (or anything else) restore to an old position. Freeze DOES spoof now (the
+        -- no-raknet fallback pins the toggle-on CFrame), so it runs the loop like the rest;
+        -- RakNet freeze alone (Enabled off) doesn't move us -> realCF stays nil there.
+        if not Desync.enabled then SHARED.realCF = nil; return end
         if SHARED.pause then return end
         local hrp = getHRP(); if not hrp then return end
         realCF, realLV, realAV = hrp.CFrame, hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity
@@ -1063,7 +1072,7 @@ do
     end))
 
     RunService:BindToRenderStep(RESTORE, Enum.RenderPriority.First.Value, function()
-        if not Desync.enabled or Desync.method == "Freeze" or SHARED.pause then return end
+        if not Desync.enabled or SHARED.pause then return end
         local hrp = getHRP(); if not hrp or not realCF then return end
         pcall(function()
             if Desync.method ~= "Velocity" then hrp.CFrame = realCF end
@@ -1097,13 +1106,21 @@ do
     -- it never touches raknet.
     function Desync.setEnabled(on)
         Desync.enabled = on and true or false
-        if not Desync.enabled then
+        if Desync.enabled then
+            -- spoof-freeze pins the spot you're at RIGHT NOW; captured here (not in
+            -- applySpoof) so a re-enable after moving freezes the new spot.
+            if Desync.method == "Freeze" then
+                local hrp = getHRP()
+                freezeCF = hrp and hrp.CFrame or nil
+            end
+        else
             restoreReal()
             -- forget the snapshot, otherwise the next enable's restore fires with
             -- this stale CFrame (before Heartbeat re-captures) and yanks you back to
             -- the old spot. Cleared = the next enable starts from where you are now.
             realCF, realLV, realAV = nil, nil, nil
             spamOn, spamNextFlip = false, 0
+            freezeCF = nil
         end
     end
     function Desync.setMethod(m) Desync.method = m end
@@ -1246,6 +1263,7 @@ do
             end
         end })
     freezeWarn = Sec:Label({ Name = "RakNet -- detection/ban risk." })
+    local freezeHint = Sec:Label({ Name = "no RakNet? Enabled freezes you at the toggle-on spot" })
 
     -- value controls (shown only for their method)
     local voidMin = Sec:Slider({ Name = "Void min", Flag = "DesyncVoidMin",
@@ -1281,9 +1299,10 @@ do
     }
     function showFor(method)
         local isFreeze = (method == "Freeze")
-        pcall(function() enabledToggle:SetVisibility(not isFreeze) end)
+        pcall(function() enabledToggle:SetVisibility(true) end)   -- Freeze too: no-raknet spoof-freeze
         pcall(function() freezeToggle:SetVisibility(isFreeze) end)
         pcall(function() freezeWarn:SetVisibility(isFreeze) end)
+        pcall(function() freezeHint:SetVisibility(isFreeze) end)
         -- membership check, NOT name == method: voidMin/voidMax live in BOTH the
         -- Void and Voidspam lists, and a per-list equality write would hide them
         -- again on whichever list pairs() visits second.
