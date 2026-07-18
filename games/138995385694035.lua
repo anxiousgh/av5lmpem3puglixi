@@ -140,9 +140,9 @@ local HC = {
     stomp = false, stompTargets = false, stompRadius = 5, stompTeleport = false,
     reload = false, reloadKey = Enum.KeyCode.R, reloadThreshold = 0,
     -- knife bot
-    knifeAura = false, knifeDist = 3, knifeInterval = 0.6, knifeOrbit = false, knifeOrbitSpeed = 180,
+    knifeAura = false, knifeDist = 3, knifeOrbit = false, knifeOrbitSpeed = 180,
     knifeEquip = false,
-    knifeReach = false, knifeReachSize = 10, knifeReachVis = false,
+    knifeReach = false, knifeReachVis = false,
     -- afk + protection
     antiAfk = false, forceAfk = false, godmode = false, forceJump = false,
     -- visuals
@@ -2455,15 +2455,35 @@ track(RunService.Heartbeat:Connect(function(dt)
         end)
     end
 end))
--- knife swing clicker
+-- knife swing clicker -- PERFECT TIMING: fire ONE stab the instant the melee cooldown
+-- clears. The stab has a hard ~0.5s server cooldown that holds BodyEffects.Attacking
+-- true for its duration; we read that flag PASSIVELY to time the next click (NEVER write
+-- it -- writing any BodyEffects flag trips HC's anticheat "you shouldn't do that" kick).
+-- Clicking the moment Attacking drops hits the true ~2/s ceiling with no wasted windows.
+local function knifeOnCooldown()
+    local c = LocalPlayer.Character
+    local be = c and c:FindFirstChild("BodyEffects")
+    local a = be and be:FindFirstChild("Attacking")
+    return (a and a.Value == true) or false
+end
 task.spawn(function()
     while not unloaded do
         if HC.knifeAura and not _stomping and knifeTargetHrp() then
-            pcall(function()
-                VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
-                VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
-            end)
-            task.wait(HC.knifeInterval)
+            if not knifeOnCooldown() then
+                pcall(function()
+                    VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+                    VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+                end)
+                -- wait for the cooldown to actually engage (Attacking -> true) before
+                -- looping, so we fire exactly once per window instead of spamming into
+                -- it. Bounded, so a swing that never registers (out of range / no knife)
+                -- can't hang the loop.
+                local t = os.clock()
+                repeat RunService.Heartbeat:Wait() until knifeOnCooldown()
+                    or (os.clock() - t) > 0.25 or unloaded or not HC.knifeAura
+            else
+                RunService.Heartbeat:Wait()   -- on cooldown: poll each frame, stab the instant it clears
+            end
         else
             task.wait(0.1)
         end
@@ -2484,9 +2504,9 @@ task.spawn(function()
     end
 end)
 
--- ---- KNIFE REACH: resize [Knife]/Handle/HITBOX_PART (max 13 -- above trips HC's
---      anti-cheat). Re-applied on Heartbeat so it survives respawn/re-equip. The
---      visualizer puts a Highlight on the (resized) hitbox so you see the real reach. ----
+-- ---- KNIFE REACH: resize [Knife]/Handle/HITBOX_PART to 13 studs -- the max before HC's
+--      anti-cheat kicks (forced, no slider). Re-applied on Heartbeat so it survives
+--      respawn/re-equip. The visualizer puts a Highlight on the resized hitbox. ----
 local KR_DEFAULT = Vector3.new(2.5, 1, 1)
 local KR_MAX = 13
 local function knifeHitbox()
@@ -2507,8 +2527,7 @@ end
 track(RunService.Heartbeat:Connect(function()
     local hb = knifeHitbox(); if not hb then return end
     if HC.knifeReach then
-        local s = math.clamp(HC.knifeReachSize or 10, 1, KR_MAX)
-        local target = Vector3.new(s, s, s)
+        local target = Vector3.new(KR_MAX, KR_MAX, KR_MAX)   -- forced to 13 (max safe)
         if hb.Size ~= target then pcall(function() hb.Size = target end) end
         if hb.Transparency ~= 0.9999 then pcall(function() hb.Transparency = 0.9999 end) end
         local hl = hb:FindFirstChild("_kr_hl")
@@ -2788,10 +2807,9 @@ do
     local Sec = KnifeSub:Section({ Name = "Knife aura", Side = 1 })
     Sec:Toggle({ Name = "Knife aura (attach + swing)", Flag = "HC_KnifeAura", Default = false,
         Callback = function(v) HC.knifeAura = v end })
+    Sec:Label({ Name = "Swing: auto perfect-timing (~2/s cap)" })
     Sec:Slider({ Name = "Distance", Flag = "HC_KnifeDist", Min = 0, Max = 50, Default = 3, Decimals = 0,
         Callback = function(v) HC.knifeDist = v end })
-    Sec:Slider({ Name = "Swing interval", Flag = "HC_KnifeInterval", Min = 5, Max = 200, Default = 60, Decimals = 0, Suffix = "0ms",
-        Callback = function(v) HC.knifeInterval = v / 100 end })
     Sec:Toggle({ Name = "Orbit target", Flag = "HC_KnifeOrbit", Default = false,
         Callback = function(v) HC.knifeOrbit = v end })
     Sec:Slider({ Name = "Orbit speed", Flag = "HC_KnifeOrbitSpeed", Min = 0, Max = 720, Default = 180, Decimals = 0,
@@ -2802,10 +2820,8 @@ do
         Callback = function(v) HC.knifeEquip = v end })
 
     local Sec3 = KnifeSub:Section({ Name = "Knife reach", Side = 2 })
-    Sec3:Toggle({ Name = "Knife reach", Flag = "HC_KnifeReach", Default = false,
+    Sec3:Toggle({ Name = "Knife reach (forced 13 studs)", Flag = "HC_KnifeReach", Default = false,
         Callback = function(v) HC.knifeReach = v end })
-    Sec3:Slider({ Name = "Reach", Flag = "HC_KnifeReachSize", Min = 2, Max = 13, Default = 10, Decimals = 0, Suffix = " studs",
-        Callback = function(v) HC.knifeReachSize = v end })
     Sec3:Toggle({ Name = "Reach visualizer", Flag = "HC_KnifeReachVis", Default = false,
         Callback = function(v) HC.knifeReachVis = v end })
 end
