@@ -30,6 +30,13 @@
 --      Character.Weapon["Right Arm"].Weapon.Main.BasicAttack -- hit detection is
 --      server side, so reach cannot be read and cannot be widened from here.
 --      The rings below are measured from hits that actually land.
+--    * Veil's two throws: spearmode says a throw is being AIMED, not which kind.
+--      The charged (wall-piercing) one wears an "Aura att" attachment with live
+--      ParticleEmitters while held -- the same particles ProjectileHandler
+--      switches on for speed > 150 -- so the mode is readable before release.
+--      Veil's perks are Piercing Reverie / Blood Between Worlds / Echo Of The
+--      Void, and Remotes.Killers.Veil carries Spearthrow, vfx, updatewep and a
+--      PiercingReverie folder.
 --    * Only the KILLER uploads aim, via Remotes.getlookvector, and it is never
 --      mirrored back to survivors -- a pre-throw spear line has to use the
 --      killer's replicated HRP facing and only becomes exact once the throw
@@ -867,9 +874,30 @@ watchSelf(LocalPlayer.Character)
 track(LocalPlayer.CharacterAdded:Connect(watchSelf))
 
 -- ---------- Veil spear ----------
-local spearSpeed, spearGMult = 150, 1   -- overwritten by the first observed throw
-local spearSeen = false
-local liveSpears = {}                   -- { pos, vel, gmult, t0 }
+-- Two throws, learned separately. ProjectileHandler turns the aura particles on
+-- when speed > 150, so that threshold splits the charged throw from the normal
+-- one; each keeps its own observed speed/gravity for prediction.
+local spearNorm    = { speed = 150, gmult = 1, seen = false }
+local spearCharged = { speed = 220, gmult = 1, seen = false }
+local liveSpears = {}                   -- { origin, dir, speed, gmult, t0 }
+
+-- The charged spear wears an "Aura att" attachment (ReplicatedStorage.Killers.
+-- Veil.Particles) while it is held, so the mode is readable BEFORE the throw --
+-- spearmode alone only says a throw is being aimed, not which kind.
+local function isCharged(kc)
+    if not kc then return false end
+    for _, d in ipairs(kc:GetDescendants()) do
+        if d:IsA("Attachment") and d.Name == "Aura att" then
+            for _, e in ipairs(d:GetChildren()) do
+                if e:IsA("ParticleEmitter") and e.Enabled then return true end
+            end
+        elseif d:IsA("ParticleEmitter") and d.Enabled and d.Parent
+        and tostring(d.Parent.Name):lower():find("spear") then
+            return true
+        end
+    end
+    return false
+end
 
 -- Steps at the same 1/60 the game integrates at so the path matches, but only
 -- emits every DECIMATE'th point: 4s of flight is 240 steps, and drawing all of
@@ -916,7 +944,8 @@ end
 pcall(function()
     track(RS_.Remotes.Mechanics.visualize.OnClientEvent:Connect(function(char, dir, speed, gmult, id)
         if typeof(dir) ~= "Vector3" or type(speed) ~= "number" then return end
-        spearSpeed, spearGMult, spearSeen = speed, gmult or 1, true
+        local bucket = (speed > 150) and spearCharged or spearNorm
+        bucket.speed, bucket.gmult, bucket.seen = speed, gmult or 1, true
         local origin
         local root = char and char:FindFirstChild("HumanoidRootPart")
         if root then
@@ -1028,19 +1057,31 @@ local function stepSpear(hrp, kp, kc, kroot)
     local aim = kroot.CFrame.LookVector
     if kp == LocalPlayer and cam then aim = cam.CFrame.LookVector end
 
-    local pts, wall, wallIdx, tail, wallT, tailT = simulateArc(origin, aim, spearSpeed, spearGMult, 4)
-    dPath(pts, wallIdx, aiming and PAL.killer or PAL.muted, aiming and 1 or 0.55, PAL.accent, 0.4)
+    -- The aura says which throw is coming, so predict THAT one rather than
+    -- hedging with both legs.
+    local charged = isCharged(kc)
+    local prof = charged and spearCharged or spearNorm
+    local pts, wall, wallIdx, tail, wallT, tailT = simulateArc(origin, aim, prof.speed, prof.gmult, 4)
 
+    local col = charged and PAL.accent or PAL.killer
+    local live = aiming and 1 or 0.6
     local function away(v)
         return hrp and math.floor((v - hrp.Position).Magnitude + 0.5) or 0
     end
-    local live = aiming and 1 or 0.6
-    if wall then
-        -- normal spear stops here; the charged one carries on to the tail
-        landingMark(wall, ("LANDS  %dm  %.2fs"):format(away(wall), wallT or 0), PAL.killer, live)
-        landingMark(tail, ("charged  %dm  %.2fs"):format(away(tail), tailT or 0), PAL.accent, live * 0.55)
+
+    if charged then
+        -- pierces walls: one unbroken path, and the wall it goes through is
+        -- only worth marking as a landmark, not as a stopping point
+        dPath(pts, nil, col, live, col, live)
+        landingMark(tail, ("PIERCE  %dm  %.2fs"):format(away(tail), tailT or 0), col, live)
+        if wall then
+            local pt = toScreen(wall)
+            if pt then dText(pt, "through here", PAL.muted, 12, true) end
+        end
     else
-        landingMark(tail, ("LANDS  %dm  %.2fs"):format(away(tail), tailT or 0), PAL.killer, live)
+        dPath(pts, wallIdx, aiming and col or PAL.muted, live, PAL.muted, 0.3)
+        local land = wall or tail
+        landingMark(land, ("LANDS  %dm  %.2fs"):format(away(land), (wall and wallT or tailT) or 0), col, live)
     end
 end
 
@@ -1203,7 +1244,12 @@ track(RunService.Heartbeat:Connect(function()
                 intelLabels.spear:SetText(("Spear: %s ammo   %s   speed %s")
                     :format(tostring(kc:GetAttribute("Spears")),
                         kc:GetAttribute("spearmode") and "AIMING" or "idle",
-                        spearSeen and ("%.0f"):format(spearSpeed) or "est"))
+                        (function()
+                            local ch = isCharged(kc)
+                            local prof = ch and spearCharged or spearNorm
+                            return ("%s %s%.0f"):format(ch and "CHARGED" or "normal",
+                                prof.seen and "" or "~", prof.speed)
+                        end)()))
             else
                 intelLabels.spear:SetText("Spear: - (not Veil)")
             end
