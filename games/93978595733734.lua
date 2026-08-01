@@ -889,10 +889,14 @@ local spearCharged = { speed = 220, gmult = 1, seen = false }
 
 -- Persisted next to the measured attack ranges, so a speed only has to be
 -- observed once ever rather than once per session.
+-- Object-space launch offsets. NOTE THE SIGN: a CFrame's LookVector is -Z, so
+-- "in front" is NEGATIVE Z. Positive Z here put the arc behind the killer,
+-- normally inside a wall, where it terminated on the first raycast and drew
+-- nothing at all.
 local learned = {
-    Veil        = { origin = Vector3.new(0, 1.5, 3), seen = false },
-    Cure        = { speed = 95, gmult = 1, origin = Vector3.new(0, 1.5, 2), seen = false },
-    Abysswalker = { speed = 120, gmult = 0, origin = Vector3.new(0, 1.5, 2), seen = false },
+    Veil        = { origin = Vector3.new(0, 1.5, -3), seen = false },
+    Cure        = { speed = 95, gmult = 1, origin = Vector3.new(0, 1.5, -2), seen = false },
+    Abysswalker = { speed = 120, gmult = 0, origin = Vector3.new(0, 1.5, -2), seen = false },
 }
 
 local PROJ_FILE = "wh_vd_proj.json"
@@ -911,7 +915,9 @@ do
                     prof.seen = v.seen == true
                 end
             end
-            if type(t.learned) == "table" then
+            -- Origins saved before the sign fix are behind the killer; ignore
+            -- them so a bad value cannot persist across the update.
+            if type(t.learned) == "table" and t.originSign == "front-negative-z" then
                 for name, rec in pairs(t.learned) do
                     if learned[name] and tonumber(rec.x) then
                         learned[name].origin = Vector3.new(rec.x, rec.y, rec.z)
@@ -933,6 +939,7 @@ local function saveProj()
                 speed = rec.speed, gmult = rec.gmult, seen = rec.seen }
         end
         writefile(PROJ_FILE, HttpService:JSONEncode({
+            originSign = "front-negative-z",
             norm    = { speed = spearNorm.speed,    gmult = spearNorm.gmult,    seen = spearNorm.seen },
             charged = { speed = spearCharged.speed, gmult = spearCharged.gmult, seen = spearCharged.seen },
             learned = origins,
@@ -1282,8 +1289,36 @@ end
 
 -- Lead converges: solve, see how long the spear is in the air, re-aim at where
 -- the target will be by then, repeat. Three passes is plenty at these speeds.
+-- A remote character's AssemblyLinearVelocity is not reliably replicated -- it
+-- usually reads zero, which killed the lead entirely and left the solution
+-- correcting pitch only. Differentiate the position ourselves instead, lightly
+-- smoothed so a single network hitch does not throw the aim.
+local velTrack = setmetatable({}, { __mode = "k" })
+local function targetVelocity(part)
+    local now, pos = os.clock(), part.Position
+    local rec = velTrack[part]
+    if not rec then
+        velTrack[part] = { pos = pos, t = now, vel = Vector3.zero }
+        return Vector3.zero
+    end
+    local dt = now - rec.t
+    if dt >= 0.03 then
+        local raw = (pos - rec.pos) / dt
+        rec.vel = rec.vel:Lerp(raw, 0.4)
+        rec.pos, rec.t = pos, now
+    end
+    return rec.vel
+end
+
 local function solveLead(origin, part, speed, gmult)
-    local vel = S.aimLead and part.AssemblyLinearVelocity or Vector3.zero
+    local vel = Vector3.zero
+    if S.aimLead then
+        vel = targetVelocity(part)
+        local replicated = part.AssemblyLinearVelocity
+        -- trust whichever actually reports motion
+        if replicated.Magnitude > vel.Magnitude then vel = replicated end
+        vel = Vector3.new(vel.X, 0, vel.Z)   -- ignore jump/fall; they land anyway
+    end
     local aimAt, dir, flight = part.Position, nil, nil
     for _ = 1, 3 do
         dir, flight = solveAim(origin, aimAt, speed, gmult)
@@ -1649,7 +1684,7 @@ track(RunService.Heartbeat:Connect(function()
         end
 
         if intelLabels.power then
-            local attrs, events = powerLines(kc)
+            local attrs = powerLines(kc)
             intelLabels.power:SetText(("Power: %s"):format(
                 #attrs > 0 and table.concat(attrs, "  ", 1, math.min(#attrs, 4)) or "-"))
         end
