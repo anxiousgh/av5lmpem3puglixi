@@ -142,6 +142,9 @@ local S = {
     spearLive     = false,   -- Veil: exact arc of a spear already in flight
     spearAlways   = false,   -- draw the predicted arc even outside spearmode
     blindMeter    = false,   -- flashlight blind progress + fuel
+    aimAssist     = false,   -- Veil: show where to point to hit the nearest survivor
+    aimFov        = 400,     -- target search radius around the crosshair, pixels
+    aimLead       = true,    -- lead a moving target by its own velocity
     blindCone     = 20,      -- half-angle (deg) the beam counts as "on target"
     blindRange    = 60,      -- studs
     espBox        = true,    -- draw the 2D bounding box
@@ -879,6 +882,37 @@ track(LocalPlayer.CharacterAdded:Connect(watchSelf))
 -- one; each keeps its own observed speed/gravity for prediction.
 local spearNorm    = { speed = 150, gmult = 1, seen = false }
 local spearCharged = { speed = 220, gmult = 1, seen = false }
+
+-- Persisted next to the measured attack ranges, so a speed only has to be
+-- observed once ever rather than once per session.
+local SPEAR_FILE = "wh_vd_spear.json"
+do
+    local ok, raw = pcall(function()
+        if isfile and isfile(SPEAR_FILE) then return readfile(SPEAR_FILE) end
+    end)
+    if ok and raw then
+        local ok2, t = pcall(function() return HttpService:JSONDecode(raw) end)
+        if ok2 and type(t) == "table" then
+            for key, prof in pairs({ norm = spearNorm, charged = spearCharged }) do
+                local v = t[key]
+                if type(v) == "table" and tonumber(v.speed) then
+                    prof.speed = tonumber(v.speed)
+                    prof.gmult = tonumber(v.gmult) or 1
+                    prof.seen = v.seen == true
+                end
+            end
+        end
+    end
+end
+local function saveSpear()
+    if not writefile then return end
+    pcall(function()
+        writefile(SPEAR_FILE, HttpService:JSONEncode({
+            norm    = { speed = spearNorm.speed,    gmult = spearNorm.gmult,    seen = spearNorm.seen },
+            charged = { speed = spearCharged.speed, gmult = spearCharged.gmult, seen = spearCharged.seen },
+        }))
+    end)
+end
 local liveSpears = {}                   -- { origin, dir, speed, gmult, t0 }
 
 -- Measured live 2026-08-01 on a charged hold: the aura is the "Hitbox" emitter
@@ -939,7 +973,9 @@ pcall(function()
     track(RS_.Remotes.Mechanics.visualize.OnClientEvent:Connect(function(char, dir, speed, gmult, id)
         if typeof(dir) ~= "Vector3" or type(speed) ~= "number" then return end
         local bucket = (speed > 150) and spearCharged or spearNorm
+        local changed = (bucket.speed ~= speed) or (bucket.gmult ~= (gmult or 1)) or not bucket.seen
         bucket.speed, bucket.gmult, bucket.seen = speed, gmult or 1, true
+        if changed then saveSpear() end
         local origin
         local root = char and char:FindFirstChild("HumanoidRootPart")
         if root then
@@ -1079,6 +1115,113 @@ local function stepSpear(hrp, kp, kc, kroot)
     end
 end
 
+-- ============================================================
+--  SPEAR AIM ASSIST
+--
+--  Not an aimbot: nothing is fired and the camera is never moved. It solves the
+--  launch direction that WOULD land on the nearest survivor to the crosshair
+--  and draws where to point, leaving the shot to the player.
+--
+--  For a fixed launch speed the angle is closed form. With d the horizontal
+--  distance, y the height difference, v the speed and g the gravity:
+--      tan(theta) = (v^2 -/+ sqrt(v^4 - g*(g*d^2 + 2*y*v^2))) / (g*d)
+--  The minus root is the flatter of the two arcs -- shorter flight, less time
+--  for the target to move -- and a negative discriminant means out of range.
+-- ============================================================
+local function solveAim(origin, target, speed, gmult)
+    local g = workspace.Gravity * (gmult or 1)
+    local d = target - origin
+    local flat = Vector3.new(d.X, 0, d.Z)
+    local x = flat.Magnitude
+    if x < 0.05 or speed <= 0 then return nil end
+    local v2 = speed * speed
+    local disc = v2 * v2 - g * (g * x * x + 2 * d.Y * v2)
+    if disc < 0 then return nil end
+    local tanTheta = (v2 - math.sqrt(disc)) / (g * x)
+    local dir = (flat.Unit + Vector3.new(0, tanTheta, 0)).Unit
+    local flight = x / (speed * math.cos(math.atan(tanTheta)))
+    return dir, flight
+end
+
+-- Lead converges: solve, see how long the spear is in the air, re-aim at where
+-- the target will be by then, repeat. Three passes is plenty at these speeds.
+local function solveLead(origin, part, speed, gmult)
+    local vel = S.aimLead and part.AssemblyLinearVelocity or Vector3.zero
+    local aimAt, dir, flight = part.Position, nil, nil
+    for _ = 1, 3 do
+        dir, flight = solveAim(origin, aimAt, speed, gmult)
+        if not dir then return nil end
+        aimAt = part.Position + vel * flight
+    end
+    return dir, flight, aimAt
+end
+
+local function pickTarget()
+    if not cam then return nil end
+    local centre = cam.ViewportSize / 2
+    local best, bestD
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and isSurvivor(p) then
+            local c = p.Character
+            local hum = c and c:FindFirstChildOfClass("Humanoid")
+            local root = c and c:FindFirstChild("HumanoidRootPart")
+            if root and hum and hum.Health > 0 and not c:GetAttribute("Knocked") then
+                local sp, on = cam:WorldToViewportPoint(root.Position)
+                if on then
+                    local d = (Vector2.new(sp.X, sp.Y) - centre).Magnitude
+                    if d <= S.aimFov and (not bestD or d < bestD) then best, bestD = root, d end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function stepAimAssist(hrp, kp, kc, kroot)
+    if not (S.aimAssist and cam and kc and kroot and kp == LocalPlayer) then return end
+    if (tonumber(kc:GetAttribute("Spears")) or 0) <= 0 then return end
+
+    local target = pickTarget()
+    if not target then return end
+
+    local charged = isCharged(kc)
+    local prof = charged and spearCharged or spearNorm
+    local origin = kroot.Position + kroot.CFrame.LookVector * 3 + Vector3.new(0, 1.5, 0)
+    local dir, flight, aimAt = solveLead(origin, target, prof.speed, prof.gmult)
+
+    local centre = cam.ViewportSize / 2
+    if not dir then
+        dText(Vector2.new(centre.X, centre.Y + 34), "spear: out of range", PAL.muted, 13, true)
+        return
+    end
+
+    local col = charged and PAL.accent or PAL.killer
+
+    -- the solved arc, and whether terrain eats it before it arrives
+    local pts, wall, wallIdx = simulateArc(origin, dir, prof.speed, prof.gmult, math.min(flight + 0.2, 4))
+    local blocked = (not charged) and wall
+        and (wall - origin).Magnitude < (aimAt - origin).Magnitude - 2
+    dPath(pts, (not charged) and wallIdx or nil, col, blocked and 0.35 or 1, PAL.muted, 0.3)
+
+    landingMark(aimAt, ("%s  %.2fs"):format(blocked and "BLOCKED" or "AIM HERE", flight),
+        blocked and PAL.muted or col, 1)
+
+    -- Where the crosshair has to point. The spear leaves along the CAMERA
+    -- direction, so projecting the solved vector from the camera gives the
+    -- exact screen position to put the crosshair on.
+    local mp, on = cam:WorldToViewportPoint(cam.CFrame.Position + dir * 60)
+    if on then
+        local at = Vector2.new(mp.X, mp.Y)
+        dLine(centre, at, col, 0.45, 1)
+        local r = 7
+        dLine(at - Vector2.new(r, 0), at + Vector2.new(r, 0), col, 1, 2)
+        dLine(at - Vector2.new(0, r), at + Vector2.new(0, r), col, 1, 2)
+        dText(at + Vector2.new(0, 11),
+            ("%dm  %s"):format(math.floor((aimAt - origin).Magnitude + 0.5),
+                charged and "charged" or "normal"), col, 12, true)
+    end
+end
+
 local function stepBlind(dt, hrp, kc, kroot)
     if not S.blindMeter then
         blindHold = 0
@@ -1148,6 +1291,7 @@ track(RunService.RenderStepped:Connect(function(dt)
     stepObjEsp(hrp)
     stepRings(hrp, kp, kroot)
     stepSpear(hrp, kp, kc, kroot)
+    stepAimAssist(hrp, kp, kc, kroot)
     stepBlind(dt, hrp, kc, kroot)
     stepChaseWarn()
     frameEnd()
@@ -1357,7 +1501,10 @@ do
     RSec:Button({ Name = "Reset measurements", Callback = function()
         ranges = {}
         saveRanges()
-        pcall(function() Library:Notification("Attack range data cleared", 3, PAL.accent) end)
+        spearNorm.speed, spearNorm.gmult, spearNorm.seen = 150, 1, false
+        spearCharged.speed, spearCharged.gmult, spearCharged.seen = 220, 1, false
+        saveSpear()
+        pcall(function() Library:Notification("Measured ranges + spear speeds cleared", 3, PAL.accent) end)
     end })
 
     local SpSec = Read:Section({ Name = "Veil spear", Side = 2 })
@@ -1368,6 +1515,14 @@ do
     SpSec:Toggle({ Name = "Live spear arc", Flag = "VD_SpearLive", Default = false,
         Callback = function(v) S.spearLive = v end })
     intelLabels.spear = SpSec:Label({ Name = "Spear: -" })
+
+    local ASec = Read:Section({ Name = "Spear aim assist", Side = 2 })
+    ASec:Toggle({ Name = "Show aim solution", Flag = "VD_AimAssist", Default = false,
+        Callback = function(v) S.aimAssist = v end })
+    ASec:Toggle({ Name = "Lead moving targets", Flag = "VD_AimLead", Default = true,
+        Callback = function(v) S.aimLead = v end })
+    ASec:Slider({ Name = "Target FOV", Flag = "VD_AimFov", Min = 80, Max = 1200, Default = 400,
+        Decimals = 0, Suffix = " px", Callback = function(v) S.aimFov = v end })
 
     -- ---------- intel ----------
     local Intel = Page:SubPage({ Name = "Intel" })
@@ -1417,6 +1572,7 @@ local function cleanup()
         false, false, false, false, false, false
     S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
         false, false, false, false, false, false
+    S.aimAssist = false
     chaseFlash = false
     pcall(function() Library.MouseRestoreHook = nil end)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
