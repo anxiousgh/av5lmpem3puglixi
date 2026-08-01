@@ -135,6 +135,8 @@ local S = {
     spearLive     = false,   -- Veil: exact arc of a spear already in flight
     spearAlways   = false,   -- draw the predicted arc even outside spearmode
     blindMeter    = false,   -- flashlight blind progress + fuel
+    blindCone     = 20,      -- half-angle (deg) the beam counts as "on target"
+    blindRange    = 60,      -- studs
     espBox        = true,    -- draw the 2D bounding box
     espName       = true,
     espDist       = true,    -- distance line under every tracked thing
@@ -904,6 +906,7 @@ end)
 -- how long our beam has been on the killer. The threshold is therefore learned:
 -- whenever GotBlinded lands, the beam time at that instant becomes the target.
 local blindHold, blindNeed, blindSamples = 0, 1.1, 0
+local blindDot, blindDist = -1, 0
 pcall(function()
     track(RS_.Remotes.Items.Flashlight.GotBlinded.OnClientEvent:Connect(function()
         if blindHold > 0.05 then
@@ -917,12 +920,27 @@ end)
 local function findFlashlightPart()
     local c = LocalPlayer.Character
     if not c then return nil end
-    -- the flashlight is a plain child of the character carrying "remaining"
-    -- (fuel) and "loc"; do not assume a class, only the attribute
+    -- the flashlight is a MODEL child of the character carrying "remaining"
+    -- (fuel) and "loc" -- do not assume a class, only the attribute
     for _, d in ipairs(c:GetDescendants()) do
         if d:GetAttribute("remaining") ~= nil then return d end
     end
     return nil
+end
+
+-- Whether the beam is actually on. UserInputService:IsMouseButtonPressed never
+-- reported the hold in this game (measured: 0 hits over 114 samples while the
+-- light was in use), so read the light itself -- FlashlightClient enables the
+-- SpotLight/Beam when it activates, which is the state we actually care about.
+local function beamOn(fl)
+    if not fl then return false end
+    for _, d in ipairs(fl:GetDescendants()) do
+        if (d:IsA("SpotLight") or d:IsA("PointLight") or d:IsA("SurfaceLight") or d:IsA("Beam"))
+        and d.Enabled then
+            return true
+        end
+    end
+    return false
 end
 
 -- ---------- per-frame ----------
@@ -993,13 +1011,15 @@ local function stepBlind(dt, hrp, kc, kroot)
         return
     end
     local fl = findFlashlightPart()
-    local beaming = fl and UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    local beaming = beamOn(fl)
     local onKiller = false
     if beaming and kc and hrp and cam then
         local head = kc:FindFirstChild("Head") or kroot
         if head then
             local to = head.Position - cam.CFrame.Position
-            if to.Magnitude < 45 and cam.CFrame.LookVector:Dot(to.Unit) > 0.965 then
+            local aimDot = cam.CFrame.LookVector:Dot(to.Unit)
+            blindDot, blindDist = aimDot, to.Magnitude
+            if to.Magnitude < S.blindRange and aimDot > math.cos(math.rad(S.blindCone)) then
                 local rp = RaycastParams.new()
                 rp.FilterType = Enum.RaycastFilterType.Exclude
                 rp.FilterDescendantsInstances = { LocalPlayer.Character, kc }
@@ -1023,7 +1043,10 @@ local function stepBlind(dt, hrp, kc, kroot)
     dText(Vector2.new(vp.X / 2, y - 16),
         ("blind %d%%   fuel %d   %s%s"):format(math.floor(pct * 100 + 0.5), fuel,
             blindSamples > 0 and ("%.2fs"):format(blindNeed) or "est",
-            onKiller and "   ON TARGET" or (beaming and "   no target" or "")),
+            onKiller and "   ON TARGET"
+                or (beaming and ("   off by %ddeg @ %dm"):format(
+                        math.deg(math.acos(math.clamp(blindDot, -1, 1))), blindDist)
+                    or "   light off")),
         onKiller and PAL.accent or PAL.muted, 13, true)
 end
 
@@ -1234,6 +1257,10 @@ do
     local FSec = Surv:Section({ Name = "Flashlight", Side = 2 })
     FSec:Toggle({ Name = "Blind progress bar", Flag = "VD_BlindMeter", Default = false,
         Callback = function(v) S.blindMeter = v end })
+    FSec:Slider({ Name = "Beam cone", Flag = "VD_BlindCone", Min = 5, Max = 60, Default = 20,
+        Decimals = 0, Suffix = " deg", Callback = function(v) S.blindCone = v end })
+    FSec:Slider({ Name = "Beam range", Flag = "VD_BlindRange", Min = 15, Max = 120, Default = 60,
+        Decimals = 0, Suffix = " studs", Callback = function(v) S.blindRange = v end })
 
     -- ---------- killer read ----------
     local Read = Page:SubPage({ Name = "Killer" })
