@@ -269,8 +269,19 @@ do
         if Self.OnExit then pcall(Self.OnExit) end -- [wh] teardown hook (turns features off)
         Self:ApplyWindowInputState(false)
 
-        -- custom cursor may have hidden the OS pointer -- always hand it back.
-        pcall(function() UserInputService.MouseIconEnabled = true end)
+        -- [wh] Only hand the OS pointer back if WE were the ones hiding it (the
+        -- custom cursor, i.e. the menu was open). Unloading while closed used to
+        -- force a visible cursor onto a first-person game that never wanted one.
+        if Self.WindowOpenState or Self.MouseStateBeforeOpen then
+            pcall(function()
+                UserInputService.MouseIconEnabled =
+                    not Self.MouseStateBeforeOpen or Self.MouseStateBeforeOpen.MouseIconEnabled ~= false
+                if Self.MouseStateBeforeOpen
+                and Self.MouseStateBeforeOpen.MouseBehavior == Enum.MouseBehavior.LockCenter then
+                    UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+                end
+            end)
+        end
 
         if Self.MouseFreeBindName then -- [wh] see BindToRenderStep mouse-free patch
             pcall(function() RunService:UnbindFromRenderStep(Self.MouseFreeBindName) end)
@@ -844,26 +855,35 @@ do
     end
 
     Library.SetWindowVisibilityState = function(Self, Bool)
+        -- [wh] Only ever touch the mouse on a real open<->close TRANSITION.
+        -- Writing it on a close-while-already-closed (which is how the loader
+        -- boots) handed the player a free cursor in a game that never asked
+        -- for one.
+        local WasOpen = Library.WindowOpenState and true or false
         Library.WindowOpenState = Bool and true or false
         Library:ApplyWindowInputState(Library.WindowOpenState)
 
-        if Library.WindowOpenState then
+        if Library.WindowOpenState and not WasOpen then
             Library.MouseStateBeforeOpen = {
                 MouseIconEnabled = UserInputService.MouseIconEnabled,
+                MouseBehavior = UserInputService.MouseBehavior,
             }
             UserInputService.MouseBehavior = Enum.MouseBehavior.Default
             UserInputService.MouseIconEnabled = false
-        elseif Library.MouseStateBeforeOpen then
-            -- [wh] Restore the cursor icon, but force MouseBehavior to Default rather than
-            -- the value captured at open. If the menu was opened mid-RMB-hold, that captured
-            -- value was LockCurrentPosition; restoring it after the camera already saw the
-            -- RMB release re-locks the mouse and traps the camera in drag mode forever.
-            -- Default lets the game camera reassert its own state from the live RMB.
-            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        elseif WasOpen and not Library.WindowOpenState and Library.MouseStateBeforeOpen then
             UserInputService.MouseIconEnabled = Library.MouseStateBeforeOpen.MouseIconEnabled ~= false
+            -- [wh] Put LockCenter back, because a first-person game (Violence
+            -- District) locks once and does NOT rewrite MouseBehavior every
+            -- frame -- leaving Default here left the cursor loose for the rest
+            -- of the round. LockCurrentPosition is deliberately NOT restored:
+            -- if the menu was opened mid-RMB-hold, re-applying it after the
+            -- camera saw the release traps the camera in drag mode forever.
+            if Library.MouseStateBeforeOpen.MouseBehavior == Enum.MouseBehavior.LockCenter then
+                UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+            else
+                UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+            end
             Library.MouseStateBeforeOpen = nil
-        else
-            UserInputService.MouseIconEnabled = true
         end
 
         if Library.MouseCursor and Library.MouseCursor.Instance then

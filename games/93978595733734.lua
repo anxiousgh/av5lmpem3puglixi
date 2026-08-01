@@ -45,9 +45,6 @@ local LocalPlayer       = Players.LocalPlayer
 
 local conns = {}
 local function track(c) conns[#conns + 1] = c; return c end
-local function espParent()
-    return (gethui and gethui()) or game:GetService("CoreGui")
-end
 local function myHRP()
     local c = LocalPlayer.Character
     return c and c:FindFirstChild("HumanoidRootPart")
@@ -95,7 +92,7 @@ local function genProgress(gen)
 end
 
 -- ============================================================
---  ESP POOLS  -- one Highlight + BillboardGui per tracked instance
+--  THEME
 -- ============================================================
 -- ---------- GUI-matched theme ----------
 -- Colors + font come straight from the menu library so the ESP reads as part
@@ -110,12 +107,6 @@ local PAL = {
     outline = T["Outline"] or Color3.fromRGB(62, 57, 77),
     border  = T["Border"] or Color3.fromRGB(10, 10, 12),
 }
-local ESP_FONT = (Library and Library.Font) or Font.fromEnum(Enum.Font.Code)
-local function hex(c)
-    return string.format("#%02X%02X%02X",
-        math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
-end
-local HEX = { killer = hex(PAL.killer), accent = hex(PAL.accent), muted = hex(PAL.muted) }
 
 local S = {
     killerEsp     = false,
@@ -144,140 +135,259 @@ local S = {
     spearLive     = false,   -- Veil: exact arc of a spear already in flight
     spearAlways   = false,   -- draw the predicted arc even outside spearmode
     blindMeter    = false,   -- flashlight blind progress + fuel
+    espBox        = true,    -- draw the 2D bounding box
+    espName       = true,
+    espDist       = true,    -- distance line under every tracked thing
+    espHealth     = true,    -- health bar on the left edge of the box
+    espState      = true,    -- KNOCKED / HOOKED / REPAIRING / ...
+    espTracer     = false,   -- line from the bottom of the screen
 }
 
-local pool = {}   -- [Instance] = { hl=?, bb=?, lbl=?, used=bool }
-local function getEsp(key, adornee, withHl)
-    local e = pool[key]
-    if not e then
-        e = {}
-        if withHl then
-            e.hl = Instance.new("Highlight")
-            e.hl.Name = "\0"
-            e.hl.FillTransparency = 0.65
-            e.hl.OutlineTransparency = 0
-            e.hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            pcall(function() e.hl.Parent = espParent() end)
+-- ============================================================
+--  DRAW LAYER
+--
+--  Every visual in this module is a Drawing object -- no Highlight, no
+--  BillboardGui. Drawings are 2D screen overlays, so they are always visible
+--  through geometry, which is what ESP wants anyway.
+--
+--  One pool per Drawing class, handed out in frame order: frameBegin() resets
+--  the cursors, each helper takes the next free object, frameEnd() hides
+--  whatever this frame did not claim. Nothing is per-instance, so objects that
+--  vanish mid-round (a broken pallet) need no bookkeeping.
+-- ============================================================
+local hasDrawing = (Drawing ~= nil and Drawing.new ~= nil)
+local DPOOL = { Line = {}, Text = {}, Square = {} }
+local DUSED = { Line = 0, Text = 0, Square = 0 }
+
+local function grab(class)
+    if not hasDrawing then return nil end
+    local n = DUSED[class] + 1
+    local o = DPOOL[class][n]
+    if not o then
+        local ok, made = pcall(Drawing.new, class)
+        if not ok then return nil end
+        if class == "Text" then
+            made.Font, made.Outline = 2, true
         end
-        e.bb = Instance.new("BillboardGui")
-        e.bb.Name = "\0"
-        e.bb.Size = UDim2.fromOffset(240, 22)
-        e.bb.AlwaysOnTop = true
-        e.bb.StudsOffset = Vector3.new(0, 3.2, 0)
-        -- label styled like the menu: mono font, white text with theme-colored
-        -- rich-text tags, dark glyph outline for readability (no box)
-        e.lbl = Instance.new("TextLabel")
-        e.lbl.AnchorPoint = Vector2.new(0.5, 0.5)
-        e.lbl.Position = UDim2.fromScale(0.5, 0.5)
-        e.lbl.Size = UDim2.new()
-        e.lbl.AutomaticSize = Enum.AutomaticSize.XY
-        e.lbl.BackgroundTransparency = 1
-        e.lbl.RichText = true
-        e.lbl.FontFace = ESP_FONT
-        e.lbl.TextSize = 12
-        e.lbl.TextColor3 = PAL.text
-        e.lbl.TextStrokeTransparency = 1
-        local stroke = Instance.new("UIStroke")   -- Contextual = outlines the glyphs
-        stroke.Color = PAL.border
-        stroke.Thickness = 1
-        stroke.Parent = e.lbl
-        e.lbl.Parent = e.bb
-        pcall(function() e.bb.Parent = espParent() end)
-        pool[key] = e
+        DPOOL[class][n] = made
+        o = made
     end
-    if e.hl then e.hl.Adornee = adornee; e.hl.Enabled = true end
-    e.bb.Adornee = adornee
-    e.bb.Enabled = true
-    e.used = true
-    return e
+    DUSED[class] = n
+    return o
 end
-local function sweepPool()
-    for key, e in pairs(pool) do
-        if not e.used then
-            if e.hl then e.hl.Enabled = false; e.hl.Adornee = nil end
-            e.bb.Enabled = false
-            e.bb.Adornee = nil
-            if typeof(key) == "Instance" and not key.Parent then
-                if e.hl then pcall(function() e.hl:Destroy() end) end
-                pcall(function() e.bb:Destroy() end)
-                pool[key] = nil
-            end
-        else
-            e.used = false
+local function frameBegin()
+    DUSED.Line, DUSED.Text, DUSED.Square = 0, 0, 0
+end
+local function frameEnd()
+    for class, list in pairs(DPOOL) do
+        for i = DUSED[class] + 1, #list do list[i].Visible = false end
+    end
+end
+
+local cam = workspace.CurrentCamera
+track(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    cam = workspace.CurrentCamera
+end))
+
+local function toScreen(v3)
+    if not cam then return nil end
+    local sp, on = cam:WorldToViewportPoint(v3)
+    if not on then return nil end
+    return Vector2.new(sp.X, sp.Y), sp.Z
+end
+
+local function dLine(a, b, col, alpha, thick)
+    local l = grab("Line")
+    if not l then return end
+    l.From, l.To, l.Color = a, b, col
+    l.Transparency, l.Thickness, l.Visible = alpha or 1, thick or 1, true
+end
+
+local function dText(pos, str, col, size, centered)
+    local t = grab("Text")
+    if not t then return end
+    t.Position, t.Text, t.Color = pos, str, col
+    t.Size, t.Center = size or 13, centered ~= false
+    t.Transparency, t.Visible = 1, true
+end
+
+local function dBox(x, y, w, h, col, alpha, thick)
+    local q = grab("Square")
+    if not q then return end
+    q.Position, q.Size, q.Color = Vector2.new(x, y), Vector2.new(w, h), col
+    q.Thickness, q.Transparency = thick or 1, alpha or 1
+    q.Filled, q.Visible = false, true
+end
+
+local function dFill(x, y, w, h, col, alpha)
+    local q = grab("Square")
+    if not q then return end
+    q.Position, q.Size, q.Color = Vector2.new(x, y), Vector2.new(w, h), col
+    q.Transparency, q.Filled, q.Visible = alpha or 1, true, true
+end
+
+-- Flat ring on the ground, emitted as a line loop.
+local RING_SEGS = 48
+local function dRing(center, radius, col, alpha)
+    if radius <= 0 then return end
+    local prev, first
+    for i = 0, RING_SEGS do
+        local a = (i / RING_SEGS) * math.pi * 2
+        local pt = toScreen(center + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius))
+        if i == 0 then first = pt end
+        if prev and pt then dLine(prev, pt, col, alpha, 2) end
+        prev = pt
+    end
+    if prev and first and prev ~= first then dLine(prev, first, col, alpha, 2) end
+end
+
+-- Polyline through world points. split = first index drawn in the secondary
+-- style; used by the spear arc to show the through-wall leg differently.
+local function dPath(pts, split, colA, aA, colB, aB)
+    local prev
+    for i = 1, #pts do
+        local pt = toScreen(pts[i])
+        if prev and pt then
+            local past = split and (i - 1) >= split
+            dLine(prev, pt, past and colB or colA, past and aB or aA, past and 1 or 2)
+        end
+        prev = pt
+    end
+end
+
+-- Screen-space box around a character, from its bounding box corners so the
+-- rectangle stays tight when the model is rotated or partly off-axis.
+local function charBox(model)
+    local ok, cf, size = pcall(function()
+        local a, b = model:GetBoundingBox()
+        return a, b
+    end)
+    if not ok or not cf then return nil end
+    local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+    local any = false
+    for _, c in ipairs({
+        Vector3.new( 1,  1,  1), Vector3.new( 1,  1, -1),
+        Vector3.new( 1, -1,  1), Vector3.new( 1, -1, -1),
+        Vector3.new(-1,  1,  1), Vector3.new(-1,  1, -1),
+        Vector3.new(-1, -1,  1), Vector3.new(-1, -1, -1),
+    }) do
+        local pt = toScreen((cf * CFrame.new(size * c * 0.5)).Position)
+        if pt then
+            any = true
+            minX, minY = math.min(minX, pt.X), math.min(minY, pt.Y)
+            maxX, maxY = math.max(maxX, pt.X), math.max(maxY, pt.Y)
+        end
+    end
+    if not any then return nil end
+    return minX, minY, maxX - minX, maxY - minY
+end
+
+-- ============================================================
+--  ESP RENDERERS
+-- ============================================================
+-- Text stacked under a box, one line per call, so callers do not track offsets.
+local function textStack(cx, yTop, lines)
+    local y = yTop
+    for _, ln in ipairs(lines) do
+        if ln[1] ~= "" then
+            dText(Vector2.new(cx, y), ln[1], ln[2], 13, true)
+            y = y + 14
         end
     end
 end
 
-local function paint(e, col)
-    if e.hl then e.hl.FillColor = col; e.hl.OutlineColor = col end
-end
-
--- ---------- players ----------
-local function stepPlayerEsp()
-    local hrp = myHRP()
+local function stepPlayerEsp(hrp)
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
-            local want = (isKiller(p) and S.killerEsp) or (isSurvivor(p) and S.survEsp)
-            local c = p.Character
-            local root = c and c:FindFirstChild("HumanoidRootPart")
-            if want and root then
-                local e = getEsp(p, c, true)
-                paint(e, isKiller(p) and PAL.killer or PAL.accent)
-                local dist = hrp and math.floor((root.Position - hrp.Position).Magnitude + 0.5) or 0
-                if isKiller(p) then
-                    local kname = tostring(p:GetAttribute("SelectedKiller") or "KILLER"):upper()
-                    e.lbl.Text = ('<font color="%s"><b>%s</b></font> %s <font color="%s">%dm</font>')
-                        :format(HEX.killer, kname, p.Name, HEX.muted, dist)
-                else
-                    local hum = c:FindFirstChildOfClass("Humanoid")
-                    local hp = hum and (math.floor(hum.Health + 0.5) .. "hp ") or ""
-                    -- live state straight off replicated character attrs --
-                    -- exactly what a killer wants to see through walls
-                    local st = ""
-                    local hookProg = c:GetAttribute("HookedProgress")
-                    if c:GetAttribute("Knocked") then
-                        st = (' <font color="%s">KNOCKED</font>'):format(HEX.killer)
-                    elseif hookProg and hookProg < 100 then
-                        st = (' <font color="%s">HOOKED %d%%</font>'):format(HEX.killer, hookProg)
-                    elseif (c:GetAttribute("repairing") or 0) > 0 then
-                        st = (' <font color="%s">REPAIRING</font>'):format(HEX.accent)
-                    elseif (c:GetAttribute("healing") or 0) > 0 then
-                        st = (' <font color="%s">HEALING</font>'):format(HEX.accent)
-                    elseif c:GetAttribute("IsRunning") then
-                        st = (' <font color="%s">RUNNING</font>'):format(HEX.muted)
+            local killer = isKiller(p)
+            if (killer and S.killerEsp) or (isSurvivor(p) and S.survEsp) then
+                local c = p.Character
+                local root = c and c:FindFirstChild("HumanoidRootPart")
+                local x, y, w, h = nil, nil, nil, nil
+                if root then x, y, w, h = charBox(c) end
+                if x then
+                    local col = killer and PAL.killer or PAL.accent
+                    local dist = hrp and math.floor((root.Position - hrp.Position).Magnitude + 0.5) or 0
+
+                    if S.espBox then dBox(x, y, w, h, col, 1, 1) end
+
+                    if S.espHealth then
+                        local hum = c:FindFirstChildOfClass("Humanoid")
+                        if hum and hum.MaxHealth > 0 then
+                            local frac = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+                            dFill(x - 5, y, 2, h, PAL.border, 0.7)
+                            dFill(x - 5, y + h * (1 - frac), 2, h * frac,
+                                frac > 0.5 and PAL.accent or PAL.killer, 1)
+                        end
                     end
-                    local hooks = c:GetAttribute("HookCount") or 0
-                    local hk = hooks > 0 and ((' <font color="%s">%dx hooked</font>'):format(HEX.muted, hooks)) or ""
-                    e.lbl.Text = ('%s%s%s <font color="%s">%s%dm</font>')
-                        :format(p.Name, st, hk, HEX.muted, hp, dist)
+
+                    if S.espTracer then
+                        local vp = cam and cam.ViewportSize
+                        if vp then
+                            dLine(Vector2.new(vp.X / 2, vp.Y), Vector2.new(x + w / 2, y + h), col, 0.6, 1)
+                        end
+                    end
+
+                    local cx = x + w / 2
+                    if S.espName then
+                        local top = killer
+                            and ("%s  %s"):format(tostring(p:GetAttribute("SelectedKiller") or "KILLER"):upper(), p.Name)
+                            or p.Name
+                        dText(Vector2.new(cx, y - 15), top, col, 13, true)
+                    end
+
+                    local lines = {}
+                    if S.espState and not killer then
+                        local hookProg = c:GetAttribute("HookedProgress")
+                        if c:GetAttribute("Knocked") then
+                            lines[#lines + 1] = { "KNOCKED", PAL.killer }
+                        elseif hookProg and hookProg < 100 then
+                            lines[#lines + 1] = { ("HOOKED %d%%"):format(hookProg), PAL.killer }
+                        elseif (c:GetAttribute("repairing") or 0) > 0 then
+                            lines[#lines + 1] = { "REPAIRING", PAL.accent }
+                        elseif (c:GetAttribute("healing") or 0) > 0 then
+                            lines[#lines + 1] = { "HEALING", PAL.accent }
+                        elseif c:GetAttribute("IsRunning") then
+                            lines[#lines + 1] = { "RUNNING", PAL.muted }
+                        end
+                        local hooks = c:GetAttribute("HookCount") or 0
+                        if hooks > 0 then lines[#lines + 1] = { ("%dx hooked"):format(hooks), PAL.muted } end
+                    end
+                    if S.espDist then lines[#lines + 1] = { ("%dm"):format(dist), PAL.muted } end
+                    textStack(cx, y + h + 3, lines)
                 end
             end
         end
     end
 end
 
--- ---------- generators ----------
-local function stepGenEsp()
+local function stepGenEsp(hrp)
     if not S.genEsp then return end
     local gens = getMapFolder("Generators") or getMapFolder("Gens")
     if not gens then return end
-    local hrp = myHRP()
     for _, gen in ipairs(gens:GetChildren()) do
         local root = gen:FindFirstChild("RootPart") or gen:FindFirstChildWhichIsA("BasePart")
         if root then
             local prog, done, regress = genProgress(gen)
             if not (done and S.genHideDone) then
-                local e = getEsp(gen, root, true)
-                paint(e, done and PAL.muted or (regress and PAL.killer or PAL.accent))
-                if e.hl then e.hl.FillTransparency = 0.85 end
-                local dist = hrp and (('<font color="%s"> %dm</font>')
-                    :format(HEX.muted, math.floor((root.Position - hrp.Position).Magnitude + 0.5))) or ""
-                local nrep = gen:GetAttribute("PlayersRepairingCount") or 0
-                e.lbl.Text = done and (('<font color="%s">GEN DONE</font>'):format(HEX.muted) .. dist)
-                    or (('<font color="%s"><b>GEN %d%%</b></font>%s%s%s'):format(
-                        HEX.accent, math.floor(prog + 0.5),
-                        regress and ((' <font color="%s">REGRESSING</font>'):format(HEX.killer)) or "",
-                        nrep > 0 and ((' <font color="%s">%d repairing</font>'):format(HEX.killer, nrep)) or "", dist))
+                local pt = toScreen(root.Position)
+                if pt then
+                    local col = done and PAL.muted or (regress and PAL.killer or PAL.accent)
+                    local lines = {}
+                    if done then
+                        lines[#lines + 1] = { "GEN DONE", PAL.muted }
+                    else
+                        lines[#lines + 1] = { ("GEN %d%%"):format(math.floor(prog + 0.5)), col }
+                        if regress then lines[#lines + 1] = { "REGRESSING", PAL.killer } end
+                        local nrep = gen:GetAttribute("PlayersRepairingCount") or 0
+                        if nrep > 0 then lines[#lines + 1] = { ("%d repairing"):format(nrep), PAL.killer } end
+                    end
+                    if S.espDist and hrp then
+                        lines[#lines + 1] =
+                            { ("%dm"):format(math.floor((root.Position - hrp.Position).Magnitude + 0.5)), PAL.muted }
+                    end
+                    textStack(pt.X, pt.Y, lines)
+                end
             end
         end
     end
@@ -288,7 +398,7 @@ end
 -- Hooks), others scatter named models around the map (Palletwrong +
 -- PrimaryPartPallet, Window + VaultTrigger, Hook + HookPoint). Scan for BOTH,
 -- cached and rescanned every 3s so a map change re-detects everything.
-local OBJ_STYLE = { HOOK = "killer", PALLET = "accent", VAULT = "muted" }
+local OBJ_COL = { HOOK = "killer", PALLET = "accent", VAULT = "muted" }
 local FOLDER_KIND = { Hooks = "HOOK", Pallets = "PALLET", Vaults = "VAULT", Windows = "VAULT" }
 local function classify(name)
     local n = name:lower()
@@ -327,24 +437,25 @@ local function getObjects()
     end
     return objCache
 end
-local function stepObjEsp()
-    local kindOn = { HOOK = S.hookEsp, PALLET = S.palletEsp, VAULT = S.vaultEsp }
+
+local function stepObjEsp(hrp)
     if not (S.hookEsp or S.palletEsp or S.vaultEsp) then return end
+    local on = { HOOK = S.hookEsp, PALLET = S.palletEsp, VAULT = S.vaultEsp }
     for _, it in ipairs(getObjects()) do
-        if kindOn[it.kind] and it.obj.Parent and it.root.Parent then   -- broken pallets etc. vanish mid-cache
-            local e = getEsp(it.obj, it.root, false)
-            e.lbl.Text = ('<font color="%s">%s</font>'):format(HEX[OBJ_STYLE[it.kind]], it.kind)
-            e.bb.StudsOffset = Vector3.new(0, 1.6, 0)
+        if on[it.kind] and it.obj.Parent and it.root.Parent then   -- broken pallets vanish mid-cache
+            local pt = toScreen(it.root.Position)
+            if pt then
+                local col = PAL[OBJ_COL[it.kind]]
+                local lines = { { it.kind, col } }
+                if S.espDist and hrp then
+                    lines[#lines + 1] =
+                        { ("%dm"):format(math.floor((it.root.Position - hrp.Position).Magnitude + 0.5)), PAL.muted }
+                end
+                textStack(pt.X, pt.Y, lines)
+            end
         end
     end
 end
-
-track(RunService.RenderStepped:Connect(function()
-    if S.killerEsp or S.survEsp then stepPlayerEsp() end
-    stepGenEsp()
-    stepObjEsp()
-    sweepPool()
-end))
 
 -- ============================================================
 --  AUTO SKILL CHECK
@@ -529,24 +640,6 @@ end)
 -- ============================================================
 --  KILLER INTEL  -- live readout of the killer's attributes + chase warning
 -- ============================================================
-local warnGui, warnLbl
-do
-    warnGui = Instance.new("ScreenGui")
-    warnGui.Name = "\0"
-    warnGui.IgnoreGuiInset = true
-    warnGui.Enabled = false
-    warnLbl = Instance.new("TextLabel")
-    warnLbl.BackgroundTransparency = 1
-    warnLbl.Size = UDim2.new(1, 0, 0, 34)
-    warnLbl.Position = UDim2.new(0, 0, 0, 90)
-    warnLbl.FontFace = ESP_FONT
-    warnLbl.TextSize = 26
-    warnLbl.TextColor3 = PAL.killer
-    warnLbl.TextStrokeTransparency = 0.2
-    warnLbl.Text = "!!  YOU ARE BEING CHASED  !!"
-    warnLbl.Parent = warnGui
-    pcall(function() warnGui.Parent = espParent() end)
-end
 
 -- ---------- mouse-lock handoff ----------
 -- This game's look scripts lock the mouse and do NOT re-assert the lock after
@@ -666,47 +759,6 @@ local RS_ = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
 
 -- ---------- drawn ground rings ----------
-local hasDrawing = (Drawing ~= nil and Drawing.new ~= nil)
-local RING_SEGS = 56
-local function newRing()
-    if not hasDrawing then return nil end
-    local segs = {}
-    for i = 1, RING_SEGS do
-        local ok, l = pcall(Drawing.new, "Line")
-        if not ok then
-            for _, d in ipairs(segs) do pcall(function() d:Remove() end) end
-            return nil
-        end
-        l.Thickness, l.Transparency, l.Visible = 2, 1, false
-        segs[i] = l
-    end
-    return segs
-end
-local function hideRing(segs)
-    if not segs then return end
-    for _, l in ipairs(segs) do l.Visible = false end
-end
-local function drawRing(segs, center, radius, col, alpha)
-    if not segs or radius <= 0 then return end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    local pts = table.create(RING_SEGS + 1)
-    for i = 0, RING_SEGS do
-        local a = (i / RING_SEGS) * math.pi * 2
-        local sp, on = cam:WorldToViewportPoint(
-            center + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius))
-        pts[i + 1] = { Vector2.new(sp.X, sp.Y), on }
-    end
-    for i = 1, RING_SEGS do
-        local a, b, l = pts[i], pts[i + 1], segs[i]
-        if a[2] and b[2] then
-            l.From, l.To, l.Color, l.Transparency, l.Visible = a[1], b[1], col, alpha, true
-        else
-            l.Visible = false
-        end
-    end
-end
-local hitRingD, lungeRingD = newRing(), newRing()
 
 -- ---------- measured attack ranges ----------
 -- Keyed by killer name (Veil/Jason/...) because reach differs per killer, and
@@ -831,67 +883,6 @@ local function simulateArc(origin, dir, speed, gmult, maxT)
     return pts, wallHit, wallIdx, p
 end
 
--- split = first index of the through-wall leg; segments before it use colA
--- (solid, the normal spear) and from it on colB (dim, the charged spear).
-local arcPool = {}
-local function drawArc(pts, split, colA, aA, colB, aB)
-    if not hasDrawing then return end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    local n, screen = 0, {}
-    for i = 1, #pts do
-        local sp, on = cam:WorldToViewportPoint(pts[i])
-        screen[i] = { Vector2.new(sp.X, sp.Y), on }
-    end
-    for i = 1, #pts - 1 do
-        local a, b = screen[i], screen[i + 1]
-        if a[2] and b[2] then
-            n = n + 1
-            local l = arcPool[n]
-            if not l then
-                local ok, d = pcall(Drawing.new, "Line")
-                if not ok then break end
-                arcPool[n], l = d, d
-            end
-            local past = split and i >= split
-            l.From, l.To = a[1], b[1]
-            l.Color = past and colB or colA
-            l.Transparency = past and aB or aA
-            l.Thickness = past and 1 or 2
-            l.Visible = true
-        end
-    end
-    for i = n + 1, #arcPool do arcPool[i].Visible = false end
-end
-
--- Drawing.Text markers, so the spear read-out no longer needs a BillboardGui.
-local markPool = {}
-local function marker(idx, worldPos, text, col)
-    if not hasDrawing then return end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    local d = markPool[idx]
-    if not d then
-        local ok, t = pcall(Drawing.new, "Text")
-        if not ok then return end
-        t.Size, t.Center, t.Outline, t.Font = 13, true, true, 2
-        markPool[idx], d = t, t
-    end
-    local sp, on = cam:WorldToViewportPoint(worldPos)
-    if on then
-        d.Position = Vector2.new(sp.X, sp.Y)
-        d.Text, d.Color, d.Transparency, d.Visible = text, col, 1, true
-    else
-        d.Visible = false
-    end
-end
-local function hideMarkers()
-    for _, d in ipairs(markPool) do d.Visible = false end
-end
-local function hideArc()
-    for _, l in ipairs(arcPool) do l.Visible = false end
-end
-
 pcall(function()
     track(RS_.Remotes.Mechanics.visualize.OnClientEvent:Connect(function(char, dir, speed, gmult, id)
         if typeof(dir) ~= "Vector3" or type(speed) ~= "number" then return end
@@ -913,41 +904,6 @@ end)
 -- how long our beam has been on the killer. The threshold is therefore learned:
 -- whenever GotBlinded lands, the beam time at that instant becomes the target.
 local blindHold, blindNeed, blindSamples = 0, 1.1, 0
-local blindGui, blindFrame, blindFill, blindLbl
-do
-    blindGui = Instance.new("ScreenGui")
-    blindGui.Name = "\0"
-    blindGui.ResetOnSpawn = false
-    blindGui.IgnoreGuiInset = true
-    blindGui.Enabled = false
-    blindFrame = Instance.new("Frame")
-    blindFrame.AnchorPoint = Vector2.new(0.5, 0)
-    blindFrame.Position = UDim2.new(0.5, 0, 0, 96)
-    blindFrame.Size = UDim2.fromOffset(220, 10)
-    blindFrame.BackgroundColor3 = PAL.bg
-    blindFrame.BorderSizePixel = 0
-    blindFrame.Parent = blindGui
-    local st = Instance.new("UIStroke")
-    st.Color = PAL.outline
-    st.Parent = blindFrame
-    blindFill = Instance.new("Frame")
-    blindFill.Size = UDim2.new(0, 0, 1, 0)
-    blindFill.BackgroundColor3 = PAL.accent
-    blindFill.BorderSizePixel = 0
-    blindFill.Parent = blindFrame
-    blindLbl = Instance.new("TextLabel")
-    blindLbl.AnchorPoint = Vector2.new(0.5, 1)
-    blindLbl.Position = UDim2.new(0.5, 0, 0, -2)
-    blindLbl.Size = UDim2.fromOffset(240, 14)
-    blindLbl.BackgroundTransparency = 1
-    blindLbl.RichText = true
-    blindLbl.FontFace = ESP_FONT
-    blindLbl.TextSize = 12
-    blindLbl.TextColor3 = PAL.text
-    blindLbl.Parent = blindFrame
-    pcall(function() blindGui.Parent = espParent() end)
-end
-
 pcall(function()
     track(RS_.Remotes.Items.Flashlight.GotBlinded.OnClientEvent:Connect(function()
         if blindHold > 0.05 then
@@ -961,115 +917,143 @@ end)
 local function findFlashlightPart()
     local c = LocalPlayer.Character
     if not c then return nil end
+    -- the flashlight is a plain child of the character carrying "remaining"
+    -- (fuel) and "loc"; do not assume a class, only the attribute
     for _, d in ipairs(c:GetDescendants()) do
-        if d:IsA("BasePart") and d:GetAttribute("remaining") ~= nil then return d end
+        if d:GetAttribute("remaining") ~= nil then return d end
     end
     return nil
 end
 
 -- ---------- per-frame ----------
 local UIS = game:GetService("UserInputService")
+
+local function stepRings(hrp, kp, kroot)
+    local anchor = S.ringOnSelf and hrp or kroot
+    if not (anchor and (S.hitRing or S.lungeRing)) then return end
+    local hitR, lungeR = rangeFor(kp)
+    local k = S.ringScale / 100
+    local base = anchor.Position - Vector3.new(0, anchor.Size.Y / 2 + 2.4, 0)
+    if S.hitRing then dRing(base, hitR * k, PAL.killer, 0.9) end
+    if S.lungeRing then dRing(base, lungeR * k, PAL.accent, 0.75) end
+end
+
+local function stepSpear(hrp, kp, kc, kroot)
+    -- a spear already in flight wins over the predicted line
+    if S.spearLive then
+        for i = #liveSpears, 1, -1 do
+            local sp = liveSpears[i]
+            if os.clock() - sp.t0 > 4 then
+                table.remove(liveSpears, i)
+            else
+                -- in-flight spears have declared their mode: the aura
+                -- (speed > 150) phases through walls, anything slower stops
+                local phasing = sp.speed > 150
+                local pts, wall, wallIdx = simulateArc(sp.origin, sp.dir, sp.speed, sp.gmult, 4)
+                dPath(pts, (not phasing) and wallIdx or nil, PAL.killer, 1, PAL.muted, 0.35)
+                if wall and not phasing then
+                    local pt = toScreen(wall)
+                    if pt then dText(pt, "impact", PAL.killer, 13, true) end
+                end
+                return
+            end
+        end
+    end
+    if not (S.spearLine and kc and kroot) then return end
+    local aiming = kc:GetAttribute("spearmode") == true
+    local ammo = tonumber(kc:GetAttribute("Spears")) or 0
+    if not ((aiming or S.spearAlways) and ammo > 0) then return end
+
+    -- Origin always tracks HRP facing (that is what ProjectileHandler uses),
+    -- but the throw direction is the thrower's camera. Ours is exact; another
+    -- killer's is only their replicated body facing.
+    local origin = kroot.Position + kroot.CFrame.LookVector * 3 + Vector3.new(0, 1.5, 0)
+    local aim = kroot.CFrame.LookVector
+    if kp == LocalPlayer and cam then aim = cam.CFrame.LookVector end
+
+    local pts, wall, wallIdx, tail = simulateArc(origin, aim, spearSpeed, spearGMult, 4)
+    dPath(pts, wallIdx, aiming and PAL.killer or PAL.muted, aiming and 1 or 0.55, PAL.accent, 0.4)
+
+    local function away(v)
+        return hrp and math.floor((v - hrp.Position).Magnitude + 0.5) or 0
+    end
+    if wall then
+        local a, b = toScreen(wall), toScreen(tail)
+        if a then dText(a, ("normal  %dm"):format(away(wall)), PAL.killer, 13, true) end
+        if b then dText(b, ("charged  %dm"):format(away(tail)), PAL.accent, 13, true) end
+    else
+        local a = toScreen(tail)
+        if a then dText(a, ("lands  %dm"):format(away(tail)), PAL.killer, 13, true) end
+    end
+end
+
+local function stepBlind(dt, hrp, kc, kroot)
+    if not S.blindMeter then
+        blindHold = 0
+        return
+    end
+    local fl = findFlashlightPart()
+    local beaming = fl and UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    local onKiller = false
+    if beaming and kc and hrp and cam then
+        local head = kc:FindFirstChild("Head") or kroot
+        if head then
+            local to = head.Position - cam.CFrame.Position
+            if to.Magnitude < 45 and cam.CFrame.LookVector:Dot(to.Unit) > 0.965 then
+                local rp = RaycastParams.new()
+                rp.FilterType = Enum.RaycastFilterType.Exclude
+                rp.FilterDescendantsInstances = { LocalPlayer.Character, kc }
+                onKiller = workspace:Raycast(cam.CFrame.Position, to, rp) == nil
+            end
+        end
+    end
+    blindHold = onKiller and (blindHold + dt) or math.max(0, blindHold - dt * 2)
+    -- Shown whenever the flashlight is held, not just while beaming: a bar that
+    -- only exists mid-blind is a bar you never catch sight of.
+    if not (fl and cam) then return end
+
+    local vp = cam.ViewportSize
+    local w, h = 220, 10
+    local x, y = vp.X / 2 - w / 2, 96
+    local pct = math.clamp(blindHold / math.max(blindNeed, 0.05), 0, 1)
+    dFill(x, y, w, h, PAL.bg, 0.75)
+    dFill(x, y, w * pct, h, onKiller and PAL.accent or PAL.muted, 1)
+    dBox(x, y, w, h, PAL.outline, 1, 1)
+    local fuel = fl and math.floor((fl:GetAttribute("remaining") or 0) + 0.5) or 0
+    dText(Vector2.new(vp.X / 2, y - 16),
+        ("blind %d%%   fuel %d   %s%s"):format(math.floor(pct * 100 + 0.5), fuel,
+            blindSamples > 0 and ("%.2fs"):format(blindNeed) or "est",
+            onKiller and "   ON TARGET" or (beaming and "   no target" or "")),
+        onKiller and PAL.accent or PAL.muted, 13, true)
+end
+
+local chaseFlash = false
+local function stepChaseWarn()
+    if not (chaseFlash and cam) then return end
+    local vp = cam.ViewportSize
+    local a = 0.5 + 0.5 * math.sin(os.clock() * 7)
+    dText(Vector2.new(vp.X / 2, vp.Y * 0.22), "KILLER IS CHASING YOU", PAL.killer, 20, true)
+    dFill(0, 0, vp.X, 3, PAL.killer, a)
+    dFill(0, vp.Y - 3, vp.X, 3, PAL.killer, a)
+end
+
+-- Single frame driver: every visual in the module is emitted here, between
+-- frameBegin and frameEnd, so unused Drawings are hidden in one place.
 track(RunService.RenderStepped:Connect(function(dt)
+    frameBegin()
+    local hrp = myHRP()
     local kp = getKillerPlayer()
     local kc = kp and kp.Character
     local kroot = kc and kc:FindFirstChild("HumanoidRootPart")
-    local hrp = myHRP()
 
-    -- rings
-    local anchor = S.ringOnSelf and hrp or kroot
-    if hasDrawing and anchor and (S.hitRing or S.lungeRing) then
-        local hitR, lungeR = rangeFor(kp)
-        local k = S.ringScale / 100
-        local base = anchor.Position - Vector3.new(0, anchor.Size.Y / 2 + 2.4, 0)
-        if S.hitRing then drawRing(hitRingD, base, hitR * k, PAL.killer, 0.9)
-        else hideRing(hitRingD) end
-        if S.lungeRing then drawRing(lungeRingD, base, lungeR * k, PAL.accent, 0.75)
-        else hideRing(lungeRingD) end
-    else
-        hideRing(hitRingD); hideRing(lungeRingD)
-    end
-
-    -- spear: live arcs first, predicted line only when nothing is in flight
-    local drew = false
-    if S.spearLive and #liveSpears > 0 then
-        for i = #liveSpears, 1, -1 do
-            local s = liveSpears[i]
-            if os.clock() - s.t0 > 4 then
-                table.remove(liveSpears, i)
-            else
-                -- a spear already in flight has declared its mode: the aura
-                -- (speed > 150) phases through walls, anything slower stops
-                local phasing = s.speed > 150
-                local pts, wall, wallIdx = simulateArc(s.origin, s.dir, s.speed, s.gmult, 4)
-                drawArc(pts, (not phasing) and wallIdx or nil, PAL.killer, 1, PAL.muted, 0.35)
-                if wall and not phasing then marker(1, wall, "impact", PAL.killer) end
-                drew = true
-                break
-            end
-        end
-    end
-    if not drew and S.spearLine and kroot and kc then
-        local aiming = kc:GetAttribute("spearmode") == true
-        local ammo = tonumber(kc:GetAttribute("Spears")) or 0
-        if (aiming or S.spearAlways) and ammo > 0 then
-            -- Origin always tracks HRP facing (that is what ProjectileHandler
-            -- uses), but the throw direction is the thrower's camera. Ours is
-            -- exact; another killer's is only their replicated body facing.
-            local origin = kroot.Position + kroot.CFrame.LookVector * 3 + Vector3.new(0, 1.5, 0)
-            local aim = kroot.CFrame.LookVector
-            if kp == LocalPlayer and workspace.CurrentCamera then
-                aim = workspace.CurrentCamera.CFrame.LookVector
-            end
-            local pts, wall, wallIdx, tail = simulateArc(origin, aim, spearSpeed, spearGMult, 4)
-            drawArc(pts, wallIdx,
-                aiming and PAL.killer or PAL.muted, aiming and 1 or 0.55,
-                PAL.accent, 0.4)
-            local function away(v)
-                return hrp and math.floor((v - hrp.Position).Magnitude + 0.5) or 0
-            end
-            if wall then
-                marker(1, wall, ("normal  %dm"):format(away(wall)), PAL.killer)
-                marker(2, tail, ("charged  %dm"):format(away(tail)), PAL.accent)
-            else
-                marker(1, tail, ("lands  %dm"):format(away(tail)), PAL.killer)
-                if markPool[2] then markPool[2].Visible = false end
-            end
-            drew = true
-        end
-    end
-    if not drew then hideArc(); hideMarkers() end
-
-    -- blind meter
-    if S.blindMeter then
-        local fl = findFlashlightPart()
-        local beaming = fl and UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-        local onKiller = false
-        if beaming and kc and hrp then
-            local head = kc:FindFirstChild("Head") or kroot
-            if head then
-                local cam = workspace.CurrentCamera
-                local to = (head.Position - cam.CFrame.Position)
-                if to.Magnitude < 45 and cam.CFrame.LookVector:Dot(to.Unit) > 0.965 then
-                    local rp = RaycastParams.new()
-                    rp.FilterType = Enum.RaycastFilterType.Exclude
-                    rp.FilterDescendantsInstances = { LocalPlayer.Character, kc }
-                    onKiller = workspace:Raycast(cam.CFrame.Position, to) == nil
-                end
-            end
-        end
-        blindHold = onKiller and (blindHold + dt) or math.max(0, blindHold - dt * 2)
-        blindGui.Enabled = beaming and true or false
-        local pct = math.clamp(blindHold / math.max(blindNeed, 0.05), 0, 1)
-        blindFill.Size = UDim2.new(pct, 0, 1, 0)
-        blindFill.BackgroundColor3 = onKiller and PAL.accent or PAL.muted
-        local fuel = fl and math.floor((fl:GetAttribute("remaining") or 0) + 0.5) or 0
-        blindLbl.Text = ("<font color=\"%s\">blind</font> %d%%   fuel %d   %s")
-            :format(HEX.accent, math.floor(pct * 100 + 0.5), fuel,
-                blindSamples > 0 and ("%.2fs"):format(blindNeed) or "est")
-    else
-        blindGui.Enabled = false
-        blindHold = 0
-    end
+    if S.killerEsp or S.survEsp then stepPlayerEsp(hrp) end
+    stepGenEsp(hrp)
+    stepObjEsp(hrp)
+    stepRings(hrp, kp, kroot)
+    stepSpear(hrp, kp, kc, kroot)
+    stepBlind(dt, hrp, kc, kroot)
+    stepChaseWarn()
+    frameEnd()
 end))
 
 local intelLabels = {}   -- filled in the UI block below
@@ -1084,13 +1068,12 @@ track(RunService.Heartbeat:Connect(function()
         chased = (target == LocalPlayer.UserId) and kc:GetAttribute("IsChasing") == true
     end
     if S.chaseWarn and chased then
-        warnGui.Enabled = true
-        warnLbl.TextTransparency = 0.15 + 0.35 * (0.5 + 0.5 * math.sin(os.clock() * 7))
+        chaseFlash = true
         if not wasChased then
             pcall(function() Library:Notification("The killer is chasing YOU", 3, PAL.killer) end)
         end
     else
-        warnGui.Enabled = false
+        chaseFlash = false
     end
     if chased and kc then stepAntiChase(kc) end
     wasChased = chased
@@ -1189,27 +1172,45 @@ end))
 do
     local Page = Window:Page({ Name = "Violence District" })
 
+    -- ---------- ESP ----------
     local Vis = Page:SubPage({ Name = "ESP" })
+
     local PSec = Vis:Section({ Name = "Players", Side = 1 })
-    PSec:Toggle({ Name = "Killer ESP", Flag = "VD_KillerEsp", Default = false,
+    PSec:Toggle({ Name = "Killer", Flag = "VD_KillerEsp", Default = false,
         Callback = function(v) S.killerEsp = v end })
-    PSec:Toggle({ Name = "Survivor ESP", Flag = "VD_SurvEsp", Default = false,
+    PSec:Toggle({ Name = "Survivors", Flag = "VD_SurvEsp", Default = false,
         Callback = function(v) S.survEsp = v end })
 
+    local StSec = Vis:Section({ Name = "Style", Side = 1 })
+    StSec:Toggle({ Name = "Box", Flag = "VD_EspBox", Default = true,
+        Callback = function(v) S.espBox = v end })
+    StSec:Toggle({ Name = "Name", Flag = "VD_EspName", Default = true,
+        Callback = function(v) S.espName = v end })
+    StSec:Toggle({ Name = "Distance", Flag = "VD_EspDist", Default = true,
+        Callback = function(v) S.espDist = v end })
+    StSec:Toggle({ Name = "Health bar", Flag = "VD_EspHealth", Default = true,
+        Callback = function(v) S.espHealth = v end })
+    StSec:Toggle({ Name = "State text", Flag = "VD_EspState", Default = true,
+        Callback = function(v) S.espState = v end })
+    StSec:Toggle({ Name = "Tracer", Flag = "VD_EspTracer", Default = false,
+        Callback = function(v) S.espTracer = v end })
+
     local OSec = Vis:Section({ Name = "Objectives", Side = 2 })
-    OSec:Toggle({ Name = "Generator ESP (live %)", Flag = "VD_GenEsp", Default = false,
+    OSec:Toggle({ Name = "Generators (live %)", Flag = "VD_GenEsp", Default = false,
         Callback = function(v) S.genEsp = v end })
     OSec:Toggle({ Name = "Hide completed gens", Flag = "VD_GenHideDone", Default = true,
         Callback = function(v) S.genHideDone = v end })
-    OSec:Toggle({ Name = "Hook ESP", Flag = "VD_HookEsp", Default = false,
+    OSec:Toggle({ Name = "Hooks", Flag = "VD_HookEsp", Default = false,
         Callback = function(v) S.hookEsp = v end })
-    OSec:Toggle({ Name = "Pallet ESP", Flag = "VD_PalletEsp", Default = false,
+    OSec:Toggle({ Name = "Pallets", Flag = "VD_PalletEsp", Default = false,
         Callback = function(v) S.palletEsp = v end })
-    OSec:Toggle({ Name = "Window ESP", Flag = "VD_VaultEsp", Default = false,
+    OSec:Toggle({ Name = "Windows", Flag = "VD_VaultEsp", Default = false,
         Callback = function(v) S.vaultEsp = v end })
 
-    local Game = Page:SubPage({ Name = "Gameplay" })
-    local SSec = Game:Section({ Name = "Skill checks", Side = 1 })
+    -- ---------- survivor ----------
+    local Surv = Page:SubPage({ Name = "Survivor" })
+
+    local SSec = Surv:Section({ Name = "Skill checks", Side = 1 })
     SSec:Toggle({ Name = "Auto skill check", Flag = "VD_AutoSkill", Default = false,
         Callback = function(v) S.autoSkill = v end })
     SSec:Dropdown({ Name = "Mode", Flag = "VD_SkillMode", Default = "Legit", Multi = false,
@@ -1224,31 +1225,18 @@ do
     SSec:Slider({ Name = "Reaction time", Flag = "VD_ReactMs", Min = 0, Max = 300, Default = 150,
         Decimals = 0, Suffix = " ms", Callback = function(v) S.reactMs = v end })
 
-    local VSec = Game:Section({ Name = "Vaulting", Side = 2 })
-    VSec:Toggle({ Name = "Always fast vault", Flag = "VD_FastVault", Default = false,
+    local MSec = Surv:Section({ Name = "Movement", Side = 2 })
+    MSec:Toggle({ Name = "Always fast vault", Flag = "VD_FastVault", Default = false,
         Callback = function(v) S.fastVault = v end })
-
-    local HSec = Game:Section({ Name = "Hook", Side = 2 })
-    HSec:Toggle({ Name = "Auto free from hook", Flag = "VD_AutoUnhook", Default = false,
+    MSec:Toggle({ Name = "Auto free from hook", Flag = "VD_AutoUnhook", Default = false,
         Callback = function(v) S.autoUnhook = v end })
 
-    local KPSec = Game:Section({ Name = "Playing killer", Side = 1 })
-    KPSec:Toggle({ Name = "Gen repair alerts", Flag = "VD_RepairAlert", Default = false,
-        Callback = function(v) S.repairAlert = v end })
-    intelLabels.survs = KPSec:Label({ Name = "Survivors: -" })
+    local FSec = Surv:Section({ Name = "Flashlight", Side = 2 })
+    FSec:Toggle({ Name = "Blind progress bar", Flag = "VD_BlindMeter", Default = false,
+        Callback = function(v) S.blindMeter = v end })
 
-    local KSec = Game:Section({ Name = "Killer intel", Side = 2 })
-    KSec:Toggle({ Name = "Chase warning", Flag = "VD_ChaseWarn", Default = false,
-        Callback = function(v) S.chaseWarn = v end })
-    KSec:Toggle({ Name = "Anti-chase (reset bloodlust)", Flag = "VD_AntiChase", Default = false,
-        Callback = function(v) S.antiChase = v end })
-    intelLabels.killer = KSec:Label({ Name = "Killer: -" })
-    intelLabels.dist   = KSec:Label({ Name = "Distance: -" })
-    intelLabels.chase  = KSec:Label({ Name = "Chasing: -" })
-    intelLabels.gens   = KSec:Label({ Name = "Generators: -" })
-    intelLabels.perks  = KSec:Label({ Name = "Perks: -" })
-
-    local Read = Page:SubPage({ Name = "Ranges" })
+    -- ---------- killer read ----------
+    local Read = Page:SubPage({ Name = "Killer" })
 
     local RSec = Read:Section({ Name = "Attack ranges", Side = 1 })
     RSec:Toggle({ Name = "Hit range ring", Flag = "VD_HitRing", Default = false,
@@ -1275,9 +1263,24 @@ do
         Callback = function(v) S.spearLive = v end })
     intelLabels.spear = SpSec:Label({ Name = "Spear: -" })
 
-    local FSec = Read:Section({ Name = "Flashlight", Side = 2 })
-    FSec:Toggle({ Name = "Blind progress bar", Flag = "VD_BlindMeter", Default = false,
-        Callback = function(v) S.blindMeter = v end })
+    -- ---------- intel ----------
+    local Intel = Page:SubPage({ Name = "Intel" })
+
+    local KSec = Intel:Section({ Name = "Killer", Side = 1 })
+    KSec:Toggle({ Name = "Chase warning", Flag = "VD_ChaseWarn", Default = false,
+        Callback = function(v) S.chaseWarn = v end })
+    KSec:Toggle({ Name = "Anti-chase (reset bloodlust)", Flag = "VD_AntiChase", Default = false,
+        Callback = function(v) S.antiChase = v end })
+    intelLabels.killer = KSec:Label({ Name = "Killer: -" })
+    intelLabels.dist   = KSec:Label({ Name = "Distance: -" })
+    intelLabels.chase  = KSec:Label({ Name = "Chasing: -" })
+    intelLabels.perks  = KSec:Label({ Name = "Perks: -" })
+
+    local RdSec = Intel:Section({ Name = "Round", Side = 2 })
+    RdSec:Toggle({ Name = "Gen repair alerts (as killer)", Flag = "VD_RepairAlert", Default = false,
+        Callback = function(v) S.repairAlert = v end })
+    intelLabels.gens  = RdSec:Label({ Name = "Generators: -" })
+    intelLabels.survs = RdSec:Label({ Name = "Survivors: -" })
 end
 
 -- universal shell after our page (movement + generic player ESP). No combat
@@ -1293,19 +1296,12 @@ local function cleanup()
         false, false, false, false, false, false
     S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
         false, false, false, false, false, false
+    chaseFlash = false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-    for _, e in pairs(pool) do
-        if e.hl then pcall(function() e.hl:Destroy() end) end
-        pcall(function() e.bb:Destroy() end)
+    for _, list in pairs(DPOOL) do
+        for _, d in ipairs(list) do pcall(function() d:Remove() end) end
     end
-    pool = {}
-    for _, set in ipairs({ hitRingD or {}, lungeRingD or {}, arcPool }) do
-        for _, l in ipairs(set) do pcall(function() l:Remove() end) end
-    end
-    for _, d in ipairs(markPool) do pcall(function() d:Remove() end) end
-    hitRingD, lungeRingD, arcPool, markPool = nil, nil, {}, {}
-    pcall(function() warnGui:Destroy() end)
-    pcall(function() blindGui:Destroy() end)
+    DPOOL = { Line = {}, Text = {}, Square = {} }
 end
 do
     local g = (getgenv and getgenv()) or nil
