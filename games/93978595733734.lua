@@ -677,7 +677,7 @@ local function newRing()
             for _, d in ipairs(segs) do pcall(function() d:Remove() end) end
             return nil
         end
-        l.Thickness, l.Transparency, l.Visible = 1, 1, false
+        l.Thickness, l.Transparency, l.Visible = 2, 1, false
         segs[i] = l
     end
     return segs
@@ -789,10 +789,15 @@ local spearSpeed, spearGMult = 150, 1   -- overwritten by the first observed thr
 local spearSeen = false
 local liveSpears = {}                   -- { pos, vel, gmult, t0 }
 
+-- Steps at the same 1/60 the game integrates at so the path matches, but only
+-- emits every DECIMATE'th point: 4s of flight is 240 steps, and drawing all of
+-- them costs 240 WorldToViewportPoint calls per frame for a curve that reads
+-- identically at a third of that.
+local DECIMATE = 3
 local function simulateArc(origin, dir, speed, gmult, maxT)
     local pts = { origin }
     local p, v = origin, dir.Unit * speed
-    local dt, t = 1 / 60, 0
+    local dt, t, i = 1 / 60, 0, 0
     local rp = RaycastParams.new()
     rp.FilterType = Enum.RaycastFilterType.Exclude
     local ignore = { LocalPlayer.Character }
@@ -808,9 +813,11 @@ local function simulateArc(origin, dir, speed, gmult, maxT)
             return pts, hit.Position
         end
         p = np
-        pts[#pts + 1] = p
+        i = i + 1
+        if i % DECIMATE == 0 then pts[#pts + 1] = p end
         t = t + dt
     end
+    pts[#pts + 1] = p
     return pts, nil
 end
 
@@ -963,9 +970,9 @@ track(RunService.RenderStepped:Connect(function(dt)
         local hitR, lungeR = rangeFor(kp)
         local k = S.ringScale / 100
         local base = anchor.Position - Vector3.new(0, anchor.Size.Y / 2 + 2.4, 0)
-        if S.hitRing then drawRing(hitRingD, base, hitR * k, PAL.killer, 0.45)
+        if S.hitRing then drawRing(hitRingD, base, hitR * k, PAL.killer, 0.9)
         else hideRing(hitRingD) end
-        if S.lungeRing then drawRing(lungeRingD, base, lungeR * k, PAL.accent, 0.6)
+        if S.lungeRing then drawRing(lungeRingD, base, lungeR * k, PAL.accent, 0.75)
         else hideRing(lungeRingD) end
     else
         hideRing(hitRingD); hideRing(lungeRingD)
@@ -980,7 +987,7 @@ track(RunService.RenderStepped:Connect(function(dt)
                 table.remove(liveSpears, i)
             else
                 local pts = simulateArc(s.origin, s.dir, s.speed, s.gmult, 4)
-                drawArc(pts, PAL.killer, 0.2)
+                drawArc(pts, PAL.killer, 1)
                 drew = true
                 break
             end
@@ -999,7 +1006,7 @@ track(RunService.RenderStepped:Connect(function(dt)
                 aim = workspace.CurrentCamera.CFrame.LookVector
             end
             local pts, impact = simulateArc(origin, aim, spearSpeed, spearGMult, 4)
-            drawArc(pts, aiming and PAL.killer or PAL.muted, aiming and 0.25 or 0.6)
+            drawArc(pts, aiming and PAL.killer or PAL.muted, aiming and 1 or 0.55)
             if impact and hrp then
                 impactPart.Position = impact
                 impactBB.Enabled = true
