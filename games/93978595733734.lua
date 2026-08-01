@@ -187,6 +187,8 @@ pcall(function()
     end)
 end)
 
+local frameId = 0   -- bumped each frame; used to memoise per-frame work
+
 -- ============================================================
 --  DRAW LAYER
 --
@@ -220,6 +222,7 @@ local function grab(class)
     return o
 end
 local function frameBegin()
+    frameId = frameId + 1
     DUSED.Line, DUSED.Text, DUSED.Square = 0, 0, 0
 end
 local function frameEnd()
@@ -952,23 +955,43 @@ local liveProj = {}   -- { kind, origin, dir, speed, gmult, life, t0 }
 -- set (0 / Fire29 / Shining Ripple / Soft Fireflies) -- the same emitters
 -- ProjectileHandler switches on for speed > 150 -- and it goes live about 4s
 -- into the hold, staying on until release. In first person it rides the
--- VIEWMODEL (workspace.CurrentCamera.VM), not the character, which is where an
--- earlier version looked and always came back false. Veil's vfx / updatewep /
--- Spearthrow remotes never reach the thrower, so the emitters are the signal.
-local function isCharged(kc)
-    local function scan(root)
-        if not root then return false end
+-- VIEWMODEL (workspace.CurrentCamera.VM), not the character.
+--
+-- The emitters are found once and cached: rescanning ~490 descendants on every
+-- call, from three call sites, was costing more per frame than everything else
+-- in the module put together.
+local auraCache, auraStamp = {}, -10
+local function auraEmitters()
+    if os.clock() - auraStamp < 1 then return auraCache end
+    auraStamp = os.clock()
+    auraCache = {}
+    local function collect(root)
+        if not root then return end
         for _, d in ipairs(root:GetDescendants()) do
-            if d:IsA("ParticleEmitter") and d.Enabled
-            and d.Parent and d.Parent.Name == "Hitbox" then
-                return true
+            if d:IsA("ParticleEmitter") and d.Parent and d.Parent.Name == "Hitbox" then
+                auraCache[#auraCache + 1] = d
             end
         end
-        return false
     end
     local cv = workspace.CurrentCamera
-    if scan(cv and cv:FindFirstChild("VM")) then return true end   -- we are the killer
-    return scan(kc)                                                -- watching one
+    collect(cv and cv:FindFirstChild("VM"))
+    local kp = getKillerPlayer()
+    if kp and kp ~= LocalPlayer then collect(kp.Character) end
+    return auraCache
+end
+
+local chargeFrame, chargeVal = -1, false
+local function isCharged()
+    if chargeFrame == frameId then return chargeVal end
+    chargeFrame = frameId
+    chargeVal = false
+    for _, e in ipairs(auraEmitters()) do
+        if e.Parent and e.Enabled then
+            chargeVal = true
+            break
+        end
+    end
+    return chargeVal
 end
 
 -- ============================================================
@@ -997,8 +1020,9 @@ local PROJ = {
     Veil = {
         kind = "ballistic", life = 4,
         profile = function(kc)
-            local m = isCharged(kc) and spearCharged or spearNorm
-            return m.speed, m.gmult, isCharged(kc)
+            local ch = isCharged()
+            local m = ch and spearCharged or spearNorm
+            return m.speed, m.gmult, ch
         end,
         launch = function(aim) return aim end,
     },
@@ -1424,26 +1448,74 @@ end
 -- ============================================================
 local LOCK_BIND = "wh_vd_aimlock"
 local lockHeld = false
+
+-- CameraType is Custom here, meaning Roblox's camera module owns the CFrame and
+-- recomputes it every frame from its own yaw/pitch. Writing cam.CFrame fights
+-- that: our value survives one frame, gets thrown away on the next, and the
+-- result is the shudder. Steering the mouse instead feeds the same input path
+-- the player uses, so the camera module does the rotating and there is nothing
+-- to fight.
+--
+-- Pixels-per-radian is not knowable up front (it moves with sensitivity and
+-- FOV), so it is calibrated from the loop itself: compare the turn we asked for
+-- last frame against the turn we actually got.
+local pxPerRad, lastAsk = 900, nil
+
 local function stepAimLock(dt)
-    if not (S.aimLock and lockHeld and cam) then return end
+    if not (S.aimLock and lockHeld and cam) then
+        lastAsk = nil
+        return
+    end
     local kp = getKillerPlayer()
-    if kp ~= LocalPlayer then return end
+    if kp ~= LocalPlayer then
+        lastAsk = nil
+        return
+    end
     local kc = kp.Character
     local kroot = kc and kc:FindFirstChild("HumanoidRootPart")
     local sol = aimSolution(kc, kroot)
-    if not (sol and sol.dir) then return end
-
-    local pos = cam.CFrame.Position
-    local goal = CFrame.lookAt(pos, pos + sol.dir)
-    local alpha = math.clamp(1 - (S.lockSmooth ^ (dt * 60)), 0, 1)
-    local slewed = cam.CFrame:Lerp(goal, alpha)
-    if slewed.LookVector:Dot(sol.dir) >= math.cos(math.rad(S.lockSnap)) then
-        slewed = goal
+    if not (sol and sol.dir) then
+        lastAsk = nil
+        return
     end
-    cam.CFrame = slewed
+
+    -- angular error in camera space: forward is -Z, +X is right, +Y is up
+    local rel = cam.CFrame:VectorToObjectSpace(sol.dir)
+    local yaw = math.atan2(rel.X, -rel.Z)
+    local pitch = math.asin(math.clamp(rel.Y / math.max(rel.Magnitude, 1e-6), -1, 1))
+
+    if lastAsk and math.abs(lastAsk.dx) > 2 then
+        local turned = lastAsk.yaw - yaw          -- radians actually covered
+        if math.abs(turned) > 1e-4 then
+            local est = math.abs(lastAsk.dx / turned)
+            if est > 40 and est < 6000 then
+                pxPerRad = pxPerRad * 0.85 + est * 0.15
+            end
+        end
+    end
+
+    local err = math.max(math.abs(yaw), math.abs(pitch))
+    local frac = (err <= math.rad(S.lockSnap)) and 1
+        or math.clamp(1 - (S.lockSmooth ^ (dt * 60)), 0, 1)
+
+    local dx = yaw * frac * pxPerRad
+    local dy = -pitch * frac * pxPerRad
+    -- a cap keeps a bad calibration or a target teleport from whipping the view
+    local cap = 220
+    dx, dy = math.clamp(dx, -cap, cap), math.clamp(dy, -cap, cap)
+
+    if mousemoverel then
+        pcall(mousemoverel, dx, dy)
+        lastAsk = { dx = dx, dy = dy, yaw = yaw, pitch = pitch }
+    else
+        -- no input API: fall back to writing the camera, stutter and all
+        local pos = cam.CFrame.Position
+        cam.CFrame = cam.CFrame:Lerp(CFrame.lookAt(pos, pos + sol.dir), frac)
+        lastAsk = nil
+    end
 end
 pcall(function()
-    RunService:BindToRenderStep(LOCK_BIND, Enum.RenderPriority.Last.Value, stepAimLock)
+    RunService:BindToRenderStep(LOCK_BIND, Enum.RenderPriority.Camera.Value + 1, stepAimLock)
 end)
 
 -- ============================================================
@@ -1695,7 +1767,7 @@ track(RunService.Heartbeat:Connect(function()
                     :format(tostring(kc:GetAttribute("Spears")),
                         kc:GetAttribute("spearmode") and "AIMING" or "idle",
                         (function()
-                            local ch = isCharged(kc)
+                            local ch = isCharged()
                             local prof = ch and spearCharged or spearNorm
                             return ("%s %s%.0f"):format(ch and "CHARGED" or "normal",
                                 prof.seen and "" or "~", prof.speed)
