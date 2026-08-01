@@ -944,7 +944,6 @@ local function beamOn(fl)
 end
 
 -- ---------- per-frame ----------
-local UIS = game:GetService("UserInputService")
 
 local function stepRings(hrp, kp, kroot)
     local anchor = S.ringOnSelf and hrp or kroot
