@@ -881,35 +881,29 @@ local spearNorm    = { speed = 150, gmult = 1, seen = false }
 local spearCharged = { speed = 220, gmult = 1, seen = false }
 local liveSpears = {}                   -- { origin, dir, speed, gmult, t0 }
 
--- The charged spear wears an "Aura att" attachment (ReplicatedStorage.Killers.
--- Veil.Particles) while it is held, so the mode is readable BEFORE the throw --
--- spearmode alone only says a throw is being aimed, not which kind.
+-- Measured live 2026-08-01 on a charged hold: the aura is the "Hitbox" emitter
+-- set (0 / Fire29 / Shining Ripple / Soft Fireflies) -- the same emitters
+-- ProjectileHandler switches on for speed > 150 -- and it goes live about 4s
+-- into the hold, staying on until release. In first person it rides the
+-- VIEWMODEL (workspace.CurrentCamera.VM), not the character, which is where an
+-- earlier version looked and always came back false. Veil's vfx / updatewep /
+-- Spearthrow remotes never reach the thrower, so the emitters are the signal.
 local function isCharged(kc)
-    if not kc then return false end
-    for _, d in ipairs(kc:GetDescendants()) do
-        if d:IsA("Attachment") and d.Name == "Aura att" then
-            for _, e in ipairs(d:GetChildren()) do
-                if e:IsA("ParticleEmitter") and e.Enabled then return true end
+    local function scan(root)
+        if not root then return false end
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("ParticleEmitter") and d.Enabled
+            and d.Parent and d.Parent.Name == "Hitbox" then
+                return true
             end
-        elseif d:IsA("ParticleEmitter") and d.Enabled and d.Parent
-        and tostring(d.Parent.Name):lower():find("spear") then
-            return true
         end
+        return false
     end
-    return false
+    local cv = workspace.CurrentCamera
+    if scan(cv and cv:FindFirstChild("VM")) then return true end   -- we are the killer
+    return scan(kc)                                                -- watching one
 end
 
--- Steps at the same 1/60 the game integrates at so the path matches, but only
--- emits every DECIMATE'th point: 4s of flight is 240 steps, and drawing all of
--- them costs 240 WorldToViewportPoint calls per frame for a curve that reads
--- identically at a third of that.
--- The spear has two modes and we cannot tell which one is coming before it is
--- thrown, so the whole ballistic path is always simulated and the first wall
--- crossing is recorded rather than used as a stop condition. Everything up to
--- that point is where a normal spear lands; everything past it is where the
--- charged (aura) spear carries on to. ProjectileHandler turns the aura
--- particles on when speed > 150, so the charged throw is also the faster one.
-local DECIMATE = 3
 local function simulateArc(origin, dir, speed, gmult, maxT)
     local pts = { origin }
     local p, v = origin, dir.Unit * speed
