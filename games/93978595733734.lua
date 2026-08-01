@@ -161,6 +161,16 @@ pcall(function()
         end
         return Enum.MouseBehavior.Default
     end
+    -- Reinjecting mid-round should also REPAIR a cursor an earlier instance
+    -- left loose, not merely avoid making it worse.
+    task.defer(function()
+        local UIS_ = game:GetService("UserInputService")
+        local want = Library.MouseRestoreHook and Library.MouseRestoreHook()
+        if want == Enum.MouseBehavior.LockCenter and UIS_.MouseBehavior ~= want then
+            UIS_.MouseBehavior = want
+            UIS_.MouseIconEnabled = false
+        end
+    end)
 end)
 
 -- ============================================================
