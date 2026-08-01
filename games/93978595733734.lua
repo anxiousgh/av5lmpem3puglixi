@@ -1347,6 +1347,21 @@ do
         Callback = function(v) S.repairAlert = v end })
     intelLabels.gens  = RdSec:Label({ Name = "Generators: -" })
     intelLabels.survs = RdSec:Label({ Name = "Survivors: -" })
+
+    -- Manual escape hatch: whatever leaves the cursor wrong -- this menu, the
+    -- game, or a bug of mine -- one press puts it back to what this team and
+    -- round state should have.
+    local FxSec = Intel:Section({ Name = "Session", Side = 1 })
+    local function applyMousePolicy()
+        local UIS_ = game:GetService("UserInputService")
+        local want = (Library.MouseRestoreHook and Library.MouseRestoreHook())
+            or Enum.MouseBehavior.Default
+        UIS_.MouseBehavior = want
+        UIS_.MouseIconEnabled = (want ~= Enum.MouseBehavior.LockCenter)
+    end
+    FxSec:Button({ Name = "Fix cursor", Callback = applyMousePolicy })
+    FxSec:Label({ Name = "Fix cursor key" }):Keybind({ Name = "Fix cursor", Flag = "VD_FixCursorKey",
+        Mode = "Toggle", Callback = applyMousePolicy })
 end
 
 -- universal shell after our page (movement + generic player ESP). No combat
