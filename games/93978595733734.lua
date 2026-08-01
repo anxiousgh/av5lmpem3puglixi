@@ -990,8 +990,15 @@ track(RunService.RenderStepped:Connect(function(dt)
         local aiming = kc:GetAttribute("spearmode") == true
         local ammo = tonumber(kc:GetAttribute("Spears")) or 0
         if (aiming or S.spearAlways) and ammo > 0 then
+            -- Origin always tracks HRP facing (that is what ProjectileHandler
+            -- uses), but the throw direction is the thrower's camera. Ours is
+            -- exact; another killer's is only their replicated body facing.
             local origin = kroot.Position + kroot.CFrame.LookVector * 3 + Vector3.new(0, 1.5, 0)
-            local pts, impact = simulateArc(origin, kroot.CFrame.LookVector, spearSpeed, spearGMult, 4)
+            local aim = kroot.CFrame.LookVector
+            if kp == LocalPlayer and workspace.CurrentCamera then
+                aim = workspace.CurrentCamera.CFrame.LookVector
+            end
+            local pts, impact = simulateArc(origin, aim, spearSpeed, spearGMult, 4)
             drawArc(pts, aiming and PAL.killer or PAL.muted, aiming and 0.25 or 0.6)
             if impact and hrp then
                 impactPart.Position = impact
