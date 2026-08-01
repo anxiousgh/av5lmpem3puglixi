@@ -20,6 +20,20 @@
 --      "Goal", "Space" prompt. Auto skill check watches Line's angular velocity
 --      and presses Space exactly when it reaches the Goal zone -- no remote
 --      spoofing at all, so there is nothing for the server to validate against.
+--
+--  Re-verified 2026-08-01 against place version 10329, both roles in one round:
+--    * Everything above still holds. New gen attrs since July: kickcount,
+--      KingsScourgeTriggered, Abyss50Triggered.
+--    * Killer perks are child scripts of the killer character named
+--      "<Perk> <tier>" ("King's Scourge 3"); nothing else there ends in a digit.
+--    * Basic attack is a Legacy (server) Script at
+--      Character.Weapon["Right Arm"].Weapon.Main.BasicAttack -- hit detection is
+--      server side, so reach cannot be read and cannot be widened from here.
+--      The rings below are measured from hits that actually land.
+--    * Only the KILLER uploads aim, via Remotes.getlookvector, and it is never
+--      mirrored back to survivors -- a pre-throw spear line has to use the
+--      killer's replicated HRP facing and only becomes exact once the throw
+--      goes out over Remotes.Mechanics.visualize.
 -- ============================================================
 local ctx = ({ ... })[1]
 local Library = ctx.Library
@@ -122,6 +136,14 @@ local S = {
     autoUnhook    = false,   -- hooked: rescue-spoof our own hook + self-unhook rolls
     repairAlert   = false,   -- killer side: notify when a gen starts being repaired
     fastVault     = false,   -- every vault counts as a running (fast) vault
+    hitRing       = false,   -- ground ring at the measured basic-attack reach
+    lungeRing     = false,   -- ground ring at the measured lunge reach
+    ringScale     = 100,     -- % applied to both rings, for a safety margin
+    ringOnSelf    = false,   -- draw the rings around us instead of the killer
+    spearLine     = false,   -- Veil: predicted arc while spearmode is on
+    spearLive     = false,   -- Veil: exact arc of a spear already in flight
+    spearAlways   = false,   -- draw the predicted arc even outside spearmode
+    blindMeter    = false,   -- flashlight blind progress + fuel
 }
 
 local pool = {}   -- [Instance] = { hl=?, bb=?, lbl=?, used=bool }
@@ -621,6 +643,402 @@ local function stepAutoUnhook()
     end
 end
 
+-- ============================================================
+--  RANGE RINGS / SPEAR ARC / BLIND METER
+--
+--  Decoded live 2026-08-01, from both sides of one round (Veil):
+--    * Spear physics: PlayerScripts.Mechanics.Veil.ProjectileHandler, driven by
+--      Remotes.Mechanics.visualize(char, dir, speed, gmult, id):
+--          origin = HRP.Position + HRP.LookVector*3 + (0, 1.5, 0)
+--          v = dir.Unit * speed
+--          every Heartbeat:  v += (0, -Gravity*dt*gmult, 0) ;  p += v*dt
+--          MaxLife = 4s.   workspace.Gravity = 196.2.
+--      speed/gmult only exist on the wire once a throw goes out, so they are
+--      learned from the first observed throw and reused for the pre-throw line.
+--    * Killer char attrs: spearmode (aiming), Spears (ammo), IsStunned,
+--      IsCarrying, BloodLust, Speed, TerrorRadius, SuspenseRadius.
+--    * Basic-attack hit detection is a Legacy (server) Script at
+--      Character.Weapon["Right Arm"].Weapon.Main.BasicAttack. The hitbox is
+--      computed server side and is not readable, so both ranges are MEASURED
+--      from real hits rather than read out of config.
+-- ============================================================
+local RS_ = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+-- ---------- drawn ground rings ----------
+local hasDrawing = (Drawing ~= nil and Drawing.new ~= nil)
+local RING_SEGS = 56
+local function newRing()
+    if not hasDrawing then return nil end
+    local segs = {}
+    for i = 1, RING_SEGS do
+        local ok, l = pcall(Drawing.new, "Line")
+        if not ok then
+            for _, d in ipairs(segs) do pcall(function() d:Remove() end) end
+            return nil
+        end
+        l.Thickness, l.Transparency, l.Visible = 1, 1, false
+        segs[i] = l
+    end
+    return segs
+end
+local function hideRing(segs)
+    if not segs then return end
+    for _, l in ipairs(segs) do l.Visible = false end
+end
+local function drawRing(segs, center, radius, col, alpha)
+    if not segs or radius <= 0 then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local pts = table.create(RING_SEGS + 1)
+    for i = 0, RING_SEGS do
+        local a = (i / RING_SEGS) * math.pi * 2
+        local sp, on = cam:WorldToViewportPoint(
+            center + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius))
+        pts[i + 1] = { Vector2.new(sp.X, sp.Y), on }
+    end
+    for i = 1, RING_SEGS do
+        local a, b, l = pts[i], pts[i + 1], segs[i]
+        if a[2] and b[2] then
+            l.From, l.To, l.Color, l.Transparency, l.Visible = a[1], b[1], col, alpha, true
+        else
+            l.Visible = false
+        end
+    end
+end
+local hitRingD, lungeRingD = newRing(), newRing()
+
+-- ---------- measured attack ranges ----------
+-- Keyed by killer name (Veil/Jason/...) because reach differs per killer, and
+-- kept as a running max: a hit that lands at 11 studs proves reach >= 11.
+local RANGE_FILE = "wh_vd_ranges.json"
+local ranges = {}
+local DEF_HIT, DEF_LUNGE = 9, 15   -- placeholders only, shown as "est" until measured
+do
+    local ok, raw = pcall(function()
+        if isfile and isfile(RANGE_FILE) then return readfile(RANGE_FILE) end
+    end)
+    if ok and raw then
+        local ok2, t = pcall(function() return HttpService:JSONDecode(raw) end)
+        if ok2 and type(t) == "table" then ranges = t end
+    end
+end
+local function saveRanges()
+    if not writefile then return end
+    pcall(function() writefile(RANGE_FILE, HttpService:JSONEncode(ranges)) end)
+end
+local function killerKey(kp)
+    if not kp then return nil end
+    return tostring(kp:GetAttribute("SelectedKiller") or kp.Name)
+end
+local function rangeFor(kp)
+    local r = ranges[killerKey(kp) or ""] or {}
+    return (r.hit and r.hit > 0) and r.hit or DEF_HIT,
+           (r.lunge and r.lunge > 0) and r.lunge or DEF_LUNGE,
+           r.n or 0
+end
+
+-- A lunge announces itself on Remotes.Attacks.Lunge; anything landing inside
+-- that window is credited to lunge reach, everything else to the basic swing.
+local lungeUntil = 0
+pcall(function()
+    track(RS_.Remotes.Attacks.Lunge.OnClientEvent:Connect(function()
+        lungeUntil = os.clock() + 0.7
+    end))
+end)
+
+local function recordHit()
+    local kp = getKillerPlayer()
+    local kc = kp and kp.Character
+    local root = kc and kc:FindFirstChild("HumanoidRootPart")
+    local hrp = myHRP()
+    if not (root and hrp) then return end
+    local d = (root.Position - hrp.Position).Magnitude
+    if d <= 0 or d > 60 then return end   -- teleport/mori, not a swing
+    local key = killerKey(kp)
+    local r = ranges[key] or { hit = 0, lunge = 0, n = 0 }
+    if os.clock() < lungeUntil then
+        r.lunge = math.max(r.lunge or 0, d)
+    else
+        r.hit = math.max(r.hit or 0, d)
+    end
+    r.n = (r.n or 0) + 1
+    ranges[key] = r
+    saveRanges()
+end
+
+local function watchSelf(char)
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        local last = hum.Health
+        track(hum.HealthChanged:Connect(function(h)
+            if h < last then recordHit() end
+            last = h
+        end))
+    end
+    track(char:GetAttributeChangedSignal("Knocked"):Connect(function()
+        if char:GetAttribute("Knocked") then recordHit() end
+    end))
+end
+watchSelf(LocalPlayer.Character)
+track(LocalPlayer.CharacterAdded:Connect(watchSelf))
+
+-- ---------- Veil spear ----------
+local spearSpeed, spearGMult = 150, 1   -- overwritten by the first observed throw
+local spearSeen = false
+local liveSpears = {}                   -- { pos, vel, gmult, t0 }
+
+local function simulateArc(origin, dir, speed, gmult, maxT)
+    local pts = { origin }
+    local p, v = origin, dir.Unit * speed
+    local dt, t = 1 / 60, 0
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    local ignore = { LocalPlayer.Character }
+    local kp = getKillerPlayer()
+    if kp and kp.Character then ignore[#ignore + 1] = kp.Character end
+    rp.FilterDescendantsInstances = ignore
+    while t < (maxT or 4) do
+        v = v + Vector3.new(0, -(workspace.Gravity * dt) * gmult, 0)
+        local np = p + v * dt
+        local hit = workspace:Raycast(p, np - p, rp)
+        if hit then
+            pts[#pts + 1] = hit.Position
+            return pts, hit.Position
+        end
+        p = np
+        pts[#pts + 1] = p
+        t = t + dt
+    end
+    return pts, nil
+end
+
+local arcPool = {}
+local function drawArc(pts, col, alpha)
+    if not hasDrawing then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local n, screen = 0, {}
+    for i = 1, #pts do
+        local sp, on = cam:WorldToViewportPoint(pts[i])
+        screen[i] = { Vector2.new(sp.X, sp.Y), on }
+    end
+    for i = 1, #pts - 1 do
+        local a, b = screen[i], screen[i + 1]
+        if a[2] and b[2] then
+            n = n + 1
+            local l = arcPool[n]
+            if not l then
+                local ok, d = pcall(Drawing.new, "Line")
+                if not ok then break end
+                d.Thickness = 2
+                arcPool[n], l = d, d
+            end
+            l.From, l.To, l.Color, l.Transparency, l.Visible = a[1], b[1], col, alpha, true
+        end
+    end
+    for i = n + 1, #arcPool do arcPool[i].Visible = false end
+end
+local function hideArc()
+    for _, l in ipairs(arcPool) do l.Visible = false end
+end
+
+-- The impact label rides its own anchor part rather than the shared ESP pool,
+-- so the per-frame sweep in stepPlayerEsp cannot switch it off mid-arc.
+local impactPart, impactBB, impactLbl
+do
+    impactPart = Instance.new("Part")
+    impactPart.Name = "\0"
+    impactPart.Anchored, impactPart.CanCollide, impactPart.CanQuery = true, false, false
+    impactPart.Transparency = 1
+    impactPart.Size = Vector3.new(0.05, 0.05, 0.05)
+    pcall(function() impactPart.Parent = workspace end)
+    impactBB = Instance.new("BillboardGui")
+    impactBB.Name = "\0"
+    impactBB.Size = UDim2.fromOffset(240, 20)
+    impactBB.AlwaysOnTop = true
+    impactBB.Adornee = impactPart
+    impactBB.Enabled = false
+    impactLbl = Instance.new("TextLabel")
+    impactLbl.AnchorPoint = Vector2.new(0.5, 0.5)
+    impactLbl.Position = UDim2.fromScale(0.5, 0.5)
+    impactLbl.Size = UDim2.new()
+    impactLbl.AutomaticSize = Enum.AutomaticSize.XY
+    impactLbl.BackgroundTransparency = 1
+    impactLbl.RichText = true
+    impactLbl.FontFace = ESP_FONT
+    impactLbl.TextSize = 12
+    impactLbl.TextColor3 = PAL.text
+    impactLbl.Parent = impactBB
+    pcall(function() impactBB.Parent = espParent() end)
+end
+
+pcall(function()
+    track(RS_.Remotes.Mechanics.visualize.OnClientEvent:Connect(function(char, dir, speed, gmult, id)
+        if typeof(dir) ~= "Vector3" or type(speed) ~= "number" then return end
+        spearSpeed, spearGMult, spearSeen = speed, gmult or 1, true
+        local origin
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then
+            origin = root.Position + root.CFrame.LookVector * 3 + Vector3.new(0, 1.5, 0)
+        end
+        if origin then
+            liveSpears[#liveSpears + 1] =
+                { origin = origin, dir = dir.Unit, speed = speed, gmult = gmult or 1, t0 = os.clock(), id = id }
+        end
+    end))
+end)
+
+-- ---------- flashlight blind ----------
+-- The blind itself is resolved server side; all that is visible from here is
+-- how long our beam has been on the killer. The threshold is therefore learned:
+-- whenever GotBlinded lands, the beam time at that instant becomes the target.
+local blindHold, blindNeed, blindSamples = 0, 1.1, 0
+local blindGui, blindFrame, blindFill, blindLbl
+do
+    blindGui = Instance.new("ScreenGui")
+    blindGui.Name = "\0"
+    blindGui.ResetOnSpawn = false
+    blindGui.IgnoreGuiInset = true
+    blindGui.Enabled = false
+    blindFrame = Instance.new("Frame")
+    blindFrame.AnchorPoint = Vector2.new(0.5, 0)
+    blindFrame.Position = UDim2.new(0.5, 0, 0, 96)
+    blindFrame.Size = UDim2.fromOffset(220, 10)
+    blindFrame.BackgroundColor3 = PAL.bg
+    blindFrame.BorderSizePixel = 0
+    blindFrame.Parent = blindGui
+    local st = Instance.new("UIStroke")
+    st.Color = PAL.outline
+    st.Parent = blindFrame
+    blindFill = Instance.new("Frame")
+    blindFill.Size = UDim2.new(0, 0, 1, 0)
+    blindFill.BackgroundColor3 = PAL.accent
+    blindFill.BorderSizePixel = 0
+    blindFill.Parent = blindFrame
+    blindLbl = Instance.new("TextLabel")
+    blindLbl.AnchorPoint = Vector2.new(0.5, 1)
+    blindLbl.Position = UDim2.new(0.5, 0, 0, -2)
+    blindLbl.Size = UDim2.fromOffset(240, 14)
+    blindLbl.BackgroundTransparency = 1
+    blindLbl.RichText = true
+    blindLbl.FontFace = ESP_FONT
+    blindLbl.TextSize = 12
+    blindLbl.TextColor3 = PAL.text
+    blindLbl.Parent = blindFrame
+    pcall(function() blindGui.Parent = espParent() end)
+end
+
+pcall(function()
+    track(RS_.Remotes.Items.Flashlight.GotBlinded.OnClientEvent:Connect(function()
+        if blindHold > 0.05 then
+            blindNeed = (blindNeed * blindSamples + blindHold) / (blindSamples + 1)
+            blindSamples = blindSamples + 1
+        end
+        blindHold = 0
+    end))
+end)
+
+local function findFlashlightPart()
+    local c = LocalPlayer.Character
+    if not c then return nil end
+    for _, d in ipairs(c:GetDescendants()) do
+        if d:IsA("BasePart") and d:GetAttribute("remaining") ~= nil then return d end
+    end
+    return nil
+end
+
+-- ---------- per-frame ----------
+local UIS = game:GetService("UserInputService")
+track(RunService.RenderStepped:Connect(function(dt)
+    local kp = getKillerPlayer()
+    local kc = kp and kp.Character
+    local kroot = kc and kc:FindFirstChild("HumanoidRootPart")
+    local hrp = myHRP()
+
+    -- rings
+    local anchor = S.ringOnSelf and hrp or kroot
+    if hasDrawing and anchor and (S.hitRing or S.lungeRing) then
+        local hitR, lungeR = rangeFor(kp)
+        local k = S.ringScale / 100
+        local base = anchor.Position - Vector3.new(0, anchor.Size.Y / 2 + 2.4, 0)
+        if S.hitRing then drawRing(hitRingD, base, hitR * k, PAL.killer, 0.45)
+        else hideRing(hitRingD) end
+        if S.lungeRing then drawRing(lungeRingD, base, lungeR * k, PAL.accent, 0.6)
+        else hideRing(lungeRingD) end
+    else
+        hideRing(hitRingD); hideRing(lungeRingD)
+    end
+
+    -- spear: live arcs first, predicted line only when nothing is in flight
+    local drew = false
+    if S.spearLive and #liveSpears > 0 then
+        for i = #liveSpears, 1, -1 do
+            local s = liveSpears[i]
+            if os.clock() - s.t0 > 4 then
+                table.remove(liveSpears, i)
+            else
+                local pts = simulateArc(s.origin, s.dir, s.speed, s.gmult, 4)
+                drawArc(pts, PAL.killer, 0.2)
+                drew = true
+                break
+            end
+        end
+    end
+    if not drew and S.spearLine and kroot and kc then
+        local aiming = kc:GetAttribute("spearmode") == true
+        local ammo = tonumber(kc:GetAttribute("Spears")) or 0
+        if (aiming or S.spearAlways) and ammo > 0 then
+            local origin = kroot.Position + kroot.CFrame.LookVector * 3 + Vector3.new(0, 1.5, 0)
+            local pts, impact = simulateArc(origin, kroot.CFrame.LookVector, spearSpeed, spearGMult, 4)
+            drawArc(pts, aiming and PAL.killer or PAL.muted, aiming and 0.25 or 0.6)
+            if impact and hrp then
+                impactPart.Position = impact
+                impactBB.Enabled = true
+                impactLbl.Text = ("<font color=\"%s\">spear impact</font>  %dm from you")
+                    :format(HEX.killer, math.floor((impact - hrp.Position).Magnitude + 0.5))
+            else
+                impactBB.Enabled = false
+            end
+            drew = true
+        end
+    end
+    if not drew then hideArc(); impactBB.Enabled = false end
+
+    -- blind meter
+    if S.blindMeter then
+        local fl = findFlashlightPart()
+        local beaming = fl and UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        local onKiller = false
+        if beaming and kc and hrp then
+            local head = kc:FindFirstChild("Head") or kroot
+            if head then
+                local cam = workspace.CurrentCamera
+                local to = (head.Position - cam.CFrame.Position)
+                if to.Magnitude < 45 and cam.CFrame.LookVector:Dot(to.Unit) > 0.965 then
+                    local rp = RaycastParams.new()
+                    rp.FilterType = Enum.RaycastFilterType.Exclude
+                    rp.FilterDescendantsInstances = { LocalPlayer.Character, kc }
+                    onKiller = workspace:Raycast(cam.CFrame.Position, to) == nil
+                end
+            end
+        end
+        blindHold = onKiller and (blindHold + dt) or math.max(0, blindHold - dt * 2)
+        blindGui.Enabled = beaming and true or false
+        local pct = math.clamp(blindHold / math.max(blindNeed, 0.05), 0, 1)
+        blindFill.Size = UDim2.new(pct, 0, 1, 0)
+        blindFill.BackgroundColor3 = onKiller and PAL.accent or PAL.muted
+        local fuel = fl and math.floor((fl:GetAttribute("remaining") or 0) + 0.5) or 0
+        blindLbl.Text = ("<font color=\"%s\">blind</font> %d%%   fuel %d   %s")
+            :format(HEX.accent, math.floor(pct * 100 + 0.5), fuel,
+                blindSamples > 0 and ("%.2fs"):format(blindNeed) or "est")
+    else
+        blindGui.Enabled = false
+        blindHold = 0
+    end
+end))
+
 local intelLabels = {}   -- filled in the UI block below
 local wasChased = false
 local lastIntel = 0
@@ -679,6 +1097,38 @@ track(RunService.Heartbeat:Connect(function()
                 if gen:GetAttribute("Completed") then done = done + 1 end
             end
             intelLabels.gens:SetText("Generators: " .. done .. "/" .. total .. " done")
+        end
+
+        -- Perks ride along as child scripts named "<Perk> <tier>", e.g.
+        -- "Brutal Strength 3" -- system scripts never end in a digit.
+        if intelLabels.perks then
+            local found = {}
+            if kc then
+                for _, d in ipairs(kc:GetChildren()) do
+                    if (d:IsA("Script") or d:IsA("LocalScript")) and d.Name:match("%s%d$") then
+                        found[#found + 1] = d.Name
+                    end
+                end
+            end
+            intelLabels.perks:SetText("Perks: " .. (#found > 0 and table.concat(found, ", ") or "-"))
+        end
+
+        if intelLabels.ranges then
+            local hitR, lungeR, n = rangeFor(kp)
+            intelLabels.ranges:SetText(n > 0
+                and ("Measured: hit %.1f  lunge %.1f  (%d hits)"):format(hitR, lungeR, n)
+                or ("Measured: none yet -- showing est %d / %d"):format(DEF_HIT, DEF_LUNGE))
+        end
+
+        if intelLabels.spear then
+            if kc and kc:GetAttribute("Spears") ~= nil then
+                intelLabels.spear:SetText(("Spear: %s ammo   %s   speed %s")
+                    :format(tostring(kc:GetAttribute("Spears")),
+                        kc:GetAttribute("spearmode") and "AIMING" or "idle",
+                        spearSeen and ("%.0f"):format(spearSpeed) or "est"))
+            else
+                intelLabels.spear:SetText("Spear: - (not Veil)")
+            end
         end
     end
 
@@ -763,6 +1213,38 @@ do
     intelLabels.dist   = KSec:Label({ Name = "Distance: -" })
     intelLabels.chase  = KSec:Label({ Name = "Chasing: -" })
     intelLabels.gens   = KSec:Label({ Name = "Generators: -" })
+    intelLabels.perks  = KSec:Label({ Name = "Perks: -" })
+
+    local Read = Page:SubPage({ Name = "Ranges" })
+
+    local RSec = Read:Section({ Name = "Attack ranges", Side = 1 })
+    RSec:Toggle({ Name = "Hit range ring", Flag = "VD_HitRing", Default = false,
+        Callback = function(v) S.hitRing = v end })
+    RSec:Toggle({ Name = "Lunge range ring", Flag = "VD_LungeRing", Default = false,
+        Callback = function(v) S.lungeRing = v end })
+    RSec:Toggle({ Name = "Draw around me instead", Flag = "VD_RingSelf", Default = false,
+        Callback = function(v) S.ringOnSelf = v end })
+    RSec:Slider({ Name = "Ring scale", Flag = "VD_RingScale", Min = 50, Max = 200, Default = 100,
+        Decimals = 0, Suffix = " %", Callback = function(v) S.ringScale = v end })
+    intelLabels.ranges = RSec:Label({ Name = "Measured: -" })
+    RSec:Button({ Name = "Reset measurements", Callback = function()
+        ranges = {}
+        saveRanges()
+        pcall(function() Library:Notification("Attack range data cleared", 3, PAL.accent) end)
+    end })
+
+    local SpSec = Read:Section({ Name = "Veil spear", Side = 2 })
+    SpSec:Toggle({ Name = "Predicted throw line", Flag = "VD_SpearLine", Default = false,
+        Callback = function(v) S.spearLine = v end })
+    SpSec:Toggle({ Name = "Show even when not aiming", Flag = "VD_SpearAlways", Default = false,
+        Callback = function(v) S.spearAlways = v end })
+    SpSec:Toggle({ Name = "Live spear arc", Flag = "VD_SpearLive", Default = false,
+        Callback = function(v) S.spearLive = v end })
+    intelLabels.spear = SpSec:Label({ Name = "Spear: -" })
+
+    local FSec = Read:Section({ Name = "Flashlight", Side = 2 })
+    FSec:Toggle({ Name = "Blind progress bar", Flag = "VD_BlindMeter", Default = false,
+        Callback = function(v) S.blindMeter = v end })
 end
 
 -- universal shell after our page (movement + generic player ESP). No combat
@@ -776,13 +1258,22 @@ local function cleanup()
     S.killerEsp, S.survEsp, S.genEsp, S.hookEsp, S.palletEsp, S.vaultEsp = false, false, false, false, false, false
     S.autoSkill, S.chaseWarn, S.antiChase, S.autoUnhook, S.repairAlert, S.fastVault =
         false, false, false, false, false, false
+    S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
+        false, false, false, false, false, false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, e in pairs(pool) do
         if e.hl then pcall(function() e.hl:Destroy() end) end
         pcall(function() e.bb:Destroy() end)
     end
     pool = {}
+    for _, set in ipairs({ hitRingD or {}, lungeRingD or {}, arcPool }) do
+        for _, l in ipairs(set) do pcall(function() l:Remove() end) end
+    end
+    hitRingD, lungeRingD, arcPool = nil, nil, {}
     pcall(function() warnGui:Destroy() end)
+    pcall(function() blindGui:Destroy() end)
+    pcall(function() impactBB:Destroy() end)
+    pcall(function() impactPart:Destroy() end)
 end
 do
     local g = (getgenv and getgenv()) or nil
