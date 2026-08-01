@@ -142,13 +142,7 @@ local S = {
     spearLive     = false,   -- Veil: exact arc of a spear already in flight
     spearAlways   = false,   -- draw the predicted arc even outside spearmode
     blindMeter    = false,   -- flashlight blind progress + fuel
-    aimAssist     = false,   -- Veil: show where to point to hit the nearest survivor
-    aimFov        = 400,     -- target search radius around the crosshair, pixels
-    aimLead       = true,    -- lead a moving target by its own velocity
     powerHud      = false,   -- live power attrs + recent power remotes for ANY killer
-    aimLock       = false,   -- slew the camera to the solution while the key is held
-    lockSmooth    = 0.30,    -- per-1/60s retention; lower = snappier
-    lockSnap      = 1.2,     -- within this many degrees, take the exact solution
     blindCone     = 20,      -- half-angle (deg) the beam counts as "on target"
     blindRange    = 60,      -- studs
     espBox        = true,    -- draw the 2D bounding box
@@ -1059,6 +1053,11 @@ local function originFor(name, root)
     return root.CFrame:PointToWorldSpace(rel)
 end
 
+-- Steps at the game's own 1/60 so the path matches ProjectileHandler, but only
+-- emits every DECIMATE'th point: 4s of flight is 240 steps and the curve reads
+-- identically at a third of that. gmult 0 means no gravity term at all, which
+-- is how Abysswalker's wave travels.
+local DECIMATE = 3
 local function simulateArc(origin, dir, speed, gmult, maxT)
     local pts = { origin }
     local p, v = origin, dir.Unit * speed
@@ -1279,246 +1278,6 @@ local function stepSpear(hrp, kp, kc, kroot)
 end
 
 -- ============================================================
---  SPEAR AIM ASSIST
---
---  Not an aimbot: nothing is fired and the camera is never moved. It solves the
---  launch direction that WOULD land on the nearest survivor to the crosshair
---  and draws where to point, leaving the shot to the player.
---
---  For a fixed launch speed the angle is closed form. With d the horizontal
---  distance, y the height difference, v the speed and g the gravity:
---      tan(theta) = (v^2 -/+ sqrt(v^4 - g*(g*d^2 + 2*y*v^2))) / (g*d)
---  The minus root is the flatter of the two arcs -- shorter flight, less time
---  for the target to move -- and a negative discriminant means out of range.
--- ============================================================
-local function solveAim(origin, target, speed, gmult)
-    local g = workspace.Gravity * (gmult or 1)
-    local d = target - origin
-    if g <= 0 then                       -- linear (Abysswalker): no arc to solve
-        local dist = d.Magnitude
-        if dist < 0.05 or speed <= 0 then return nil end
-        return d.Unit, dist / speed
-    end
-    local flat = Vector3.new(d.X, 0, d.Z)
-    local x = flat.Magnitude
-    if x < 0.05 or speed <= 0 then return nil end
-    local v2 = speed * speed
-    local disc = v2 * v2 - g * (g * x * x + 2 * d.Y * v2)
-    if disc < 0 then return nil end
-    local tanTheta = (v2 - math.sqrt(disc)) / (g * x)
-    local dir = (flat.Unit + Vector3.new(0, tanTheta, 0)).Unit
-    local flight = x / (speed * math.cos(math.atan(tanTheta)))
-    return dir, flight
-end
-
--- Lead converges: solve, see how long the spear is in the air, re-aim at where
--- the target will be by then, repeat. Three passes is plenty at these speeds.
--- A remote character's AssemblyLinearVelocity is not reliably replicated -- it
--- usually reads zero, which killed the lead entirely and left the solution
--- correcting pitch only. Differentiate the position ourselves instead, lightly
--- smoothed so a single network hitch does not throw the aim.
-local velTrack = setmetatable({}, { __mode = "k" })
-local function targetVelocity(part)
-    local now, pos = os.clock(), part.Position
-    local rec = velTrack[part]
-    if not rec then
-        velTrack[part] = { pos = pos, t = now, vel = Vector3.zero }
-        return Vector3.zero
-    end
-    local dt = now - rec.t
-    if dt >= 0.03 then
-        local raw = (pos - rec.pos) / dt
-        rec.vel = rec.vel:Lerp(raw, 0.4)
-        rec.pos, rec.t = pos, now
-    end
-    return rec.vel
-end
-
-local function solveLead(origin, part, speed, gmult)
-    local vel = Vector3.zero
-    if S.aimLead then
-        vel = targetVelocity(part)
-        local replicated = part.AssemblyLinearVelocity
-        -- trust whichever actually reports motion
-        if replicated.Magnitude > vel.Magnitude then vel = replicated end
-        vel = Vector3.new(vel.X, 0, vel.Z)   -- ignore jump/fall; they land anyway
-    end
-    local aimAt, dir, flight = part.Position, nil, nil
-    for _ = 1, 3 do
-        dir, flight = solveAim(origin, aimAt, speed, gmult)
-        if not dir then return nil end
-        aimAt = part.Position + vel * flight
-    end
-    return dir, flight, aimAt
-end
-
-local function pickTarget()
-    if not cam then return nil end
-    local centre = cam.ViewportSize / 2
-    local best, bestD
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and isSurvivor(p) then
-            local c = p.Character
-            local hum = c and c:FindFirstChildOfClass("Humanoid")
-            local root = c and c:FindFirstChild("HumanoidRootPart")
-            if root and hum and hum.Health > 0 and not c:GetAttribute("Knocked") then
-                local sp, on = cam:WorldToViewportPoint(root.Position)
-                if on then
-                    local d = (Vector2.new(sp.X, sp.Y) - centre).Magnitude
-                    if d <= S.aimFov and (not bestD or d < bestD) then best, bestD = root, d end
-                end
-            end
-        end
-    end
-    return best
-end
-
--- One solve, shared by the on-screen assist and the camera lock so the two can
--- never disagree about where the shot goes.
-local function aimSolution(kc, kroot)
-    if not (kc and kroot and cam) then return nil end
-    local kp = getKillerPlayer()
-    local pr = activeProj(kp)
-    if not pr then return nil end
-    if killerKind(kp) == "Veil" and (tonumber(kc:GetAttribute("Spears")) or 0) <= 0 then return nil end
-    local target = pickTarget()
-    if not target then return nil end
-    local speed, gmult, charged = pr.profile(kc)
-    local prof = { speed = speed, gmult = gmult }
-    local origin = originFor(killerKind(kp), kroot)
-    local dir, flight, aimAt = solveLead(origin, target, speed, gmult)
-    return {
-        target = target, charged = charged, prof = prof, origin = origin,
-        dir = dir, flight = flight, aimAt = aimAt,   -- dir nil = out of range
-    }
-end
-
-local function stepAimAssist(hrp, kp, kc, kroot)
-    if not (S.aimAssist and kp == LocalPlayer) then return end
-    local sol = aimSolution(kc, kroot)
-    if not sol then return end
-
-    local centre = cam.ViewportSize / 2
-    if not sol.dir then
-        dText(Vector2.new(centre.X, centre.Y + 34), "spear: out of range", PAL.muted, 13, true)
-        return
-    end
-
-    local col = sol.charged and PAL.accent or PAL.killer
-
-    local pts, wall, wallIdx =
-        simulateArc(sol.origin, sol.dir, sol.prof.speed, sol.prof.gmult, math.min(sol.flight + 0.2, 4))
-    local blocked = (not sol.charged) and wall
-        and (wall - sol.origin).Magnitude < (sol.aimAt - sol.origin).Magnitude - 2
-    dPath(pts, (not sol.charged) and wallIdx or nil, col, blocked and 0.35 or 1, PAL.muted, 0.3)
-
-    landingMark(sol.aimAt, ("%s  %.2fs"):format(blocked and "BLOCKED" or "AIM HERE", sol.flight),
-        blocked and PAL.muted or col, 1)
-
-    -- Where the crosshair has to point. The spear leaves along the CAMERA
-    -- direction, so projecting the solved vector from the camera gives the
-    -- exact screen position to put the crosshair on.
-    local mp, on = cam:WorldToViewportPoint(cam.CFrame.Position + sol.dir * 60)
-    if on then
-        local at = Vector2.new(mp.X, mp.Y)
-        dLine(centre, at, col, 0.45, 1)
-        local r = 7
-        dLine(at - Vector2.new(r, 0), at + Vector2.new(r, 0), col, 1, 2)
-        dLine(at - Vector2.new(0, r), at + Vector2.new(0, r), col, 1, 2)
-        dText(at + Vector2.new(0, 11),
-            ("%dm  %s"):format(math.floor((sol.aimAt - sol.origin).Magnitude + 0.5),
-                sol.charged and "charged" or "normal"), col, 12, true)
-    end
-end
-
--- ============================================================
---  SOFT AIM LOCK
---
---  Slews the camera toward the same solved direction instead of snapping to it.
---  Smoothing is exponential and frame-rate independent -- alpha = 1 - k^(dt*60)
---  -- so the feel does not change with FPS, which matters here at 240.
---
---  "Smooth but still on point": easing alone never quite arrives, it only gets
---  asymptotically close, so inside a small angle it takes the exact solution.
---  The result travels smoothly and still ends up dead on.
---
---  Bound at RenderPriority.Last because this game's Lookscriptkiller /
---  Firstperson drive the camera themselves; anything earlier gets overwritten
---  in the same frame.
--- ============================================================
-local LOCK_BIND = "wh_vd_aimlock"
-local lockHeld = false
-
--- CameraType is Custom here, meaning Roblox's camera module owns the CFrame and
--- recomputes it every frame from its own yaw/pitch. Writing cam.CFrame fights
--- that: our value survives one frame, gets thrown away on the next, and the
--- result is the shudder. Steering the mouse instead feeds the same input path
--- the player uses, so the camera module does the rotating and there is nothing
--- to fight.
---
--- Pixels-per-radian is not knowable up front (it moves with sensitivity and
--- FOV), so it is calibrated from the loop itself: compare the turn we asked for
--- last frame against the turn we actually got.
-local pxPerRad, lastAsk = 900, nil
-
-local function stepAimLock(dt)
-    if not (S.aimLock and lockHeld and cam) then
-        lastAsk = nil
-        return
-    end
-    local kp = getKillerPlayer()
-    if kp ~= LocalPlayer then
-        lastAsk = nil
-        return
-    end
-    local kc = kp.Character
-    local kroot = kc and kc:FindFirstChild("HumanoidRootPart")
-    local sol = aimSolution(kc, kroot)
-    if not (sol and sol.dir) then
-        lastAsk = nil
-        return
-    end
-
-    -- angular error in camera space: forward is -Z, +X is right, +Y is up
-    local rel = cam.CFrame:VectorToObjectSpace(sol.dir)
-    local yaw = math.atan2(rel.X, -rel.Z)
-    local pitch = math.asin(math.clamp(rel.Y / math.max(rel.Magnitude, 1e-6), -1, 1))
-
-    if lastAsk and math.abs(lastAsk.dx) > 2 then
-        local turned = lastAsk.yaw - yaw          -- radians actually covered
-        if math.abs(turned) > 1e-4 then
-            local est = math.abs(lastAsk.dx / turned)
-            if est > 40 and est < 6000 then
-                pxPerRad = pxPerRad * 0.85 + est * 0.15
-            end
-        end
-    end
-
-    local err = math.max(math.abs(yaw), math.abs(pitch))
-    local frac = (err <= math.rad(S.lockSnap)) and 1
-        or math.clamp(1 - (S.lockSmooth ^ (dt * 60)), 0, 1)
-
-    local dx = yaw * frac * pxPerRad
-    local dy = -pitch * frac * pxPerRad
-    -- a cap keeps a bad calibration or a target teleport from whipping the view
-    local cap = 220
-    dx, dy = math.clamp(dx, -cap, cap), math.clamp(dy, -cap, cap)
-
-    if mousemoverel then
-        pcall(mousemoverel, dx, dy)
-        lastAsk = { dx = dx, dy = dy, yaw = yaw, pitch = pitch }
-    else
-        -- no input API: fall back to writing the camera, stutter and all
-        local pos = cam.CFrame.Position
-        cam.CFrame = cam.CFrame:Lerp(CFrame.lookAt(pos, pos + sol.dir), frac)
-        lastAsk = nil
-    end
-end
-pcall(function()
-    RunService:BindToRenderStep(LOCK_BIND, Enum.RenderPriority.Camera.Value + 1, stepAimLock)
-end)
-
--- ============================================================
 --  KILLER POWER READOUT
 --
 --  Stalker, Masked, Hidden, Slasher, Jason and the base Killer have no
@@ -1667,7 +1426,6 @@ track(RunService.RenderStepped:Connect(function(dt)
     stepObjEsp(hrp)
     stepRings(hrp, kp, kroot)
     stepSpear(hrp, kp, kc, kroot)
-    stepAimAssist(hrp, kp, kc, kroot)
     if kp then watchPower(killerKind(kp)) end
     stepPowerHud(kp, kc)
     stepBlind(dt, hrp, kc, kroot)
@@ -1906,22 +1664,6 @@ do
         Callback = function(v) S.powerHud = v end })
     intelLabels.power = PwSec:Label({ Name = "Power: -" })
 
-    local ASec = Read:Section({ Name = "Spear aim assist", Side = 2 })
-    ASec:Toggle({ Name = "Show aim solution", Flag = "VD_AimAssist", Default = false,
-        Callback = function(v) S.aimAssist = v end })
-    ASec:Toggle({ Name = "Lead moving targets", Flag = "VD_AimLead", Default = true,
-        Callback = function(v) S.aimLead = v end })
-    ASec:Slider({ Name = "Target FOV", Flag = "VD_AimFov", Min = 80, Max = 1200, Default = 400,
-        Decimals = 0, Suffix = " px", Callback = function(v) S.aimFov = v end })
-    ASec:Toggle({ Name = "Soft aim lock", Flag = "VD_AimLock", Default = false,
-        Callback = function(v) S.aimLock = v end })
-    ASec:Label({ Name = "Aim lock key" }):Keybind({ Name = "Soft aim lock", Flag = "VD_AimLockKey",
-        Mode = "Hold", Callback = function(state) lockHeld = state and true or false end })
-    ASec:Slider({ Name = "Smoothing", Flag = "VD_LockSmooth", Min = 0, Max = 90, Default = 30,
-        Decimals = 0, Suffix = " %", Callback = function(v) S.lockSmooth = v / 100 end })
-    ASec:Slider({ Name = "Snap within", Flag = "VD_LockSnap", Min = 0, Max = 6, Default = 1.2,
-        Decimals = 1, Suffix = " deg", Callback = function(v) S.lockSnap = v end })
-
     -- ---------- intel ----------
     local Intel = Page:SubPage({ Name = "Intel" })
 
@@ -1970,9 +1712,8 @@ local function cleanup()
         false, false, false, false, false, false
     S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
         false, false, false, false, false, false
-    S.aimAssist, S.aimLock, lockHeld, S.powerHud = false, false, false, false
+    S.powerHud = false
     for _, c in ipairs(powerConns) do pcall(function() c:Disconnect() end) end
-    pcall(function() RunService:UnbindFromRenderStep(LOCK_BIND) end)
     chaseFlash = false
     pcall(function() Library.MouseRestoreHook = nil end)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
