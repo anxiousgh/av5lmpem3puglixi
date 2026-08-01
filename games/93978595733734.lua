@@ -793,6 +793,12 @@ local liveSpears = {}                   -- { pos, vel, gmult, t0 }
 -- emits every DECIMATE'th point: 4s of flight is 240 steps, and drawing all of
 -- them costs 240 WorldToViewportPoint calls per frame for a curve that reads
 -- identically at a third of that.
+-- The spear has two modes and we cannot tell which one is coming before it is
+-- thrown, so the whole ballistic path is always simulated and the first wall
+-- crossing is recorded rather than used as a stop condition. Everything up to
+-- that point is where a normal spear lands; everything past it is where the
+-- charged (aura) spear carries on to. ProjectileHandler turns the aura
+-- particles on when speed > 150, so the charged throw is also the faster one.
 local DECIMATE = 3
 local function simulateArc(origin, dir, speed, gmult, maxT)
     local pts = { origin }
@@ -804,13 +810,17 @@ local function simulateArc(origin, dir, speed, gmult, maxT)
     local kp = getKillerPlayer()
     if kp and kp.Character then ignore[#ignore + 1] = kp.Character end
     rp.FilterDescendantsInstances = ignore
+    local wallHit, wallIdx
     while t < (maxT or 4) do
         v = v + Vector3.new(0, -(workspace.Gravity * dt) * gmult, 0)
         local np = p + v * dt
-        local hit = workspace:Raycast(p, np - p, rp)
-        if hit then
-            pts[#pts + 1] = hit.Position
-            return pts, hit.Position
+        if not wallHit then
+            local hit = workspace:Raycast(p, np - p, rp)
+            if hit then
+                wallHit = hit.Position
+                pts[#pts + 1] = hit.Position
+                wallIdx = #pts
+            end
         end
         p = np
         i = i + 1
@@ -818,11 +828,13 @@ local function simulateArc(origin, dir, speed, gmult, maxT)
         t = t + dt
     end
     pts[#pts + 1] = p
-    return pts, nil
+    return pts, wallHit, wallIdx, p
 end
 
+-- split = first index of the through-wall leg; segments before it use colA
+-- (solid, the normal spear) and from it on colB (dim, the charged spear).
 local arcPool = {}
-local function drawArc(pts, col, alpha)
+local function drawArc(pts, split, colA, aA, colB, aB)
     if not hasDrawing then return end
     local cam = workspace.CurrentCamera
     if not cam then return end
@@ -839,46 +851,45 @@ local function drawArc(pts, col, alpha)
             if not l then
                 local ok, d = pcall(Drawing.new, "Line")
                 if not ok then break end
-                d.Thickness = 2
                 arcPool[n], l = d, d
             end
-            l.From, l.To, l.Color, l.Transparency, l.Visible = a[1], b[1], col, alpha, true
+            local past = split and i >= split
+            l.From, l.To = a[1], b[1]
+            l.Color = past and colB or colA
+            l.Transparency = past and aB or aA
+            l.Thickness = past and 1 or 2
+            l.Visible = true
         end
     end
     for i = n + 1, #arcPool do arcPool[i].Visible = false end
 end
+
+-- Drawing.Text markers, so the spear read-out no longer needs a BillboardGui.
+local markPool = {}
+local function marker(idx, worldPos, text, col)
+    if not hasDrawing then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local d = markPool[idx]
+    if not d then
+        local ok, t = pcall(Drawing.new, "Text")
+        if not ok then return end
+        t.Size, t.Center, t.Outline, t.Font = 13, true, true, 2
+        markPool[idx], d = t, t
+    end
+    local sp, on = cam:WorldToViewportPoint(worldPos)
+    if on then
+        d.Position = Vector2.new(sp.X, sp.Y)
+        d.Text, d.Color, d.Transparency, d.Visible = text, col, 1, true
+    else
+        d.Visible = false
+    end
+end
+local function hideMarkers()
+    for _, d in ipairs(markPool) do d.Visible = false end
+end
 local function hideArc()
     for _, l in ipairs(arcPool) do l.Visible = false end
-end
-
--- The impact label rides its own anchor part rather than the shared ESP pool,
--- so the per-frame sweep in stepPlayerEsp cannot switch it off mid-arc.
-local impactPart, impactBB, impactLbl
-do
-    impactPart = Instance.new("Part")
-    impactPart.Name = "\0"
-    impactPart.Anchored, impactPart.CanCollide, impactPart.CanQuery = true, false, false
-    impactPart.Transparency = 1
-    impactPart.Size = Vector3.new(0.05, 0.05, 0.05)
-    pcall(function() impactPart.Parent = workspace end)
-    impactBB = Instance.new("BillboardGui")
-    impactBB.Name = "\0"
-    impactBB.Size = UDim2.fromOffset(240, 20)
-    impactBB.AlwaysOnTop = true
-    impactBB.Adornee = impactPart
-    impactBB.Enabled = false
-    impactLbl = Instance.new("TextLabel")
-    impactLbl.AnchorPoint = Vector2.new(0.5, 0.5)
-    impactLbl.Position = UDim2.fromScale(0.5, 0.5)
-    impactLbl.Size = UDim2.new()
-    impactLbl.AutomaticSize = Enum.AutomaticSize.XY
-    impactLbl.BackgroundTransparency = 1
-    impactLbl.RichText = true
-    impactLbl.FontFace = ESP_FONT
-    impactLbl.TextSize = 12
-    impactLbl.TextColor3 = PAL.text
-    impactLbl.Parent = impactBB
-    pcall(function() impactBB.Parent = espParent() end)
 end
 
 pcall(function()
@@ -986,8 +997,12 @@ track(RunService.RenderStepped:Connect(function(dt)
             if os.clock() - s.t0 > 4 then
                 table.remove(liveSpears, i)
             else
-                local pts = simulateArc(s.origin, s.dir, s.speed, s.gmult, 4)
-                drawArc(pts, PAL.killer, 1)
+                -- a spear already in flight has declared its mode: the aura
+                -- (speed > 150) phases through walls, anything slower stops
+                local phasing = s.speed > 150
+                local pts, wall, wallIdx = simulateArc(s.origin, s.dir, s.speed, s.gmult, 4)
+                drawArc(pts, (not phasing) and wallIdx or nil, PAL.killer, 1, PAL.muted, 0.35)
+                if wall and not phasing then marker(1, wall, "impact", PAL.killer) end
                 drew = true
                 break
             end
@@ -1005,20 +1020,24 @@ track(RunService.RenderStepped:Connect(function(dt)
             if kp == LocalPlayer and workspace.CurrentCamera then
                 aim = workspace.CurrentCamera.CFrame.LookVector
             end
-            local pts, impact = simulateArc(origin, aim, spearSpeed, spearGMult, 4)
-            drawArc(pts, aiming and PAL.killer or PAL.muted, aiming and 1 or 0.55)
-            if impact and hrp then
-                impactPart.Position = impact
-                impactBB.Enabled = true
-                impactLbl.Text = ("<font color=\"%s\">spear impact</font>  %dm from you")
-                    :format(HEX.killer, math.floor((impact - hrp.Position).Magnitude + 0.5))
+            local pts, wall, wallIdx, tail = simulateArc(origin, aim, spearSpeed, spearGMult, 4)
+            drawArc(pts, wallIdx,
+                aiming and PAL.killer or PAL.muted, aiming and 1 or 0.55,
+                PAL.accent, 0.4)
+            local function away(v)
+                return hrp and math.floor((v - hrp.Position).Magnitude + 0.5) or 0
+            end
+            if wall then
+                marker(1, wall, ("normal  %dm"):format(away(wall)), PAL.killer)
+                marker(2, tail, ("charged  %dm"):format(away(tail)), PAL.accent)
             else
-                impactBB.Enabled = false
+                marker(1, tail, ("lands  %dm"):format(away(tail)), PAL.killer)
+                if markPool[2] then markPool[2].Visible = false end
             end
             drew = true
         end
     end
-    if not drew then hideArc(); impactBB.Enabled = false end
+    if not drew then hideArc(); hideMarkers() end
 
     -- blind meter
     if S.blindMeter then
@@ -1283,11 +1302,10 @@ local function cleanup()
     for _, set in ipairs({ hitRingD or {}, lungeRingD or {}, arcPool }) do
         for _, l in ipairs(set) do pcall(function() l:Remove() end) end
     end
-    hitRingD, lungeRingD, arcPool = nil, nil, {}
+    for _, d in ipairs(markPool) do pcall(function() d:Remove() end) end
+    hitRingD, lungeRingD, arcPool, markPool = nil, nil, {}, {}
     pcall(function() warnGui:Destroy() end)
     pcall(function() blindGui:Destroy() end)
-    pcall(function() impactBB:Destroy() end)
-    pcall(function() impactPart:Destroy() end)
 end
 do
     local g = (getgenv and getgenv()) or nil

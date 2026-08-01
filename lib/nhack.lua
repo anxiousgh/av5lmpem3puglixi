@@ -104,7 +104,10 @@ local Library = {
 
     OpenFrames = {},
     WindowVisibilityBindings = {},
-    WindowOpenState = true,
+    -- [wh] Boots CLOSED. This flag gates the mouse-free RenderPriority.Last
+    -- bind, so leaving it true meant the mouse was force-unlocked from the
+    -- moment the library loaded, before any window was ever shown.
+    WindowOpenState = false,
     InputBlockAction = "NH_UI_INPUT_BLOCK",
     BackgroundEffects = nil,
     BackgroundBlurEnabled = true,

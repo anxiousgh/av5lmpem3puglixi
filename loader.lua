@@ -269,6 +269,16 @@ task.spawn(function()
     Library.__autoloading = nil
 end)
 
-Library:Notification("wrath.cc Loaded", 3, Library.Theme["Accent"])
+-- Start closed. WindowOpenState defaults to true in the library, and the
+-- mouse-free bind runs at RenderPriority.Last, so an open menu wins the
+-- MouseBehavior fight against the game's own look scripts every frame -- which
+-- means injecting mid-round unlocks the mouse and the camera never re-locks
+-- until the menu is closed. Booting closed leaves the game's camera alone;
+-- MenuKeybind opens it when the player actually wants it.
+pcall(function() Library:SetWindowVisibilityState(false) end)
+
+Library:Notification(
+    ("wrath.cc loaded  --  %s for menu"):format((Library.MenuKeybind or "RightAlt"):gsub("^Enum%.KeyCode%.", "")),
+    4, Library.Theme["Accent"])
 
 print("[wh] loaded")
