@@ -145,6 +145,7 @@ local S = {
     aimAssist     = false,   -- Veil: show where to point to hit the nearest survivor
     aimFov        = 400,     -- target search radius around the crosshair, pixels
     aimLead       = true,    -- lead a moving target by its own velocity
+    powerHud      = false,   -- live power attrs + recent power remotes for ANY killer
     aimLock       = false,   -- slew the camera to the solution while the key is held
     lockSmooth    = 0.30,    -- per-1/60s retention; lower = snappier
     lockSnap      = 1.2,     -- within this many degrees, take the exact solution
@@ -888,10 +889,16 @@ local spearCharged = { speed = 220, gmult = 1, seen = false }
 
 -- Persisted next to the measured attack ranges, so a speed only has to be
 -- observed once ever rather than once per session.
-local SPEAR_FILE = "wh_vd_spear.json"
+local learned = {
+    Veil        = { origin = Vector3.new(0, 1.5, 3), seen = false },
+    Cure        = { speed = 95, gmult = 1, origin = Vector3.new(0, 1.5, 2), seen = false },
+    Abysswalker = { speed = 120, gmult = 0, origin = Vector3.new(0, 1.5, 2), seen = false },
+}
+
+local PROJ_FILE = "wh_vd_proj.json"
 do
     local ok, raw = pcall(function()
-        if isfile and isfile(SPEAR_FILE) then return readfile(SPEAR_FILE) end
+        if isfile and isfile(PROJ_FILE) then return readfile(PROJ_FILE) end
     end)
     if ok and raw then
         local ok2, t = pcall(function() return HttpService:JSONDecode(raw) end)
@@ -904,19 +911,35 @@ do
                     prof.seen = v.seen == true
                 end
             end
+            if type(t.learned) == "table" then
+                for name, rec in pairs(t.learned) do
+                    if learned[name] and tonumber(rec.x) then
+                        learned[name].origin = Vector3.new(rec.x, rec.y, rec.z)
+                        learned[name].seen = rec.seen == true
+                        if tonumber(rec.speed) then learned[name].speed = tonumber(rec.speed) end
+                        if tonumber(rec.gmult) then learned[name].gmult = tonumber(rec.gmult) end
+                    end
+                end
+            end
         end
     end
 end
-local function saveSpear()
+local function saveProj()
     if not writefile then return end
     pcall(function()
-        writefile(SPEAR_FILE, HttpService:JSONEncode({
+        local origins = {}
+        for name, rec in pairs(learned) do
+            origins[name] = { x = rec.origin.X, y = rec.origin.Y, z = rec.origin.Z,
+                speed = rec.speed, gmult = rec.gmult, seen = rec.seen }
+        end
+        writefile(PROJ_FILE, HttpService:JSONEncode({
             norm    = { speed = spearNorm.speed,    gmult = spearNorm.gmult,    seen = spearNorm.seen },
             charged = { speed = spearCharged.speed, gmult = spearCharged.gmult, seen = spearCharged.seen },
+            learned = origins,
         }))
     end)
 end
-local liveSpears = {}                   -- { origin, dir, speed, gmult, t0 }
+local liveProj = {}   -- { kind, origin, dir, speed, gmult, life, t0 }
 
 -- Measured live 2026-08-01 on a charged hold: the aura is the "Hitbox" emitter
 -- set (0 / Fire29 / Shining Ripple / Soft Fireflies) -- the same emitters
@@ -939,6 +962,70 @@ local function isCharged(kc)
     local cv = workspace.CurrentCamera
     if scan(cv and cv:FindFirstChild("VM")) then return true end   -- we are the killer
     return scan(kc)                                                -- watching one
+end
+
+-- ============================================================
+--  PROJECTILE PROFILES
+--
+--  Each projectile killer ships its own client handler, and the three differ
+--  enough that one shared guess would be wrong for two of them. Decoded from
+--  those handlers directly:
+--
+--    Veil   PlayerScripts.Mechanics.Veil.ProjectileHandler
+--           Remotes.Mechanics.visualize(char, dir, speed, gmult, id)
+--           ballistic, gravity * gmult, speed learned per charge mode
+--    Cure   PlayerScripts.Mechanics.Cure.Flaskhandler
+--           Remotes.Killers.Cure.VisualizeFlask(origin, target, dir, skin)
+--           ballistic at a FIXED speed 95, full gravity, and the launch vector
+--           is biased upward before normalising: (dir + (0,0.35,0)).Unit
+--    Abyss  PlayerScripts.Mechanics.Abyss.ProjectileHandler
+--           Remotes.Killers.Abysswalker.visualize(originCF, dir, speed)
+--           LINEAR -- no gravity at all -- 3.5s lifetime
+--
+--  Launch origin is not knowable before a throw, so it is learned: every
+--  observed throw reports its true origin, which is stored as an offset in the
+--  thrower's own frame and reused for prediction.
+-- ============================================================
+local PROJ = {
+    Veil = {
+        kind = "ballistic", life = 4,
+        profile = function(kc)
+            local m = isCharged(kc) and spearCharged or spearNorm
+            return m.speed, m.gmult, isCharged(kc)
+        end,
+        launch = function(aim) return aim end,
+    },
+    Cure = {
+        kind = "ballistic", life = 3.2,
+        profile = function() return learned.Cure.speed, learned.Cure.gmult, false end,
+        launch = function(aim) return (aim + Vector3.new(0, 0.35, 0)).Unit end,
+    },
+    Abysswalker = {
+        kind = "linear", life = 3.5,
+        profile = function() return learned.Abysswalker.speed, 0, true end,   -- waves pass terrain
+        launch = function(aim) return aim end,
+    },
+}
+
+local function killerKind(kp)
+    return kp and tostring(kp:GetAttribute("SelectedKiller")) or ""
+end
+local function activeProj(kp)
+    return PROJ[killerKind(kp)]
+end
+
+-- Store an observed launch origin as an offset in the thrower's own frame, so
+-- it stays correct whichever way they are facing next time.
+local function learnOrigin(name, root, worldOrigin)
+    if not (root and worldOrigin and learned[name]) then return end
+    local rel = root.CFrame:PointToObjectSpace(worldOrigin)
+    learned[name].origin = rel
+    learned[name].seen = true
+end
+local function originFor(name, root)
+    local rec = learned[name]
+    local rel = (rec and rec.origin) or Vector3.new(0, 1.5, 2)
+    return root.CFrame:PointToWorldSpace(rel)
 end
 
 local function simulateArc(origin, dir, speed, gmult, maxT)
@@ -978,16 +1065,53 @@ pcall(function()
         local bucket = (speed > 150) and spearCharged or spearNorm
         local changed = (bucket.speed ~= speed) or (bucket.gmult ~= (gmult or 1)) or not bucket.seen
         bucket.speed, bucket.gmult, bucket.seen = speed, gmult or 1, true
-        if changed then saveSpear() end
+        if changed then saveProj() end
         local origin
         local root = char and char:FindFirstChild("HumanoidRootPart")
         if root then
             origin = root.Position + root.CFrame.LookVector * 3 + Vector3.new(0, 1.5, 0)
         end
         if origin then
-            liveSpears[#liveSpears + 1] =
-                { origin = origin, dir = dir.Unit, speed = speed, gmult = gmult or 1, t0 = os.clock(), id = id }
+            learnOrigin("Veil", root, origin)
+            liveProj[#liveProj + 1] = {
+                kind = "Veil", origin = origin, dir = dir.Unit, speed = speed,
+                gmult = gmult or 1, life = 4, t0 = os.clock(), id = id,
+            }
         end
+    end))
+end)
+
+-- Cure and Abysswalker announce their own projectiles; learn each one's real
+-- speed and launch origin from the first throw seen, then reuse them.
+pcall(function()
+    local C = RS_.Remotes.Killers.Cure
+    track(C.VisualizeFlask.OnClientEvent:Connect(function(origin, target, dir, _skin)
+        if typeof(origin) ~= "Vector3" or typeof(dir) ~= "Vector3" then return end
+        local kp = getKillerPlayer()
+        local root = kp and kp.Character and kp.Character:FindFirstChild("HumanoidRootPart")
+        learnOrigin("Cure", root, origin)
+        saveProj()
+        liveProj[#liveProj + 1] = {
+            kind = "Cure", origin = origin, dir = (dir + Vector3.new(0, 0.35, 0)).Unit,
+            speed = 95, gmult = 1, life = 3.2, t0 = os.clock(), target = target,
+        }
+    end))
+end)
+pcall(function()
+    local A = RS_.Remotes.Killers.Abysswalker
+    track(A.visualize.OnClientEvent:Connect(function(cf, dir, speed)
+        if typeof(dir) ~= "Vector3" or type(speed) ~= "number" then return end
+        local origin = (typeof(cf) == "CFrame") and cf.Position or cf
+        if typeof(origin) ~= "Vector3" then return end
+        local kp = getKillerPlayer()
+        local root = kp and kp.Character and kp.Character:FindFirstChild("HumanoidRootPart")
+        learnOrigin("Abysswalker", root, origin)
+        learned.Abysswalker.speed, learned.Abysswalker.seen = speed, true
+        saveProj()
+        liveProj[#liveProj + 1] = {
+            kind = "Abysswalker", origin = origin, dir = dir.Unit,
+            speed = speed, gmult = 0, life = 3.5, t0 = os.clock(),
+        }
     end))
 end)
 
@@ -1060,10 +1184,10 @@ end
 local function stepSpear(hrp, kp, kc, kroot)
     -- a spear already in flight wins over the predicted line
     if S.spearLive then
-        for i = #liveSpears, 1, -1 do
-            local sp = liveSpears[i]
-            if os.clock() - sp.t0 > 4 then
-                table.remove(liveSpears, i)
+        for i = #liveProj, 1, -1 do
+            local sp = liveProj[i]
+            if os.clock() - sp.t0 > (sp.life or 4) then
+                table.remove(liveProj, i)
             else
                 -- in-flight spears have declared their mode: the aura
                 -- (speed > 150) phases through walls, anything slower stops
@@ -1078,23 +1202,28 @@ local function stepSpear(hrp, kp, kc, kroot)
             end
         end
     end
-    if not (S.spearLine and kc and kroot) then return end
-    local aiming = kc:GetAttribute("spearmode") == true
-    local ammo = tonumber(kc:GetAttribute("Spears")) or 0
-    if not ((aiming or S.spearAlways) and ammo > 0) then return end
+    if not (S.spearLine and kc and kroot and kp) then return end
+    local pr = activeProj(kp)
+    if not pr then return end            -- this killer throws nothing
+    local isVeil = killerKind(kp) == "Veil"
+    -- Only Veil advertises an aim state (spearmode) and an ammo count; the
+    -- others give no pre-throw tell, so their line is simply always drawn.
+    local aiming = (not isVeil) or (kc:GetAttribute("spearmode") == true)
+    if isVeil then
+        local ammo = tonumber(kc:GetAttribute("Spears")) or 0
+        if not ((aiming or S.spearAlways) and ammo > 0) then return end
+    end
 
     -- Origin always tracks HRP facing (that is what ProjectileHandler uses),
     -- but the throw direction is the thrower's camera. Ours is exact; another
     -- killer's is only their replicated body facing.
-    local origin = kroot.Position + kroot.CFrame.LookVector * 3 + Vector3.new(0, 1.5, 0)
+    local origin = originFor(killerKind(kp), kroot)
     local aim = kroot.CFrame.LookVector
     if kp == LocalPlayer and cam then aim = cam.CFrame.LookVector end
 
-    -- The aura says which throw is coming, so predict THAT one rather than
-    -- hedging with both legs.
-    local charged = isCharged(kc)
-    local prof = charged and spearCharged or spearNorm
-    local pts, wall, wallIdx, tail, wallT, tailT = simulateArc(origin, aim, prof.speed, prof.gmult, 4)
+    local speed, gmult, charged = pr.profile(kc)
+    local pts, wall, wallIdx, tail, wallT, tailT =
+        simulateArc(origin, pr.launch(aim), speed, gmult, pr.life)
 
     local col = charged and PAL.accent or PAL.killer
     local live = aiming and 1 or 0.6
@@ -1134,6 +1263,11 @@ end
 local function solveAim(origin, target, speed, gmult)
     local g = workspace.Gravity * (gmult or 1)
     local d = target - origin
+    if g <= 0 then                       -- linear (Abysswalker): no arc to solve
+        local dist = d.Magnitude
+        if dist < 0.05 or speed <= 0 then return nil end
+        return d.Unit, dist / speed
+    end
     local flat = Vector3.new(d.X, 0, d.Z)
     local x = flat.Magnitude
     if x < 0.05 or speed <= 0 then return nil end
@@ -1184,13 +1318,16 @@ end
 -- never disagree about where the shot goes.
 local function aimSolution(kc, kroot)
     if not (kc and kroot and cam) then return nil end
-    if (tonumber(kc:GetAttribute("Spears")) or 0) <= 0 then return nil end
+    local kp = getKillerPlayer()
+    local pr = activeProj(kp)
+    if not pr then return nil end
+    if killerKind(kp) == "Veil" and (tonumber(kc:GetAttribute("Spears")) or 0) <= 0 then return nil end
     local target = pickTarget()
     if not target then return nil end
-    local charged = isCharged(kc)
-    local prof = charged and spearCharged or spearNorm
-    local origin = kroot.Position + kroot.CFrame.LookVector * 3 + Vector3.new(0, 1.5, 0)
-    local dir, flight, aimAt = solveLead(origin, target, prof.speed, prof.gmult)
+    local speed, gmult, charged = pr.profile(kc)
+    local prof = { speed = speed, gmult = gmult }
+    local origin = originFor(killerKind(kp), kroot)
+    local dir, flight, aimAt = solveLead(origin, target, speed, gmult)
     return {
         target = target, charged = charged, prof = prof, origin = origin,
         dir = dir, flight = flight, aimAt = aimAt,   -- dir nil = out of range
@@ -1274,6 +1411,86 @@ pcall(function()
     RunService:BindToRenderStep(LOCK_BIND, Enum.RenderPriority.Last.Value, stepAimLock)
 end)
 
+-- ============================================================
+--  KILLER POWER READOUT
+--
+--  Stalker, Masked, Hidden, Slasher, Jason and the base Killer have no
+--  projectile to predict; what is worth seeing is their power state. Rather
+--  than hardcode six killers, this reads whatever the ACTIVE killer puts on its
+--  own character: every attribute that is not part of the shared baseline is by
+--  definition power-specific (that is exactly how Veil's Spears / spearmode
+--  showed up), so new killers and reworks are picked up for free.
+--
+--  Power remotes are watched the same way -- everything under
+--  Remotes.Killers.<killer> -- and the most recent firing is timestamped, which
+--  is what turns a cooldown into something you can actually read.
+-- ============================================================
+local BASE_ATTRS = {
+    Speed = true, IsChasing = true, ChaseTargetUserId = true, TerrorRadius = true,
+    SuspenseRadius = true, BloodLust = true, HookCount = true, HookedProgress = true,
+    Knocked = true, breakspeed = true, speedboost = true, Chasemusic = true,
+    Suspense = true, IsCarrying = true, IsCarried = true, IsStunned = true,
+    Immobile = true, overridelookscript = true, swift = true, special = true,
+    anticamp = true, IsHooked = true, HookProgressDepleting = true,
+}
+
+local powerEvents, powerConns, powerWatched = {}, {}, nil
+local function watchPower(kind)
+    if powerWatched == kind then return end
+    powerWatched = kind
+    for _, c in ipairs(powerConns) do pcall(function() c:Disconnect() end) end
+    powerConns, powerEvents = {}, {}
+    local folder = RS_.Remotes:FindFirstChild("Killers")
+    folder = folder and folder:FindFirstChild(kind)
+    if not folder then return end
+    for _, r in ipairs(folder:GetDescendants()) do
+        if r:IsA("RemoteEvent") then
+            local ok, c = pcall(function()
+                return r.OnClientEvent:Connect(function()
+                    powerEvents[r.Name] = os.clock()
+                end)
+            end)
+            if ok and c then powerConns[#powerConns + 1] = c end
+        end
+    end
+end
+
+local function powerLines(kc)
+    local attrs, events = {}, {}
+    if kc then
+        for k, v in pairs(kc:GetAttributes()) do
+            if not BASE_ATTRS[k] then
+                attrs[#attrs + 1] = ("%s=%s"):format(k, tostring(v))
+            end
+        end
+        table.sort(attrs)
+    end
+    for name, t in pairs(powerEvents) do
+        events[#events + 1] = { name, os.clock() - t }
+    end
+    table.sort(events, function(a, b) return a[2] < b[2] end)
+    return attrs, events
+end
+
+local function stepPowerHud(kp, kc)
+    if not (S.powerHud and cam and kc) then return end
+    local attrs, events = powerLines(kc)
+    if #attrs == 0 and #events == 0 then return end
+    local vp = cam.ViewportSize
+    local x, y = 14, vp.Y * 0.32
+    dText(Vector2.new(x, y), ("%s"):format(killerKind(kp) ~= "" and killerKind(kp) or "killer"),
+        PAL.killer, 14, false)
+    y = y + 16
+    for i = 1, math.min(#attrs, 10) do
+        dText(Vector2.new(x, y), attrs[i], PAL.text, 12, false)
+        y = y + 13
+    end
+    for i = 1, math.min(#events, 4) do
+        dText(Vector2.new(x, y), ("%s  %.1fs ago"):format(events[i][1], events[i][2]), PAL.accent, 12, false)
+        y = y + 13
+    end
+end
+
 local function stepBlind(dt, hrp, kc, kroot)
     if not S.blindMeter then
         blindHold = 0
@@ -1344,6 +1561,8 @@ track(RunService.RenderStepped:Connect(function(dt)
     stepRings(hrp, kp, kroot)
     stepSpear(hrp, kp, kc, kroot)
     stepAimAssist(hrp, kp, kc, kroot)
+    if kp then watchPower(killerKind(kp)) end
+    stepPowerHud(kp, kc)
     stepBlind(dt, hrp, kc, kroot)
     stepChaseWarn()
     frameEnd()
@@ -1429,6 +1648,12 @@ track(RunService.Heartbeat:Connect(function()
                 or ("Measured: none yet -- showing est %d / %d"):format(DEF_HIT, DEF_LUNGE))
         end
 
+        if intelLabels.power then
+            local attrs, events = powerLines(kc)
+            intelLabels.power:SetText(("Power: %s"):format(
+                #attrs > 0 and table.concat(attrs, "  ", 1, math.min(#attrs, 4)) or "-"))
+        end
+
         if intelLabels.spear then
             if kc and kc:GetAttribute("Spears") ~= nil then
                 intelLabels.spear:SetText(("Spear: %s ammo   %s   speed %s")
@@ -1441,7 +1666,8 @@ track(RunService.Heartbeat:Connect(function()
                                 prof.seen and "" or "~", prof.speed)
                         end)()))
             else
-                intelLabels.spear:SetText("Spear: - (not Veil)")
+                intelLabels.spear:SetText(("Projectile: %s"):format(
+                    activeProj(kp) and (killerKind(kp) .. " (predicted)") or "none for this killer"))
             end
         end
     end
@@ -1555,7 +1781,7 @@ do
         saveRanges()
         spearNorm.speed, spearNorm.gmult, spearNorm.seen = 150, 1, false
         spearCharged.speed, spearCharged.gmult, spearCharged.seen = 220, 1, false
-        saveSpear()
+        saveProj()
         pcall(function() Library:Notification("Measured ranges + spear speeds cleared", 3, PAL.accent) end)
     end })
 
@@ -1567,6 +1793,11 @@ do
     SpSec:Toggle({ Name = "Live spear arc", Flag = "VD_SpearLive", Default = false,
         Callback = function(v) S.spearLive = v end })
     intelLabels.spear = SpSec:Label({ Name = "Spear: -" })
+
+    local PwSec = Read:Section({ Name = "Power readout", Side = 1 })
+    PwSec:Toggle({ Name = "Killer power HUD", Flag = "VD_PowerHud", Default = false,
+        Callback = function(v) S.powerHud = v end })
+    intelLabels.power = PwSec:Label({ Name = "Power: -" })
 
     local ASec = Read:Section({ Name = "Spear aim assist", Side = 2 })
     ASec:Toggle({ Name = "Show aim solution", Flag = "VD_AimAssist", Default = false,
@@ -1632,7 +1863,8 @@ local function cleanup()
         false, false, false, false, false, false
     S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
         false, false, false, false, false, false
-    S.aimAssist, S.aimLock, lockHeld = false, false, false
+    S.aimAssist, S.aimLock, lockHeld, S.powerHud = false, false, false, false
+    for _, c in ipairs(powerConns) do pcall(function() c:Disconnect() end) end
     pcall(function() RunService:UnbindFromRenderStep(LOCK_BIND) end)
     chaseFlash = false
     pcall(function() Library.MouseRestoreHook = nil end)
