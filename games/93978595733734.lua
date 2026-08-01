@@ -143,6 +143,12 @@ local S = {
     spearAlways   = false,   -- draw the predicted arc even outside spearmode
     blindMeter    = false,   -- flashlight blind progress + fuel
     powerHud      = false,   -- live power attrs + recent power remotes for ANY killer
+    aimMarker     = false,   -- draw the intercept + where the crosshair must go
+    aimLock       = false,   -- steer the camera onto the solution while held
+    aimLead       = true,    -- lead a moving target
+    aimFov        = 400,     -- target search radius around the crosshair, px
+    lockSmooth    = 0.30,    -- per-1/60s retention; lower = snappier
+    lockSnap      = 1.2,     -- inside this angle, apply the full correction
     blindCone     = 20,      -- half-angle (deg) the beam counts as "on target"
     blindRange    = 60,      -- studs
     espBox        = true,    -- draw the 2D bounding box
@@ -1278,6 +1284,241 @@ local function stepSpear(hrp, kp, kc, kroot)
 end
 
 -- ============================================================
+--  AIM SOLVER + SOFT LOCK
+--
+--  Rebuilt against MEASURED physics. The first attempt aimed high on every shot
+--  because it ran before any throw had been observed, so it assumed gmult 1 --
+--  the spear actually falls at 0.5 gravity, which makes the real drop half of
+--  what it was solving for. Nothing here runs until the projectile has been
+--  seen at least once; it says so instead of guessing.
+--
+--  Drop: for a fixed launch speed the elevation is closed form,
+--      tan(theta) = (v^2 - sqrt(v^4 - g*(g*x^2 + 2*y*v^2))) / (g*x)
+--  with g = workspace.Gravity * gmult, x the horizontal distance and y the
+--  height difference. The minus root is the flatter arc. Negative discriminant
+--  means genuinely out of range.
+--
+--  Movement: the target's own velocity, differenced from its position (the
+--  replicated AssemblyLinearVelocity reads zero for remote characters), then
+--  iterated to a fixed point -- aim, read the flight time, re-aim where they
+--  will be by then -- because the flight time itself depends on the lead.
+-- ============================================================
+local function ballisticDir(origin, target, speed, gmult)
+    if speed <= 0 then return nil end
+    local g = workspace.Gravity * (gmult or 1)
+    local d = target - origin
+    if g <= 0 then                                  -- linear projectile
+        local dist = d.Magnitude
+        if dist < 1e-3 then return nil end
+        return d.Unit, dist / speed
+    end
+    local flat = Vector3.new(d.X, 0, d.Z)
+    local x = flat.Magnitude
+    if x < 1e-3 then return nil end
+    local v2 = speed * speed
+    local disc = v2 * v2 - g * (g * x * x + 2 * d.Y * v2)
+    if disc < 0 then return nil end
+    local tanT = (v2 - math.sqrt(disc)) / (g * x)
+    return (flat.Unit + Vector3.new(0, tanT, 0)).Unit,
+        x / (speed * math.cos(math.atan(tanT)))
+end
+
+local velTrack = setmetatable({}, { __mode = "k" })
+local function targetVelocity(part)
+    local now, pos = os.clock(), part.Position
+    local rec = velTrack[part]
+    if not rec then
+        velTrack[part] = { pos = pos, t = now, vel = Vector3.zero }
+        return Vector3.zero
+    end
+    local dt = now - rec.t
+    if dt >= 0.03 then
+        local raw = (pos - rec.pos) / dt
+        rec.vel = rec.vel:Lerp(Vector3.new(raw.X, 0, raw.Z), 0.4)
+        rec.pos, rec.t = pos, now
+    end
+    return rec.vel
+end
+
+-- Fixed-point intercept: flight time sets the lead, and the lead sets the
+-- flight time, so iterate until the aim point stops moving.
+local function solveIntercept(origin, part, speed, gmult)
+    local vel = S.aimLead and targetVelocity(part) or Vector3.zero
+    local aimAt = part.Position
+    local dir, flight
+    for _ = 1, 6 do
+        local nd, nf = ballisticDir(origin, aimAt, speed, gmult)
+        if not nd then return nil end
+        dir, flight = nd, nf
+        local nextAim = part.Position + vel * nf
+        local moved = (nextAim - aimAt).Magnitude
+        aimAt = nextAim
+        if moved < 0.05 then break end
+    end
+    return dir, flight, aimAt
+end
+
+-- Integrate the solved shot and report how close it really passes. If the
+-- solver and the simulation disagree the number says so, instead of the lock
+-- quietly pointing somewhere wrong.
+local function missDistance(origin, dir, speed, gmult, aimAt, life)
+    local p, v = origin, dir * speed
+    local dt, t, best = 1 / 60, 0, math.huge
+    while t < (life or 4) do
+        v = v + Vector3.new(0, -(workspace.Gravity * dt) * gmult, 0)
+        p = p + v * dt
+        local m = (p - aimAt).Magnitude
+        if m < best then best = m end
+        t = t + dt
+    end
+    return best
+end
+
+local function pickTarget()
+    if not cam then return nil end
+    local centre = cam.ViewportSize / 2
+    local best, bestD
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and isSurvivor(p) then
+            local c = p.Character
+            local hum = c and c:FindFirstChildOfClass("Humanoid")
+            local root = c and c:FindFirstChild("HumanoidRootPart")
+            if root and hum and hum.Health > 0 and not c:GetAttribute("Knocked") then
+                local sp, on = cam:WorldToViewportPoint(root.Position)
+                if on then
+                    local d = (Vector2.new(sp.X, sp.Y) - centre).Magnitude
+                    if d <= S.aimFov and (not bestD or d < bestD) then best, bestD = root, d end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- nil when there is nothing to shoot; .calibrating when the physics is unknown
+local function aimSolution(kp, kc, kroot)
+    if not (cam and kp and kc and kroot) then return nil end
+    local pr = activeProj(kp)
+    if not pr then return nil end
+    local kind = killerKind(kp)
+    if kind == "Veil" and (tonumber(kc:GetAttribute("Spears")) or 0) <= 0 then return nil end
+    local speed, gmult, charged = pr.profile(kc)
+    local measured = (kind == "Veil")
+        and (charged and spearCharged.seen or spearNorm.seen)
+        or (learned[kind] and learned[kind].seen)
+    if not measured then return { calibrating = true, charged = charged } end
+    local target = pickTarget()
+    if not target then return nil end
+    local origin = originFor(kind, kroot)
+    local dir, flight, aimAt = solveIntercept(origin, target, speed, gmult)
+    if not dir then return { outOfRange = true } end
+    return {
+        dir = dir, flight = flight, aimAt = aimAt, origin = origin,
+        charged = charged, speed = speed, gmult = gmult, life = pr.life,
+        miss = missDistance(origin, dir, speed, gmult, aimAt, pr.life),
+    }
+end
+
+local LOCK_BIND = "wh_vd_aimlock"
+local lockHeld = false
+
+-- CameraType is Custom, so Roblox's camera module owns the CFrame and rebuilds
+-- it every frame from its own yaw/pitch. Writing cam.CFrame is overwritten on
+-- the next frame, every frame, which is what made the first version shudder.
+-- Steering the mouse feeds the same path the player uses, so the camera module
+-- does the turning and there is nothing to fight. Pixels-per-radian varies with
+-- sensitivity and FOV, so it is calibrated from the loop: compare the turn
+-- asked for last frame with the turn actually delivered.
+local pxPerRad, lastAsk = 900, nil
+local lockState = "idle"
+
+local function stepAimLock(dt)
+    if not (S.aimLock and lockHeld and cam) then
+        lastAsk, lockState = nil, "idle"
+        return
+    end
+    local kp = getKillerPlayer()
+    if kp ~= LocalPlayer then
+        lastAsk = nil
+        return
+    end
+    local kc = kp.Character
+    local kroot = kc and kc:FindFirstChild("HumanoidRootPart")
+    local sol = aimSolution(kp, kc, kroot)
+    if not sol then
+        lastAsk, lockState = nil, "no target"
+        return
+    end
+    if sol.calibrating then
+        lastAsk, lockState = nil, "calibrating"
+        return
+    end
+    if sol.outOfRange then
+        lastAsk, lockState = nil, "out of range"
+        return
+    end
+    lockState = ("locked  miss %.1fm"):format(sol.miss or 0)
+
+    local rel = cam.CFrame:VectorToObjectSpace(sol.dir)
+    local yaw = math.atan2(rel.X, -rel.Z)
+    local pitch = math.asin(math.clamp(rel.Y / math.max(rel.Magnitude, 1e-6), -1, 1))
+
+    if lastAsk and math.abs(lastAsk.dx) > 2 then
+        local turned = lastAsk.yaw - yaw
+        if math.abs(turned) > 1e-4 then
+            local est = math.abs(lastAsk.dx / turned)
+            if est > 40 and est < 6000 then pxPerRad = pxPerRad * 0.85 + est * 0.15 end
+        end
+    end
+
+    local err = math.max(math.abs(yaw), math.abs(pitch))
+    local frac = (err <= math.rad(S.lockSnap)) and 1
+        or math.clamp(1 - (S.lockSmooth ^ (dt * 60)), 0, 1)
+    local cap = 220
+    local dx = math.clamp(yaw * frac * pxPerRad, -cap, cap)
+    local dy = math.clamp(-pitch * frac * pxPerRad, -cap, cap)
+
+    if mousemoverel then
+        pcall(mousemoverel, dx, dy)
+        lastAsk = { dx = dx, dy = dy, yaw = yaw, pitch = pitch }
+    else
+        local pos = cam.CFrame.Position
+        cam.CFrame = cam.CFrame:Lerp(CFrame.lookAt(pos, pos + sol.dir), frac)
+        lastAsk = nil
+    end
+end
+pcall(function()
+    RunService:BindToRenderStep(LOCK_BIND, Enum.RenderPriority.Camera.Value + 1, stepAimLock)
+end)
+
+local function stepAimMarker(kp, kc, kroot)
+    if not (S.aimMarker and kp == LocalPlayer and cam) then return end
+    local sol = aimSolution(kp, kc, kroot)
+    if not sol then return end
+    local centre = cam.ViewportSize / 2
+    if sol.calibrating then
+        dText(Vector2.new(centre.X, centre.Y + 34),
+            "aim: calibrating -- throw one " .. (sol.charged and "charged" or "normal") .. " shot",
+            PAL.muted, 13, true)
+        return
+    end
+    if sol.outOfRange then
+        dText(Vector2.new(centre.X, centre.Y + 34), "aim: out of range", PAL.muted, 13, true)
+        return
+    end
+    local col = sol.charged and PAL.accent or PAL.killer
+    landingMark(sol.aimAt, ("INTERCEPT  %.2fs  miss %.1fm"):format(sol.flight, sol.miss), col, 1)
+    local mp, on = cam:WorldToViewportPoint(cam.CFrame.Position + sol.dir * 60)
+    if on then
+        local at = Vector2.new(mp.X, mp.Y)
+        dLine(centre, at, col, 0.45, 1)
+        local r = 7
+        dLine(at - Vector2.new(r, 0), at + Vector2.new(r, 0), col, 1, 2)
+        dLine(at - Vector2.new(0, r), at + Vector2.new(0, r), col, 1, 2)
+    end
+end
+
+-- ============================================================
 --  KILLER POWER READOUT
 --
 --  Stalker, Masked, Hidden, Slasher, Jason and the base Killer have no
@@ -1426,6 +1667,7 @@ track(RunService.RenderStepped:Connect(function(dt)
     stepObjEsp(hrp)
     stepRings(hrp, kp, kroot)
     stepSpear(hrp, kp, kc, kroot)
+    stepAimMarker(kp, kc, kroot)
     if kp then watchPower(killerKind(kp)) end
     stepPowerHud(kp, kc)
     stepBlind(dt, hrp, kc, kroot)
@@ -1512,6 +1754,8 @@ track(RunService.Heartbeat:Connect(function()
                 and ("Measured: hit %.1f  lunge %.1f  (%d hits)"):format(hitR, lungeR, n)
                 or ("Measured: none yet -- showing est %d / %d"):format(DEF_HIT, DEF_LUNGE))
         end
+
+        if intelLabels.lock then intelLabels.lock:SetText("Lock: " .. lockState) end
 
         if intelLabels.power then
             local attrs = powerLines(kc)
@@ -1664,6 +1908,23 @@ do
         Callback = function(v) S.powerHud = v end })
     intelLabels.power = PwSec:Label({ Name = "Power: -" })
 
+    local ASec = Read:Section({ Name = "Aim", Side = 2 })
+    ASec:Toggle({ Name = "Intercept marker", Flag = "VD_AimMarker", Default = false,
+        Callback = function(v) S.aimMarker = v end })
+    ASec:Toggle({ Name = "Soft aim lock", Flag = "VD_AimLock", Default = false,
+        Callback = function(v) S.aimLock = v end })
+    ASec:Label({ Name = "Aim lock key" }):Keybind({ Name = "Soft aim lock", Flag = "VD_AimLockKey",
+        Mode = "Hold", Callback = function(st) lockHeld = st and true or false end })
+    ASec:Toggle({ Name = "Lead moving targets", Flag = "VD_AimLead", Default = true,
+        Callback = function(v) S.aimLead = v end })
+    ASec:Slider({ Name = "Target FOV", Flag = "VD_AimFov", Min = 80, Max = 1200, Default = 400,
+        Decimals = 0, Suffix = " px", Callback = function(v) S.aimFov = v end })
+    ASec:Slider({ Name = "Smoothing", Flag = "VD_LockSmooth", Min = 0, Max = 90, Default = 30,
+        Decimals = 0, Suffix = " %", Callback = function(v) S.lockSmooth = v / 100 end })
+    ASec:Slider({ Name = "Snap within", Flag = "VD_LockSnap", Min = 0, Max = 6, Default = 1.2,
+        Decimals = 1, Suffix = " deg", Callback = function(v) S.lockSnap = v end })
+    intelLabels.lock = ASec:Label({ Name = "Lock: idle" })
+
     -- ---------- intel ----------
     local Intel = Page:SubPage({ Name = "Intel" })
 
@@ -1712,7 +1973,8 @@ local function cleanup()
         false, false, false, false, false, false
     S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
         false, false, false, false, false, false
-    S.powerHud = false
+    S.powerHud, S.aimMarker, S.aimLock, lockHeld = false, false, false, false
+    pcall(function() RunService:UnbindFromRenderStep(LOCK_BIND) end)
     for _, c in ipairs(powerConns) do pcall(function() c:Disconnect() end) end
     chaseFlash = false
     pcall(function() Library.MouseRestoreHook = nil end)
