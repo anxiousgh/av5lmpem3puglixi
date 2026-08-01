@@ -871,18 +871,29 @@ do
             UserInputService.MouseBehavior = Enum.MouseBehavior.Default
             UserInputService.MouseIconEnabled = false
         elseif WasOpen and not Library.WindowOpenState and Library.MouseStateBeforeOpen then
-            UserInputService.MouseIconEnabled = Library.MouseStateBeforeOpen.MouseIconEnabled ~= false
-            -- [wh] Put LockCenter back, because a first-person game (Violence
-            -- District) locks once and does NOT rewrite MouseBehavior every
-            -- frame -- leaving Default here left the cursor loose for the rest
-            -- of the round. LockCurrentPosition is deliberately NOT restored:
-            -- if the menu was opened mid-RMB-hold, re-applying it after the
-            -- camera saw the release traps the camera in drag mode forever.
-            if Library.MouseStateBeforeOpen.MouseBehavior == Enum.MouseBehavior.LockCenter then
-                UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-            else
-                UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+            -- [wh] Ask the active game module what the mouse should be RIGHT
+            -- NOW. The value captured at open goes stale as soon as the context
+            -- changes underneath an open menu: opening in the lobby (Default)
+            -- and closing after the round started handed the player a free
+            -- cursor mid-match. A first-person game (Violence District) also
+            -- locks once and never rewrites MouseBehavior, so it cannot repair
+            -- a wrong guess by itself.
+            local Want
+            if Library.MouseRestoreHook then
+                local Ok, Result = pcall(Library.MouseRestoreHook)
+                if Ok then Want = Result end
             end
+            if Want == nil then
+                -- LockCurrentPosition is deliberately never restored: re-applying
+                -- it after the camera saw the RMB release traps the camera in drag.
+                Want = (Library.MouseStateBeforeOpen.MouseBehavior == Enum.MouseBehavior.LockCenter)
+                    and Enum.MouseBehavior.LockCenter
+                    or Enum.MouseBehavior.Default
+            end
+            UserInputService.MouseBehavior = Want
+            UserInputService.MouseIconEnabled = (Want ~= Enum.MouseBehavior.LockCenter)
+                and (Library.MouseStateBeforeOpen.MouseIconEnabled ~= false)
+                or false
             Library.MouseStateBeforeOpen = nil
         end
 

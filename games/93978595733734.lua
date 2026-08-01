@@ -146,6 +146,24 @@ local S = {
 }
 
 -- ============================================================
+--  MOUSE POLICY
+--
+--  The menu can be opened in the lobby and closed mid-round, which makes the
+--  mouse state the library captured at open-time stale. This game locks the
+--  cursor once on spawn and never rewrites MouseBehavior, so it cannot repair a
+--  wrong restore by itself -- tell the library what it should be right now.
+-- ============================================================
+pcall(function()
+    Library.MouseRestoreHook = function()
+        local t = teamName(LocalPlayer)
+        if LocalPlayer.Character and (t == "Killer" or t == "Survivors") then
+            return Enum.MouseBehavior.LockCenter
+        end
+        return Enum.MouseBehavior.Default
+    end
+end)
+
+-- ============================================================
 --  DRAW LAYER
 --
 --  Every visual in this module is a Drawing object -- no Highlight, no
@@ -864,7 +882,7 @@ local function simulateArc(origin, dir, speed, gmult, maxT)
     local kp = getKillerPlayer()
     if kp and kp.Character then ignore[#ignore + 1] = kp.Character end
     rp.FilterDescendantsInstances = ignore
-    local wallHit, wallIdx
+    local wallHit, wallIdx, wallT
     while t < (maxT or 4) do
         v = v + Vector3.new(0, -(workspace.Gravity * dt) * gmult, 0)
         local np = p + v * dt
@@ -873,7 +891,7 @@ local function simulateArc(origin, dir, speed, gmult, maxT)
             if hit then
                 wallHit = hit.Position
                 pts[#pts + 1] = hit.Position
-                wallIdx = #pts
+                wallIdx, wallT = #pts, t
             end
         end
         p = np
@@ -882,7 +900,7 @@ local function simulateArc(origin, dir, speed, gmult, maxT)
         t = t + dt
     end
     pts[#pts + 1] = p
-    return pts, wallHit, wallIdx, p
+    return pts, wallHit, wallIdx, p, wallT, t
 end
 
 pcall(function()
@@ -955,6 +973,18 @@ local function stepRings(hrp, kp, kroot)
     if S.lungeRing then dRing(base, lungeR * k, PAL.accent, 0.75) end
 end
 
+-- A landing point needs to read as a place on the ground, not a floating word:
+-- a reticle ring where it lands, a stalk connecting it to the arc so the height
+-- is unambiguous, and the label above that.
+local function landingMark(pos, label, col, alpha)
+    dRing(pos, 2.2, col, alpha)
+    dRing(pos, 0.7, col, alpha)
+    local a, b = toScreen(pos + Vector3.new(0, 4, 0)), toScreen(pos)
+    if a and b then dLine(a, b, col, alpha, 1) end
+    local t = toScreen(pos + Vector3.new(0, 5.4, 0))
+    if t then dText(t, label, col, 15, true) end
+end
+
 local function stepSpear(hrp, kp, kc, kroot)
     -- a spear already in flight wins over the predicted line
     if S.spearLive then
@@ -966,11 +996,11 @@ local function stepSpear(hrp, kp, kc, kroot)
                 -- in-flight spears have declared their mode: the aura
                 -- (speed > 150) phases through walls, anything slower stops
                 local phasing = sp.speed > 150
-                local pts, wall, wallIdx = simulateArc(sp.origin, sp.dir, sp.speed, sp.gmult, 4)
+                local pts, wall, wallIdx, tail, wallT = simulateArc(sp.origin, sp.dir, sp.speed, sp.gmult, 4)
                 dPath(pts, (not phasing) and wallIdx or nil, PAL.killer, 1, PAL.muted, 0.35)
-                if wall and not phasing then
-                    local pt = toScreen(wall)
-                    if pt then dText(pt, "impact", PAL.killer, 13, true) end
+                local land = (not phasing) and wall or tail
+                if land then
+                    landingMark(land, wallT and ("impact  %.2fs"):format(wallT) or "impact", PAL.killer, 1)
                 end
                 return
             end
@@ -988,19 +1018,19 @@ local function stepSpear(hrp, kp, kc, kroot)
     local aim = kroot.CFrame.LookVector
     if kp == LocalPlayer and cam then aim = cam.CFrame.LookVector end
 
-    local pts, wall, wallIdx, tail = simulateArc(origin, aim, spearSpeed, spearGMult, 4)
+    local pts, wall, wallIdx, tail, wallT, tailT = simulateArc(origin, aim, spearSpeed, spearGMult, 4)
     dPath(pts, wallIdx, aiming and PAL.killer or PAL.muted, aiming and 1 or 0.55, PAL.accent, 0.4)
 
     local function away(v)
         return hrp and math.floor((v - hrp.Position).Magnitude + 0.5) or 0
     end
+    local live = aiming and 1 or 0.6
     if wall then
-        local a, b = toScreen(wall), toScreen(tail)
-        if a then dText(a, ("normal  %dm"):format(away(wall)), PAL.killer, 13, true) end
-        if b then dText(b, ("charged  %dm"):format(away(tail)), PAL.accent, 13, true) end
+        -- normal spear stops here; the charged one carries on to the tail
+        landingMark(wall, ("LANDS  %dm  %.2fs"):format(away(wall), wallT or 0), PAL.killer, live)
+        landingMark(tail, ("charged  %dm  %.2fs"):format(away(tail), tailT or 0), PAL.accent, live * 0.55)
     else
-        local a = toScreen(tail)
-        if a then dText(a, ("lands  %dm"):format(away(tail)), PAL.killer, 13, true) end
+        landingMark(tail, ("LANDS  %dm  %.2fs"):format(away(tail), tailT or 0), PAL.killer, live)
     end
 end
 
@@ -1323,6 +1353,7 @@ local function cleanup()
     S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
         false, false, false, false, false, false
     chaseFlash = false
+    pcall(function() Library.MouseRestoreHook = nil end)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, list in pairs(DPOOL) do
         for _, d in ipairs(list) do pcall(function() d:Remove() end) end
