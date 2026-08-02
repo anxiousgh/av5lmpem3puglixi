@@ -134,6 +134,12 @@ local S = {
     autoUnhook    = false,   -- hooked: rescue-spoof our own hook + self-unhook rolls
     repairAlert   = false,   -- killer side: notify when a gen starts being repaired
     fastVault     = false,   -- every vault counts as a running (fast) vault
+    itemPick      = "Auto",  -- "Auto" reads the EquippedItem attribute
+    autoParry     = false,   -- Parrying Dagger: right-click on the killer's tell
+    parryLunge    = true,    -- react to Remotes.Attacks.Lunge
+    parryReach    = 115,     -- % of the MEASURED hit reach that counts as danger
+    parryCone     = 50,      -- killer must be facing us within this half-angle
+    itemEsp       = false,   -- show what item each survivor is carrying
     moonwalk      = false,   -- alternate the strafe keys so the stride never lands
     moonRate      = 70,      -- ms each strafe key is held before swapping
     moonWalking   = true,    -- only while the player is actually holding W or S
@@ -408,6 +414,14 @@ local function stepPlayerEsp(hrp)
                         end
                         local hooks = c:GetAttribute("HookCount") or 0
                         if hooks > 0 then lines[#lines + 1] = { ("%dx hooked"):format(hooks), PAL.muted } end
+                    end
+                    -- the loadout item is on the player, not the character, and
+                    -- it is readable before they ever use it
+                    if S.itemEsp and not killer then
+                        local it = p:GetAttribute("EquippedItem")
+                        if type(it) == "string" and it ~= "" then
+                            lines[#lines + 1] = { it, PAL.accent }
+                        end
                     end
                     if S.espDist then lines[#lines + 1] = { ("%dm"):format(dist), PAL.muted } end
                     textStack(cx, y + h + 3, lines)
@@ -949,6 +963,125 @@ local function watchSelf(char)
 end
 watchSelf(LocalPlayer.Character)
 track(LocalPlayer.CharacterAdded:Connect(watchSelf))
+
+-- ============================================================
+--  SURVIVOR ITEMS
+--
+--  The loadout item is readable straight off the player as the EquippedItem
+--  attribute, and -- usefully -- it is readable on EVERY player, not just us,
+--  so the killer can see what each survivor is carrying before they use it.
+--  That attribute is the auto-detect; the dropdown overrides it for the case
+--  where it is wrong or where you want to arm a script early.
+--
+--  Every item activates the same way: ParryClient binds its use to
+--  MouseButton2 on PC (ButtonL2 on console), so a script per item is only a
+--  question of WHEN to press, never how. `use` is therefore shared and each
+--  entry supplies a condition.
+-- ============================================================
+local ITEM_NAMES = {
+    "Adrenaline Shot", "Bandage", "Flashlight", "Gate", "Holy Water",
+    "Motion Tracker", "Parrying Dagger", "Riot Shield", "Shadow Clone",
+    "Twist of Fate", "WaxBound Candle",
+}
+
+local function equippedItem(p)
+    local v = p and p:GetAttribute("EquippedItem")
+    return (type(v) == "string" and v ~= "") and v or nil
+end
+local function activeItem()
+    if S.itemPick ~= "Auto" then return S.itemPick end
+    return equippedItem(LocalPlayer)
+end
+
+-- ---------- Parrying Dagger ----------
+-- Two tells, because they cover different attacks. A lunge announces itself on
+-- Remotes.Attacks.Lunge before it lands, which is the honest signal and the
+-- one worth reacting to. A basic swing announces nothing at all, so the only
+-- thing left is geometry: the killer inside the reach this module has already
+-- measured for that specific killer, and facing us. Using the measured reach
+-- rather than a guessed number is the point -- it is per killer and it came
+-- from real swings that actually connected.
+local parryUntilCd, parryLastWord, lastParryAt = 0, "", 0
+
+pcall(function()
+    local dag = RS_.Remotes.Items:FindFirstChild("Parrying Dagger")
+    if not dag then return end
+    track(dag.parryResult.OnClientEvent:Connect(function(ok, cd)
+        local n = tonumber(cd)
+        if n and n > 0 then parryUntilCd = os.clock() + n end
+        parryLastWord = ok and "parried" or "no hit"
+    end))
+end)
+
+local parryOnLunge = 0
+pcall(function()
+    track(RS_.Remotes.Attacks.Lunge.OnClientEvent:Connect(function()
+        parryOnLunge = os.clock()
+    end))
+end)
+
+local function killerThreat()
+    local kp = getKillerPlayer()
+    local kroot = kp and kp.Character and kp.Character:FindFirstChild("HumanoidRootPart")
+    local hrp = myHRP()
+    if not (kroot and hrp) then return nil end
+    local to = hrp.Position - kroot.Position
+    local d = to.Magnitude
+    if d < 1e-3 then return nil end
+    local look = kroot.CFrame.LookVector
+    local flatTo = Vector3.new(to.X, 0, to.Z)
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    if flatTo.Magnitude < 1e-3 or flatLook.Magnitude < 1e-3 then return nil end
+    local ang = math.deg(math.acos(math.clamp(flatLook.Unit:Dot(flatTo.Unit), -1, 1)))
+    local hit, lunge = rangeFor(kp)
+    return { dist = d, angle = ang, hit = hit, lunge = lunge }
+end
+
+local parryState = "off"
+local function stepAutoParry()
+    if not S.autoParry or activeItem() ~= "Parrying Dagger" then
+        parryState = "off"
+        return
+    end
+    local c = LocalPlayer.Character
+    local hum = c and c:FindFirstChildOfClass("Humanoid")
+    if not (isSurvivor(LocalPlayer) and hum and hum.Health > 0) then
+        parryState = "not playing"
+        return
+    end
+    if c:GetAttribute("Knocked") or c:GetAttribute("IsHooked") then
+        parryState = "down"
+        return
+    end
+    local now = os.clock()
+    if now < parryUntilCd then
+        parryState = ("cooldown %.1fs"):format(parryUntilCd - now)
+        return
+    end
+    if now - lastParryAt < 0.45 then return end     -- our own retry throttle
+
+    local why
+    if S.parryLunge and (now - parryOnLunge) <= 0.35 then
+        why = "lunge"
+    else
+        local t = killerThreat()
+        if t then
+            local reach = math.max(t.hit, 1) * (S.parryReach / 100)
+            if t.dist <= reach and t.angle <= S.parryCone then
+                why = ("%dm in reach"):format(math.floor(t.dist + 0.5))
+            end
+        end
+    end
+    if not why then
+        parryState = parryLastWord ~= "" and ("ready (" .. parryLastWord .. ")") or "ready"
+        return
+    end
+    lastParryAt = now
+    parryState = "parry: " .. why
+    -- M2 is the game's own bind, so its CanUse gate, animation, action tag and
+    -- slow all still run; firing the remote by hand would skip every one
+    pcall(function() mouse2click() end)
+end
 
 -- ---------- Veil spear ----------
 -- Two throws, learned separately. ProjectileHandler turns the aura particles on
@@ -2041,6 +2174,7 @@ local wasChased = false
 local lastIntel = 0
 track(RunService.Heartbeat:Connect(function()
     stepMoonwalk()
+    stepAutoParry()
     local kp = getKillerPlayer()
     local kc = kp and kp.Character
     local chased = false
@@ -2118,6 +2252,11 @@ track(RunService.Heartbeat:Connect(function()
         end
 
         if intelLabels.lock then intelLabels.lock:SetText("Lock: " .. lockState) end
+        if intelLabels.item then
+            local it = activeItem()
+            intelLabels.item:SetText(("Item: %s%s  --  %s")
+                :format(it or "none", (S.itemPick == "Auto") and " (auto)" or " (manual)", parryState))
+        end
 
         if intelLabels.power then
             local attrs = powerLines(kc)
@@ -2171,6 +2310,8 @@ do
     local Vis = Page:SubPage({ Name = "ESP" })
 
     local PSec = Vis:Section({ Name = "Players", Side = 1 })
+    PSec:Toggle({ Name = "Survivor items", Flag = "VD_ItemEsp", Default = false,
+        Callback = function(v) S.itemEsp = v end })
     PSec:Toggle({ Name = "Killer", Flag = "VD_KillerEsp", Default = false,
         Callback = function(v) S.killerEsp = v end })
     PSec:Toggle({ Name = "Survivors", Flag = "VD_SurvEsp", Default = false,
@@ -2231,6 +2372,24 @@ do
         Callback = function(v) S.moonWalking = v end })
     MSec:Slider({ Name = "Strafe swap", Flag = "VD_MoonRate", Min = 20, Max = 250, Default = 70,
         Decimals = 0, Suffix = " ms", Callback = function(v) S.moonRate = v end })
+
+    local ISec = Surv:Section({ Name = "Item", Side = 1 })
+    ISec:Dropdown({ Name = "Item", Flag = "VD_ItemPick", Default = "Auto", Multi = false,
+        Items = (function()
+            local t = { "Auto" }
+            for _, n in ipairs(ITEM_NAMES) do t[#t + 1] = n end
+            return t
+        end)(),
+        Callback = function(v) S.itemPick = (type(v) == "table" and v[1]) or v or "Auto" end })
+    intelLabels.item = ISec:Label({ Name = "Item: -" })
+    ISec:Toggle({ Name = "Auto parry (Parrying Dagger)", Flag = "VD_AutoParry", Default = false,
+        Callback = function(v) S.autoParry = v end })
+    ISec:Toggle({ Name = "React to lunges", Flag = "VD_ParryLunge", Default = true,
+        Callback = function(v) S.parryLunge = v end })
+    ISec:Slider({ Name = "Parry at reach", Flag = "VD_ParryReach", Min = 60, Max = 200, Default = 115,
+        Decimals = 0, Suffix = " %", Callback = function(v) S.parryReach = v end })
+    ISec:Slider({ Name = "Facing cone", Flag = "VD_ParryCone", Min = 15, Max = 120, Default = 50,
+        Decimals = 0, Suffix = " deg", Callback = function(v) S.parryCone = v end })
 
     local FSec = Surv:Section({ Name = "Flashlight", Side = 2 })
     FSec:Toggle({ Name = "Blind progress bar", Flag = "VD_BlindMeter", Default = false,
@@ -2354,7 +2513,7 @@ local function cleanup()
     S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
         false, false, false, false, false, false
     S.powerHud, S.aimMarker, S.aimLock, lockHeld = false, false, false, false
-    S.autoThrow, S.ghostLead = false, false
+    S.autoThrow, S.ghostLead, S.autoParry, S.itemEsp = false, false, false, false
     -- a strafe key left down would walk the character sideways forever
     S.moonwalk = false
     pcall(moonRelease)
