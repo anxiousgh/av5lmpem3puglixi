@@ -134,6 +134,14 @@ local S = {
     autoUnhook    = false,   -- hooked: rescue-spoof our own hook + self-unhook rolls
     repairAlert   = false,   -- killer side: notify when a gen starts being repaired
     fastVault     = false,   -- every vault counts as a running (fast) vault
+    moonwalk      = false,   -- decouple the body's facing from where we really go
+    moonMode      = "Reverse",  -- Reverse | Sideways | Spin
+    moonSpin      = 220,     -- Spin: degrees per second
+    moonMoving    = true,    -- only lie about the facing while actually moving
+    autoThrow     = false,   -- release the shot once the lock is genuinely on it
+    throwMiss     = 1.5,     -- studs the simulated shot may pass the target by
+    throwDelay    = 350,     -- ms between two auto releases
+    ghostLead     = false,   -- mark where each survivor will be at flight time
     hitRing       = false,   -- ground ring at the measured basic-attack reach
     lungeRing     = false,   -- ground ring at the measured lunge reach
     ringScale     = 100,     -- % applied to both rings, for a safety margin
@@ -783,6 +791,89 @@ local function stepAutoUnhook()
         pcall(function() Carry.SelfUnHookEvent:FireServer() end)
     end
 end
+
+-- ============================================================
+--  MOONWALK
+--
+--  Everyone reads the body. A killer's swing lands where their torso is
+--  pointing, a survivor's next step is wherever they have turned to face, and
+--  this module already leans on that itself -- the predicted arc for another
+--  killer is drawn along their replicated HRP facing, because that is the only
+--  aim anyone else can see. Breaking the link between the facing and the truth
+--  therefore breaks everybody else's read while costing us nothing: movement
+--  comes from Humanoid:Move, which the control module keeps camera-relative,
+--  so WASD still goes exactly where WASD went.
+--
+--  The lever has to be HumanoidRootPart.CFrame. Twisting the RootJoint instead
+--  looks identical locally and replicates to nobody, which is the opposite of
+--  what this is for -- the whole value is in what the other clients see. So:
+--  AutoRotate off, then write the yaw ourselves every Heartbeat. Position is
+--  carried through untouched so this never fights the physics.
+-- ============================================================
+local moonPrevAuto, spinPhase = nil, 0
+
+local function moonHumanoid()
+    local c = LocalPlayer.Character
+    local h = c and c:FindFirstChildOfClass("Humanoid")
+    if h and h.Health > 0 then return h, c end
+    return nil, c
+end
+
+local function moonRestore()
+    local h = moonHumanoid()
+    if h and moonPrevAuto ~= nil then h.AutoRotate = moonPrevAuto end
+    moonPrevAuto = nil
+end
+
+local function stepMoonwalk(dt)
+    local h, c = moonHumanoid()
+    local hrp = c and c:FindFirstChild("HumanoidRootPart")
+    if not (S.moonwalk and h and hrp) then
+        if moonPrevAuto ~= nil then moonRestore() end
+        return
+    end
+    -- Hooked or downed puts the character under someone else's control, and
+    -- fighting that just looks broken. Carried needs no case of its own: it
+    -- only ever follows a down, so Knocked already covers it.
+    if c:GetAttribute("IsHooked") or c:GetAttribute("Knocked") then
+        if moonPrevAuto ~= nil then moonRestore() end
+        return
+    end
+
+    if S.moonMoving and h.MoveDirection.Magnitude <= 0.1 then
+        if moonPrevAuto ~= nil then moonRestore() end
+        return
+    end
+
+    if moonPrevAuto == nil then moonPrevAuto = h.AutoRotate end
+    h.AutoRotate = false
+
+    -- Reverse and Sideways hang off the camera rather than the move direction:
+    -- the camera is what our attacks actually follow, so offsetting from it is
+    -- what puts the lie exactly opposite the truth. Standing still with a
+    -- move-direction basis would also leave the facing undefined.
+    local base = (cam and cam.CFrame.LookVector) or hrp.CFrame.LookVector
+    local flat = Vector3.new(base.X, 0, base.Z)
+    if flat.Magnitude < 1e-3 then flat = Vector3.new(0, 0, -1) end
+    flat = flat.Unit
+
+    local yaw = math.atan2(-flat.X, -flat.Z)
+    if S.moonMode == "Reverse" then
+        yaw = yaw + math.pi
+    elseif S.moonMode == "Sideways" then
+        yaw = yaw + math.pi / 2
+    else                                    -- Spin
+        spinPhase = (spinPhase + math.rad(S.moonSpin) * dt) % (2 * math.pi)
+        yaw = spinPhase
+    end
+
+    hrp.CFrame = CFrame.new(hrp.Position) * CFrame.fromEulerAnglesYXZ(0, yaw, 0)
+end
+
+-- A fresh character comes back with AutoRotate on and no memory of ours
+track(LocalPlayer.CharacterAdded:Connect(function()
+    moonPrevAuto, spinPhase = nil, 0
+end))
 
 -- ============================================================
 --  RANGE RINGS / SPEAR ARC / BLIND METER
@@ -1511,20 +1602,26 @@ end
 -- Keyed on a real frame counter rather than a clock tolerance, so the two
 -- callers share a solution exactly when they are in the same frame and never
 -- when they are not, whatever the frame rate is doing.
-local frameId = 0
+--
+-- It needs its own counter rather than the draw layer's frameId. Measured
+-- ordering: every BindToRenderStep callback runs before any RenderStepped
+-- connection, so the lock (Camera+1) is already done by the time frameBegin()
+-- bumps that one -- the lock would key on the previous frame and never share
+-- with the marker, which is the double solve this exists to stop.
+local aimFrame = 0
 local FRAME_BIND = "wh_vd_frame"
 pcall(function()
     RunService:BindToRenderStep(FRAME_BIND, Enum.RenderPriority.First.Value, function()
-        frameId = frameId + 1
+        aimFrame = aimFrame + 1
     end)
 end)
 
 local solCache = { f = -1 }
 local function frameSolution(kp, kc, kroot)
-    if solCache.f == frameId and solCache.kp == kp and solCache.kc == kc then
+    if solCache.f == aimFrame and solCache.kp == kp and solCache.kc == kc then
         return solCache.v
     end
-    solCache.f, solCache.kp, solCache.kc = frameId, kp, kc
+    solCache.f, solCache.kp, solCache.kc = aimFrame, kp, kc
     solCache.v = aimSolution(kp, kc, kroot)
     return solCache.v
 end
@@ -1594,6 +1691,42 @@ local function releaseLock(state)
     resid.x, resid.y = 0, 0
 end
 
+-- ---------- auto release ----------
+-- The solver knows how close the shot passes and the lock knows whether the
+-- camera has actually got there, so the trigger is just those two agreeing.
+-- Clicking rather than firing the remote on purpose: the click goes down the
+-- game's own input path, so whatever each killer needs to happen before a
+-- throw still happens, and one code path covers all three.
+local lastThrow, throwState = 0, ""
+local function stepAutoThrow(sol, err, kp, kc)
+    if not S.autoThrow then throwState = "" return end
+    if type(mouse1click) ~= "function" then throwState = "no click" return end
+    local pr = activeProj(kp)
+    if not pr then throwState = "" return end
+    -- Veil swings when the spear is not armed, which would throw away a hit
+    -- rather than land one
+    if killerKind(kp) == "Veil" and kc:GetAttribute("spearmode") ~= true then
+        throwState = "not armed"
+        return
+    end
+    if err > math.rad(math.max(S.lockDead, 0.2)) then throwState = "settling" return end
+    if (sol.miss or math.huge) > S.throwMiss then
+        throwState = ("wide %.1fm"):format(sol.miss or 0)
+        return
+    end
+    if os.clock() - lastThrow < (S.throwDelay / 1000) then throwState = "cooldown" return end
+    -- A shot that clips geometry on the way is a wasted charge. Phasing shots
+    -- (a charged spear, an Abysswalker wave) go through it by design, so the
+    -- check would only ever veto a hit that was going to land.
+    if not sol.charged then
+        local _, wall, _, _, wallT =
+            simulateArc(sol.origin, pr.launch(sol.camDir), sol.speed, sol.gmult, sol.life, pr.closed)
+        if wall and (wallT or 0) < (sol.flight - 0.05) then throwState = "blocked" return end
+    end
+    lastThrow, throwState = os.clock(), "released"
+    pcall(mouse1click)
+end
+
 local function stepAimLock(dt)
     if not (S.aimLock and lockHeld and cam) then return releaseLock("idle") end
     local kp = getKillerPlayer()
@@ -1615,6 +1748,8 @@ local function stepAimLock(dt)
     local pitch = math.asin(math.clamp(rel.Y / math.max(rel.Magnitude, 1e-6), -1, 1))
     local err = math.acos(math.clamp(cam.CFrame.LookVector:Dot(sol.camDir), -1, 1))
     lockState = ("locked  %.2fdeg  miss %.1fm"):format(math.deg(err), sol.miss or 0)
+    stepAutoThrow(sol, err, kp, kc)
+    if throwState ~= "" then lockState = lockState .. "  [" .. throwState .. "]" end
 
     -- Already there. Correcting anyway is what a jiggle is.
     if err <= math.rad(S.lockDead) then
@@ -1674,6 +1809,55 @@ local function stepAimMarker(kp, kc, kroot)
         local r = 7
         dLine(at - Vector2.new(r, 0), at + Vector2.new(r, 0), col, 1, 2)
         dLine(at - Vector2.new(0, r), at + Vector2.new(0, r), col, 1, 2)
+    end
+end
+
+-- The intercept marker only ever solves the one target the lock has picked.
+-- This puts the same answer on everybody at once -- solved per survivor, so
+-- each ghost sits at that survivor's own flight time rather than a shared
+-- guess -- which is what makes it useful for choosing a target by hand
+-- instead of only for confirming the one already chosen.
+local function stepGhosts(kp, kc, kroot)
+    if not (S.ghostLead and cam) then return end
+    local speed, gmult, origin, pr
+    if kp == LocalPlayer and kc and kroot then
+        pr = activeProj(kp)
+        if pr then
+            local kind = killerKind(kp)
+            local measured = (kind == "Veil")
+                and (isCharged() and spearCharged.seen or spearNorm.seen)
+                or (learned[kind] and learned[kind].seen)
+            if measured then
+                speed, gmult = pr.profile(kc)
+                origin = originFor(kind, kroot)
+            end
+        end
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and isSurvivor(p) then
+            local c = p.Character
+            local hum = c and c:FindFirstChildOfClass("Humanoid")
+            local root = c and c:FindFirstChild("HumanoidRootPart")
+            if root and hum and hum.Health > 0 and not c:GetAttribute("Knocked") then
+                local vel = targetVelocity(root)
+                if vel.Magnitude >= 1.5 then
+                    local at, t
+                    if origin and speed then
+                        local dir, flight, aimAt = solveIntercept(origin, root, speed, gmult)
+                        if dir then at, t = aimAt, flight end
+                    end
+                    if not at then t = 1 ; at = root.Position + vel end
+                    local a, b = toScreen(root.Position), toScreen(at)
+                    if a and b then dLine(a, b, PAL.accent, 0.4, 1) end
+                    dRing(at, 1.8, PAL.accent, 0.75)
+                    local lp = toScreen(at + Vector3.new(0, 3.4, 0))
+                    if lp then
+                        dText(lp, ("%s  +%.2fs  %dsps"):format(p.Name, t, math.floor(vel.Magnitude + 0.5)),
+                            PAL.accent, 12, true)
+                    end
+                end
+            end
+        end
     end
 end
 
@@ -1827,6 +2011,7 @@ track(RunService.RenderStepped:Connect(function(dt)
     stepRings(hrp, kp, kroot)
     stepSpear(hrp, kp, kc, kroot)
     stepAimMarker(kp, kc, kroot)
+    stepGhosts(kp, kc, kroot)
     if kp then watchPower(killerKind(kp)) end
     stepPowerHud(kp, kc)
     stepBlind(dt, hrp, kc, kroot)
@@ -1837,7 +2022,8 @@ end))
 local intelLabels = {}   -- filled in the UI block below
 local wasChased = false
 local lastIntel = 0
-track(RunService.Heartbeat:Connect(function()
+track(RunService.Heartbeat:Connect(function(hbDt)
+    stepMoonwalk(hbDt)
     local kp = getKillerPlayer()
     local kc = kp and kp.Character
     local chased = false
@@ -2022,6 +2208,15 @@ do
         Callback = function(v) S.fastVault = v end })
     MSec:Toggle({ Name = "Auto free from hook", Flag = "VD_AutoUnhook", Default = false,
         Callback = function(v) S.autoUnhook = v end })
+    MSec:Toggle({ Name = "Moonwalk", Flag = "VD_Moonwalk", Default = false,
+        Callback = function(v) S.moonwalk = v end })
+    MSec:Dropdown({ Name = "Facing", Flag = "VD_MoonMode", Default = "Reverse", Multi = false,
+        Items = { "Reverse", "Sideways", "Spin" },
+        Callback = function(v) S.moonMode = (type(v) == "table" and v[1]) or v or "Reverse" end })
+    MSec:Toggle({ Name = "Only while moving", Flag = "VD_MoonMoving", Default = true,
+        Callback = function(v) S.moonMoving = v end })
+    MSec:Slider({ Name = "Spin rate", Flag = "VD_MoonSpin", Min = 30, Max = 720, Default = 220,
+        Decimals = 0, Suffix = " deg/s", Callback = function(v) S.moonSpin = v end })
 
     local FSec = Surv:Section({ Name = "Flashlight", Side = 2 })
     FSec:Toggle({ Name = "Blind progress bar", Flag = "VD_BlindMeter", Default = false,
@@ -2084,6 +2279,14 @@ do
         Decimals = 1, Suffix = " deg", Callback = function(v) S.lockSnap = v end })
     ASec:Slider({ Name = "Dead zone", Flag = "VD_LockDead", Min = 0, Max = 2, Default = 0.35,
         Decimals = 2, Suffix = " deg", Callback = function(v) S.lockDead = v end })
+    ASec:Toggle({ Name = "Lead ghosts (all survivors)", Flag = "VD_GhostLead", Default = false,
+        Callback = function(v) S.ghostLead = v end })
+    ASec:Toggle({ Name = "Auto release (while lock held)", Flag = "VD_AutoThrow", Default = false,
+        Callback = function(v) S.autoThrow = v end })
+    ASec:Slider({ Name = "Release within", Flag = "VD_ThrowMiss", Min = 0.2, Max = 6, Default = 1.5,
+        Decimals = 1, Suffix = " studs", Callback = function(v) S.throwMiss = v end })
+    ASec:Slider({ Name = "Release delay", Flag = "VD_ThrowDelay", Min = 100, Max = 1500, Default = 350,
+        Decimals = 0, Suffix = " ms", Callback = function(v) S.throwDelay = v end })
     intelLabels.lock = ASec:Label({ Name = "Lock: idle" })
 
     -- ---------- intel ----------
@@ -2135,6 +2338,10 @@ local function cleanup()
     S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
         false, false, false, false, false, false
     S.powerHud, S.aimMarker, S.aimLock, lockHeld = false, false, false, false
+    S.autoThrow, S.ghostLead = false, false
+    -- leaving AutoRotate off would strand the character facing a fixed way
+    S.moonwalk = false
+    pcall(moonRestore)
     pcall(function() RunService:UnbindFromRenderStep(LOCK_BIND) end)
     pcall(function() RunService:UnbindFromRenderStep(FRAME_BIND) end)
     for _, c in ipairs(powerConns) do pcall(function() c:Disconnect() end) end
