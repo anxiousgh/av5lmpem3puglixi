@@ -149,6 +149,7 @@ local S = {
     aimFov        = 400,     -- target search radius around the crosshair, px
     lockSmooth    = 0.30,    -- per-1/60s retention; lower = snappier
     lockSnap      = 1.2,     -- inside this angle, apply the full correction
+    lockDead      = 0.35,    -- inside this angle, stop correcting entirely
     blindCone     = 20,      -- half-angle (deg) the beam counts as "on target"
     blindRange    = 60,      -- studs
     espBox        = true,    -- draw the 2D bounding box
@@ -1015,7 +1016,23 @@ end
 --  Launch origin is not knowable before a throw, so it is learned: every
 --  observed throw reports its true origin, which is stored as an offset in the
 --  thrower's own frame and reused for prediction.
+--
+--  `launch` maps where the camera points to where the projectile actually goes.
+--  `aimFor` is its inverse, and the aim lock needs it: the solver produces the
+--  direction the projectile must travel, but the mouse steers the camera, and
+--  for Cure those are not the same vector. Solving for a in (a + u).Unit == d
+--  means a = d*s - u for the scalar s that keeps a a unit vector,
+--      s = (d.u) + sqrt((d.u)^2 + 1 - u.u)
+--  which is always real here because |u| = 0.35 < 1.
 -- ============================================================
+local CURE_BIAS = Vector3.new(0, 0.35, 0)
+local function unbias(d, u)
+    local du = d:Dot(u)
+    local disc = du * du + 1 - u:Dot(u)
+    if disc < 0 then return d end
+    return (d * (du + math.sqrt(disc)) - u).Unit
+end
+
 local PROJ = {
     Veil = {
         kind = "ballistic", life = 4,
@@ -1025,16 +1042,19 @@ local PROJ = {
             return m.speed, m.gmult, ch
         end,
         launch = function(aim) return aim end,
+        aimFor = function(dir) return dir end,
     },
     Cure = {
-        kind = "ballistic", life = 3.2,
+        kind = "ballistic", life = 3.2, closed = true,
         profile = function() return learned.Cure.speed, learned.Cure.gmult, false end,
-        launch = function(aim) return (aim + Vector3.new(0, 0.35, 0)).Unit end,
+        launch = function(aim) return (aim + CURE_BIAS).Unit end,
+        aimFor = function(dir) return unbias(dir, CURE_BIAS) end,
     },
     Abysswalker = {
         kind = "linear", life = 3.5,
         profile = function() return learned.Abysswalker.speed, 0, true end,   -- waves pass terrain
         launch = function(aim) return aim end,
+        aimFor = function(dir) return dir end,
     },
 }
 
@@ -1063,10 +1083,17 @@ end
 -- emits every DECIMATE'th point: 4s of flight is 240 steps and the curve reads
 -- identically at a third of that. gmult 0 means no gravity term at all, which
 -- is how Abysswalker's wave travels.
+--
+-- The two killers do not integrate the same way, and stepping both as Euler put
+-- Cure's drawn arc a couple of studs under where the flask really goes. Veil's
+-- spear steps velocity on Heartbeat (v += -g*dt; p += v*dt), so Euler is
+-- literally what the game does; Cure's flask is evaluated closed form from t,
+-- which drops g*t*dt/2 less. `closed` picks the right one.
 local DECIMATE = 3
-local function simulateArc(origin, dir, speed, gmult, maxT)
+local function simulateArc(origin, dir, speed, gmult, maxT, closed)
     local pts = { origin }
     local p, v = origin, dir.Unit * speed
+    local v0, g = dir.Unit * speed, workspace.Gravity * (gmult or 0)
     local dt, t, i = 1 / 60, 0, 0
     local rp = RaycastParams.new()
     rp.FilterType = Enum.RaycastFilterType.Exclude
@@ -1076,8 +1103,14 @@ local function simulateArc(origin, dir, speed, gmult, maxT)
     rp.FilterDescendantsInstances = ignore
     local wallHit, wallIdx, wallT
     while t < (maxT or 4) do
-        v = v + Vector3.new(0, -(workspace.Gravity * dt) * gmult, 0)
-        local np = p + v * dt
+        local np
+        if closed then
+            local nt = t + dt
+            np = origin + v0 * nt - Vector3.new(0, 0.5 * g * nt * nt, 0)
+        else
+            v = v + Vector3.new(0, -(workspace.Gravity * dt) * gmult, 0)
+            np = p + v * dt
+        end
         if not wallHit then
             local hit = workspace:Raycast(p, np - p, rp)
             if hit then
@@ -1228,7 +1261,8 @@ local function stepSpear(hrp, kp, kc, kroot)
                 -- in-flight spears have declared their mode: the aura
                 -- (speed > 150) phases through walls, anything slower stops
                 local phasing = sp.speed > 150
-                local pts, wall, wallIdx, tail, wallT = simulateArc(sp.origin, sp.dir, sp.speed, sp.gmult, 4)
+                local pts, wall, wallIdx, tail, wallT =
+                    simulateArc(sp.origin, sp.dir, sp.speed, sp.gmult, 4, sp.kind == "Cure")
                 dPath(pts, (not phasing) and wallIdx or nil, PAL.killer, 1, PAL.muted, 0.35)
                 local land = (not phasing) and wall or tail
                 if land then
@@ -1259,7 +1293,7 @@ local function stepSpear(hrp, kp, kc, kroot)
 
     local speed, gmult, charged = pr.profile(kc)
     local pts, wall, wallIdx, tail, wallT, tailT =
-        simulateArc(origin, pr.launch(aim), speed, gmult, pr.life)
+        simulateArc(origin, pr.launch(aim), speed, gmult, pr.life, pr.closed)
 
     local col = charged and PAL.accent or PAL.killer
     local live = aiming and 1 or 0.6
@@ -1323,21 +1357,56 @@ local function ballisticDir(origin, target, speed, gmult)
         x / (speed * math.cos(math.atan(tanT)))
 end
 
+-- Velocity has to come from the position: AssemblyLinearVelocity reads zero on
+-- a remote character. Differencing two samples ~1/30s apart does not survive
+-- that, though -- characters replicate on their own irregular schedule, so a
+-- pair of reads is as likely to straddle one arrival (velocity doubled) as
+-- none at all (velocity zero), and that noise went into the lead as metres of
+-- jitter on the aim point every single frame. A least-squares fit over a
+-- window of samples is indifferent to the uneven arrivals: a repeated position
+-- just reinforces the same slope instead of inventing a spike.
+local VEL_WINDOW, VEL_MAX, VEL_JUMP, VEL_SLOTS = 0.30, 120, 25, 32
 local velTrack = setmetatable({}, { __mode = "k" })
 local function targetVelocity(part)
     local now, pos = os.clock(), part.Position
     local rec = velTrack[part]
     if not rec then
-        velTrack[part] = { pos = pos, t = now, vel = Vector3.zero }
-        return Vector3.zero
+        rec = { t = {}, x = {}, z = {}, n = 0, head = 0 }
+        velTrack[part] = rec
     end
-    local dt = now - rec.t
-    if dt >= 0.03 then
-        local raw = (pos - rec.pos) / dt
-        rec.vel = rec.vel:Lerp(Vector3.new(raw.X, 0, raw.Z), 0.4)
-        rec.pos, rec.t = pos, now
+    local lastT = (rec.n > 0) and rec.t[rec.head] or nil
+    if not lastT or (now - lastT) >= 0.004 then
+        -- a pallet vault, a teleport or a respawn is not movement; start over
+        -- rather than fitting a line through the discontinuity
+        if lastT then
+            local jx, jz = pos.X - rec.x[rec.head], pos.Z - rec.z[rec.head]
+            if (jx * jx + jz * jz) > (VEL_JUMP * VEL_JUMP) then
+                rec.n, rec.head = 0, 0
+            end
+        end
+        rec.head = rec.head % VEL_SLOTS + 1
+        rec.t[rec.head], rec.x[rec.head], rec.z[rec.head] = now, pos.X, pos.Z
+        rec.n = math.min(rec.n + 1, VEL_SLOTS)
     end
-    return rec.vel
+
+    local st, sx, sz, stt, stx, stz, k = 0, 0, 0, 0, 0, 0, 0
+    for i = 1, VEL_SLOTS do
+        local t = rec.t[i]
+        if t and (now - t) <= VEL_WINDOW then
+            local d = t - now
+            st, sx, sz = st + d, sx + rec.x[i], sz + rec.z[i]
+            stt = stt + d * d
+            stx, stz = stx + d * rec.x[i], stz + d * rec.z[i]
+            k = k + 1
+        end
+    end
+    if k < 4 then return Vector3.zero end
+    local den = k * stt - st * st
+    if math.abs(den) < 1e-9 then return Vector3.zero end
+    local v = Vector3.new((k * stx - st * sx) / den, 0, (k * stz - st * sz) / den)
+    local m = v.Magnitude
+    if m ~= m or m > VEL_MAX then return Vector3.zero end
+    return v
 end
 
 -- Fixed-point intercept: flight time sets the lead, and the lead sets the
@@ -1355,29 +1424,37 @@ local function solveIntercept(origin, part, speed, gmult)
         aimAt = nextAim
         if moved < 0.05 then break end
     end
-    return dir, flight, aimAt
+    return dir, flight, aimAt, vel
 end
 
--- Integrate the solved shot and report how close it really passes. If the
--- solver and the simulation disagree the number says so, instead of the lock
--- quietly pointing somewhere wrong.
-local function missDistance(origin, dir, speed, gmult, aimAt, life)
-    local p, v = origin, dir * speed
-    local dt, t, best = 1 / 60, 0, math.huge
-    while t < (life or 4) do
-        v = v + Vector3.new(0, -(workspace.Gravity * dt) * gmult, 0)
-        p = p + v * dt
-        local m = (p - aimAt).Magnitude
+-- Fly the shot the way the game will actually fly it -- from the direction the
+-- camera is being steered to, through the launch bias, against a target that
+-- keeps moving -- and report the closest it passes. Checking the whole chain
+-- rather than just the solver is the point: the number catches a bad launch
+-- inverse, which comparing the solver against itself never could.
+local function simMiss(origin, launchDir, speed, gmult, tPos, tVel, flight, life)
+    local g = workspace.Gravity * (gmult or 1)
+    local lo = math.max(0, flight - 0.35)
+    local hi = math.min(life or 4, flight + 0.35)
+    local best, t = math.huge, lo
+    while t <= hi do
+        local p = origin + launchDir * (speed * t) - Vector3.new(0, 0.5 * g * t * t, 0)
+        local m = (p - (tPos + tVel * t)).Magnitude
         if m < best then best = m end
-        t = t + dt
+        t = t + 1 / 120
     end
     return best
 end
 
+-- Sticky: two survivors near the crosshair used to swap the target back and
+-- forth between frames, and every swap threw the lock at a point metres away.
+-- The one already held keeps it inside a wider ring unless a rival is clearly,
+-- not marginally, closer to centre.
+local stickTarget = nil
 local function pickTarget()
     if not cam then return nil end
     local centre = cam.ViewportSize / 2
-    local best, bestD
+    local best, bestD, cur, curD
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and isSurvivor(p) then
             local c = p.Character
@@ -1388,10 +1465,13 @@ local function pickTarget()
                 if on then
                     local d = (Vector2.new(sp.X, sp.Y) - centre).Magnitude
                     if d <= S.aimFov and (not bestD or d < bestD) then best, bestD = root, d end
+                    if root == stickTarget and d <= S.aimFov * 1.35 then cur, curD = root, d end
                 end
             end
         end
     end
+    if cur and (not best or bestD > curD * 0.6) then return cur end
+    stickTarget = best
     return best
 end
 
@@ -1410,13 +1490,43 @@ local function aimSolution(kp, kc, kroot)
     local target = pickTarget()
     if not target then return nil end
     local origin = originFor(kind, kroot)
-    local dir, flight, aimAt = solveIntercept(origin, target, speed, gmult)
+    local dir, flight, aimAt, vel = solveIntercept(origin, target, speed, gmult)
     if not dir then return { outOfRange = true } end
+    -- `dir` is where the projectile has to travel; the mouse steers the camera,
+    -- and for Cure those differ by the upward launch bias. Steering to `dir`
+    -- itself threw every flask about 19 degrees high.
+    local camDir = pr.aimFor(dir)
     return {
-        dir = dir, flight = flight, aimAt = aimAt, origin = origin,
+        dir = dir, camDir = camDir, flight = flight, aimAt = aimAt, origin = origin,
         charged = charged, speed = speed, gmult = gmult, life = pr.life,
-        miss = missDistance(origin, dir, speed, gmult, aimAt, pr.life),
+        miss = simMiss(origin, pr.launch(camDir), speed, gmult,
+            target.Position, vel or Vector3.zero, flight, pr.life),
     }
+end
+
+-- The lock and the marker both want the solution, and both run in the same
+-- frame. Solving twice fed targetVelocity two samples a fraction of a
+-- millisecond apart and let each caller move the other's baseline, so the two
+-- disagreed about the lead. One solve per frame, shared.
+-- Keyed on a real frame counter rather than a clock tolerance, so the two
+-- callers share a solution exactly when they are in the same frame and never
+-- when they are not, whatever the frame rate is doing.
+local frameId = 0
+local FRAME_BIND = "wh_vd_frame"
+pcall(function()
+    RunService:BindToRenderStep(FRAME_BIND, Enum.RenderPriority.First.Value, function()
+        frameId = frameId + 1
+    end)
+end)
+
+local solCache = { f = -1 }
+local function frameSolution(kp, kc, kroot)
+    if solCache.f == frameId and solCache.kp == kp and solCache.kc == kc then
+        return solCache.v
+    end
+    solCache.f, solCache.kp, solCache.kc = frameId, kp, kc
+    solCache.v = aimSolution(kp, kc, kroot)
+    return solCache.v
 end
 
 local LOCK_BIND = "wh_vd_aimlock"
@@ -1426,65 +1536,112 @@ local lockHeld = false
 -- it every frame from its own yaw/pitch. Writing cam.CFrame is overwritten on
 -- the next frame, every frame, which is what made the first version shudder.
 -- Steering the mouse feeds the same path the player uses, so the camera module
--- does the turning and there is nothing to fight. Pixels-per-radian varies with
--- sensitivity and FOV, so it is calibrated from the loop: compare the turn
--- asked for last frame with the turn actually delivered.
-local pxPerRad, lastAsk = 900, nil
+-- does the turning and there is nothing to fight.
+--
+-- What is left is the gain, and it was the whole jiggle. Measured in this game:
+-- 573 px/rad horizontally and 744 px/rad vertically. They are not the same
+-- number, and the old code carried one shared 900 for both, so every frame it
+-- asked for about half again the turn the solution wanted. The camera crossed
+-- the target, corrected back, crossed again, and never settled -- and the
+-- server samples the camera LookVector (Remotes.getlookvector) at whatever
+-- point of that oscillation the throw happens to land on, which is why a lock
+-- that looked stuck to the target still threw wide.
+--
+-- Delivery is exact and lands whole on the next frame -- a 200px push measured
+-- 20.000 degrees by the following RenderStepped and nothing after -- so there
+-- is no actuation lag to model. Pushes under ~10px do under-deliver (5px moved
+-- half the angle it should), but the answer is to let them: an under-delivered
+-- push is just a softer gain and still converges from the same side. Holding
+-- the small ones back until they add up to a worthy step is what does not
+-- work -- that step is then bigger than the error left, so it crosses the
+-- target and the crosshair sits in a limit cycle. Measured: a floor of 8px
+-- oscillated between 0.5 and 1.9 degrees forever, carrying only the sub-pixel
+-- remainder settled in 5 frames and then held flat.
+local GAIN = { yaw = 573, pitch = 744 }
+local MIN_PX, PX_CAP = 1, 400
+local resid = { x = 0, y = 0 }
+local camYaw0, camPitch0, lastInject
 local lockState = "idle"
 
+local function camAngles()
+    local l = cam.CFrame.LookVector
+    return math.atan2(-l.X, -l.Z), math.asin(math.clamp(l.Y, -1, 1))
+end
+local function wrapPi(a)
+    return (a + math.pi) % (2 * math.pi) - math.pi
+end
+
+-- Keep the seed honest against a sensitivity change, by watching what the
+-- camera actually did with the pixels we pushed. Measuring the camera's own
+-- angles is the point: the old estimator inferred the turn from how much the
+-- aim error moved, which also moves when the target does, so it was fitting
+-- the target's movement into the mouse gain.
+local function recalibrate(y, p)
+    if not lastInject then return end
+    local dy, dp = wrapPi(camYaw0 - y), camPitch0 - p
+    if math.abs(lastInject.x) >= 15 and math.abs(dy) > 1e-4 then
+        local est = lastInject.x / dy
+        if est > 120 and est < 4000 then GAIN.yaw = GAIN.yaw * 0.85 + est * 0.15 end
+    end
+    if math.abs(lastInject.y) >= 15 and math.abs(dp) > 1e-4 then
+        local est = lastInject.y / dp
+        if est > 120 and est < 4000 then GAIN.pitch = GAIN.pitch * 0.85 + est * 0.15 end
+    end
+end
+
+local function releaseLock(state)
+    lastInject, lockState = nil, state
+    resid.x, resid.y = 0, 0
+end
+
 local function stepAimLock(dt)
-    if not (S.aimLock and lockHeld and cam) then
-        lastAsk, lockState = nil, "idle"
-        return
-    end
+    if not (S.aimLock and lockHeld and cam) then return releaseLock("idle") end
     local kp = getKillerPlayer()
-    if kp ~= LocalPlayer then
-        lastAsk = nil
-        return
-    end
+    if kp ~= LocalPlayer then return releaseLock("not the killer") end
+
+    local y, p = camAngles()
+    recalibrate(y, p)
+    camYaw0, camPitch0, lastInject = y, p, nil
+
     local kc = kp.Character
     local kroot = kc and kc:FindFirstChild("HumanoidRootPart")
-    local sol = aimSolution(kp, kc, kroot)
-    if not sol then
-        lastAsk, lockState = nil, "no target"
-        return
-    end
-    if sol.calibrating then
-        lastAsk, lockState = nil, "calibrating"
-        return
-    end
-    if sol.outOfRange then
-        lastAsk, lockState = nil, "out of range"
-        return
-    end
-    lockState = ("locked  miss %.1fm"):format(sol.miss or 0)
+    local sol = frameSolution(kp, kc, kroot)
+    if not sol then return releaseLock("no target") end
+    if sol.calibrating then return releaseLock("calibrating") end
+    if sol.outOfRange then return releaseLock("out of range") end
 
-    local rel = cam.CFrame:VectorToObjectSpace(sol.dir)
+    local rel = cam.CFrame:VectorToObjectSpace(sol.camDir)
     local yaw = math.atan2(rel.X, -rel.Z)
     local pitch = math.asin(math.clamp(rel.Y / math.max(rel.Magnitude, 1e-6), -1, 1))
+    local err = math.acos(math.clamp(cam.CFrame.LookVector:Dot(sol.camDir), -1, 1))
+    lockState = ("locked  %.2fdeg  miss %.1fm"):format(math.deg(err), sol.miss or 0)
 
-    if lastAsk and math.abs(lastAsk.dx) > 2 then
-        local turned = lastAsk.yaw - yaw
-        if math.abs(turned) > 1e-4 then
-            local est = math.abs(lastAsk.dx / turned)
-            if est > 40 and est < 6000 then pxPerRad = pxPerRad * 0.85 + est * 0.15 end
-        end
+    -- Already there. Correcting anyway is what a jiggle is.
+    if err <= math.rad(S.lockDead) then
+        resid.x, resid.y = 0, 0
+        return
     end
 
-    local err = math.max(math.abs(yaw), math.abs(pitch))
-    local frac = (err <= math.rad(S.lockSnap)) and 1
-        or math.clamp(1 - (S.lockSmooth ^ (dt * 60)), 0, 1)
-    local cap = 220
-    local dx = math.clamp(yaw * frac * pxPerRad, -cap, cap)
-    local dy = math.clamp(-pitch * frac * pxPerRad, -cap, cap)
+    -- Capped below 1 on purpose: a full-error step only lands exactly on target
+    -- if the gain is exactly right, and anything over it overshoots into the
+    -- same oscillation this is meant to stop. 0.85 settles in three frames.
+    local frac = (err <= math.rad(S.lockSnap)) and 0.85
+        or math.clamp(1 - (S.lockSmooth ^ (dt * 60)), 0, 0.85)
 
+    local wantX = math.clamp(yaw * frac * GAIN.yaw, -PX_CAP, PX_CAP) + resid.x
+    local wantY = math.clamp(-pitch * frac * GAIN.pitch, -PX_CAP, PX_CAP) + resid.y
+    local ex = (math.abs(wantX) >= MIN_PX) and math.floor(wantX + 0.5) or 0
+    local ey = (math.abs(wantY) >= MIN_PX) and math.floor(wantY + 0.5) or 0
+    resid.x, resid.y = wantX - ex, wantY - ey
+
+    if ex == 0 and ey == 0 then return end
     if mousemoverel then
-        pcall(mousemoverel, dx, dy)
-        lastAsk = { dx = dx, dy = dy, yaw = yaw, pitch = pitch }
+        pcall(mousemoverel, ex, ey)
+        lastInject = { x = ex, y = ey }
     else
         local pos = cam.CFrame.Position
-        cam.CFrame = cam.CFrame:Lerp(CFrame.lookAt(pos, pos + sol.dir), frac)
-        lastAsk = nil
+        cam.CFrame = cam.CFrame:Lerp(CFrame.lookAt(pos, pos + sol.camDir), frac)
+        resid.x, resid.y = 0, 0
     end
 end
 pcall(function()
@@ -1493,7 +1650,7 @@ end)
 
 local function stepAimMarker(kp, kc, kroot)
     if not (S.aimMarker and kp == LocalPlayer and cam) then return end
-    local sol = aimSolution(kp, kc, kroot)
+    local sol = frameSolution(kp, kc, kroot)
     if not sol then return end
     local centre = cam.ViewportSize / 2
     if sol.calibrating then
@@ -1508,7 +1665,9 @@ local function stepAimMarker(kp, kc, kroot)
     end
     local col = sol.charged and PAL.accent or PAL.killer
     landingMark(sol.aimAt, ("INTERCEPT  %.2fs  miss %.1fm"):format(sol.flight, sol.miss), col, 1)
-    local mp, on = cam:WorldToViewportPoint(cam.CFrame.Position + sol.dir * 60)
+    -- the cross marks where the CAMERA has to point, which is not the direction
+    -- the projectile travels whenever the killer's launch is biased
+    local mp, on = cam:WorldToViewportPoint(cam.CFrame.Position + sol.camDir * 60)
     if on then
         local at = Vector2.new(mp.X, mp.Y)
         dLine(centre, at, col, 0.45, 1)
@@ -1923,6 +2082,8 @@ do
         Decimals = 0, Suffix = " %", Callback = function(v) S.lockSmooth = v / 100 end })
     ASec:Slider({ Name = "Snap within", Flag = "VD_LockSnap", Min = 0, Max = 6, Default = 1.2,
         Decimals = 1, Suffix = " deg", Callback = function(v) S.lockSnap = v end })
+    ASec:Slider({ Name = "Dead zone", Flag = "VD_LockDead", Min = 0, Max = 2, Default = 0.35,
+        Decimals = 2, Suffix = " deg", Callback = function(v) S.lockDead = v end })
     intelLabels.lock = ASec:Label({ Name = "Lock: idle" })
 
     -- ---------- intel ----------
@@ -1975,6 +2136,7 @@ local function cleanup()
         false, false, false, false, false, false
     S.powerHud, S.aimMarker, S.aimLock, lockHeld = false, false, false, false
     pcall(function() RunService:UnbindFromRenderStep(LOCK_BIND) end)
+    pcall(function() RunService:UnbindFromRenderStep(FRAME_BIND) end)
     for _, c in ipairs(powerConns) do pcall(function() c:Disconnect() end) end
     chaseFlash = false
     pcall(function() Library.MouseRestoreHook = nil end)
