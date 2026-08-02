@@ -134,6 +134,9 @@ local S = {
     autoUnhook    = false,   -- hooked: rescue-spoof our own hook + self-unhook rolls
     repairAlert   = false,   -- killer side: notify when a gen starts being repaired
     fastVault     = false,   -- every vault counts as a running (fast) vault
+    palletWarn    = false,   -- race each standing pallet: who reaches it first
+    palletRange   = 45,      -- only consider pallets this close to us, studs
+    stunRadius    = 14,      -- how close we have to be for a drop to catch us
     itemPick      = "Auto",  -- "Auto" reads the EquippedItem attribute
     autoParry     = false,   -- Parrying Dagger: right-click on the killer's tell
     parryLunge    = true,    -- react to Remotes.Attacks.Lunge
@@ -506,6 +509,116 @@ local function getObjects()
         end
     end
     return objCache
+end
+
+-- ---------- pallet stun predictor ----------
+-- A pallet only matters while it is still standing, and nothing on the model
+-- says so: no attribute, no prompt, no state tag -- all 21 on this map read
+-- identically while they are up.
+--
+-- What actually carries the state is presence. Watched across one round the
+-- tagged count went 21 -> 14 as they were used, so a spent pallet leaves the
+-- world and getObjects, which rescans every 3s and checks .Parent, drops it
+-- on its own. Worth knowing that this is the signal doing the work: the drop
+-- remotes were hooked for a full round and fired at our client exactly zero
+-- times, so they look like they only reach the survivor doing the dropping.
+--
+-- The other two checks stay anyway because each is nearly free and each
+-- covers a case presence does not: the remotes catch a pallet the moment it
+-- goes down rather than up to 3s later IF they ever do reach us, and the
+-- resting orientation catches one that is dropped but still in the world,
+-- lying flat, where a standing pallet measures UpVector.Y ~ 0.99. Neither
+-- was observed firing; both are harmless when they never do.
+local droppedPallets = setmetatable({}, { __mode = "k" })
+local STANDING_UP = 0.7
+
+local function palletStanding(m)
+    if droppedPallets[m] then return false end
+    local p1 = m:FindFirstChild("Primary1")
+    if p1 and p1:IsA("BasePart") then return p1.CFrame.UpVector.Y > STANDING_UP end
+    return true
+end
+
+pcall(function()
+    -- not RS_: that local is declared further down, so up here the name is an
+    -- empty global and the pcall would quietly swallow the whole hook
+    local P = game:GetService("ReplicatedStorage").Remotes:FindFirstChild("Pallet")
+    if not P then return end
+    local function markDown(...)
+        for _, v in ipairs({ ... }) do
+            if typeof(v) == "Instance" then
+                local m = v:IsA("Model") and v or v:FindFirstAncestorOfClass("Model")
+                if m then droppedPallets[m] = true end
+            end
+        end
+    end
+    for _, n in ipairs({ "PalletDropAnim", "PalletDropCommit", "PalletDropEvent" }) do
+        local ev = P:FindFirstChild(n)
+        if ev and ev:IsA("RemoteEvent") then track(ev.OnClientEvent:Connect(markDown)) end
+    end
+end)
+
+-- Straight-line ETA, deliberately. Pathfinding every pallet every frame would
+-- cost more than the answer is worth, and the useful question is not the exact
+-- second -- it is who is closer to the pallet right now, which the straight
+-- line gets right in the loops where this decision actually happens.
+local function speedOf(p)
+    local h = p and p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+    return math.max((h and h.WalkSpeed) or 12, 4)
+end
+
+local function stepPalletWarn(hrp)
+    if not (S.palletWarn and hrp) then return end
+    local iAmKiller = isKiller(LocalPlayer)
+    -- both sides want the same race, only with the roles the other way round:
+    -- as killer, who can drop one on us; as survivor, which one we reach first
+    local rivals = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            local c = p.Character
+            local hum = c and c:FindFirstChildOfClass("Humanoid")
+            local root = c and c:FindFirstChild("HumanoidRootPart")
+            local want = iAmKiller and isSurvivor(p) or isKiller(p)
+            if want and root and hum and hum.Health > 0 and not c:GetAttribute("Knocked") then
+                rivals[#rivals + 1] = { root = root, speed = speedOf(p), name = p.Name }
+            end
+        end
+    end
+    if #rivals == 0 then return end
+
+    local mySpeed = speedOf(LocalPlayer)
+    local danger = false
+    for _, it in ipairs(getObjects()) do
+        if it.kind == "PALLET" and it.obj.Parent and it.root.Parent and palletStanding(it.obj) then
+            local pos = it.root.Position
+            local myD = (pos - hrp.Position).Magnitude
+            if myD <= S.palletRange then
+                local best, bestT
+                for _, r in ipairs(rivals) do
+                    local t = (pos - r.root.Position).Magnitude / r.speed
+                    if not bestT or t < bestT then best, bestT = r, t end
+                end
+                local myT = myD / mySpeed
+                -- they win the race, and we are close enough for that to cost us
+                local hot = bestT and bestT < myT and myD <= S.stunRadius * 2
+                if hot then danger = true end
+                local col = hot and PAL.killer or PAL.muted
+                dRing(pos, 2.4, col, hot and 0.95 or 0.4)
+                local lp = toScreen(pos + Vector3.new(0, 4, 0))
+                if lp then
+                    dText(lp, ("%s  them %.1fs / you %.1fs")
+                        :format(hot and "STUN RISK" or "pallet", bestT or 9, myT), col, 13, true)
+                end
+            end
+        end
+    end
+    if danger and iAmKiller then
+        local vp = cam and cam.ViewportSize
+        if vp then
+            dText(Vector2.new(vp.X / 2, vp.Y * 0.62), "PALLET -- they get there first",
+                PAL.killer, 17, true)
+        end
+    end
 end
 
 local function stepObjEsp(hrp)
@@ -2158,6 +2271,7 @@ track(RunService.RenderStepped:Connect(function(dt)
     if S.killerEsp or S.survEsp then stepPlayerEsp(hrp) end
     stepGenEsp(hrp)
     stepObjEsp(hrp)
+    stepPalletWarn(hrp)
     stepRings(hrp, kp, kroot)
     stepSpear(hrp, kp, kc, kroot)
     stepAimMarker(kp, kc, kroot)
@@ -2420,6 +2534,14 @@ do
         saveProj()
         pcall(function() Library:Notification("Measured ranges + spear speeds cleared", 3, PAL.accent) end)
     end })
+
+    local PalSec = Read:Section({ Name = "Pallets", Side = 1 })
+    PalSec:Toggle({ Name = "Stun predictor", Flag = "VD_PalletWarn", Default = false,
+        Callback = function(v) S.palletWarn = v end })
+    PalSec:Slider({ Name = "Consider within", Flag = "VD_PalletRange", Min = 15, Max = 100, Default = 45,
+        Decimals = 0, Suffix = " studs", Callback = function(v) S.palletRange = v end })
+    PalSec:Slider({ Name = "Stun radius", Flag = "VD_StunRadius", Min = 5, Max = 30, Default = 14,
+        Decimals = 0, Suffix = " studs", Callback = function(v) S.stunRadius = v end })
 
     local SpSec = Read:Section({ Name = "Veil spear", Side = 2 })
     SpSec:Toggle({ Name = "Predicted throw line", Flag = "VD_SpearLine", Default = false,
