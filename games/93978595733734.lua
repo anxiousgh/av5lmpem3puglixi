@@ -2394,7 +2394,7 @@ do
     local moonToggle = MSec:Toggle({ Name = "Moonwalk", Flag = "VD_Moonwalk", Default = false,
         Callback = function(v) S.moonwalk = v end })
     moonToggle:Keybind({ Name = "Moonwalk", Flag = "VD_MoonwalkKey", Mode = "Toggle",
-        Callback = function() moonToggle:Set(not moonToggle.Value) end })
+        Callback = function(st) moonToggle:Set(st and true or false) end })
     MSec:Toggle({ Name = "Only while walking", Flag = "VD_MoonWalking", Default = true,
         Callback = function(v) S.moonWalking = v end })
     MSec:Slider({ Name = "Strafe swap", Flag = "VD_MoonRate", Min = 20, Max = 250, Default = 70,
