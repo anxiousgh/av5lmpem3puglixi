@@ -138,10 +138,6 @@ local S = {
     palletRange   = 45,      -- only consider pallets this close to us, studs
     stunRadius    = 14,      -- how close we have to be for a drop to catch us
     itemPick      = "Auto",  -- "Auto" reads the EquippedItem attribute
-    autoParry     = false,   -- Parrying Dagger: right-click on the killer's tell
-    parryLunge    = true,    -- react to Remotes.Attacks.Lunge
-    parryReach    = 115,     -- % of the MEASURED hit reach that counts as danger
-    parryCone     = 50,      -- killer must be facing us within this half-angle
     itemEsp       = false,   -- show what item each survivor is carrying
     moonwalk      = false,   -- alternate the strafe keys so the stride never lands
     moonRate      = 70,      -- ms each strafe key is held before swapping
@@ -1106,96 +1102,6 @@ local function activeItem()
     return equippedItem(LocalPlayer)
 end
 
--- ---------- Parrying Dagger ----------
--- Two tells, because they cover different attacks. A lunge announces itself on
--- Remotes.Attacks.Lunge before it lands, which is the honest signal and the
--- one worth reacting to. A basic swing announces nothing at all, so the only
--- thing left is geometry: the killer inside the reach this module has already
--- measured for that specific killer, and facing us. Using the measured reach
--- rather than a guessed number is the point -- it is per killer and it came
--- from real swings that actually connected.
-local parryUntilCd, parryLastWord, lastParryAt = 0, "", 0
-
-pcall(function()
-    local dag = RS_.Remotes.Items:FindFirstChild("Parrying Dagger")
-    if not dag then return end
-    track(dag.parryResult.OnClientEvent:Connect(function(ok, cd)
-        local n = tonumber(cd)
-        if n and n > 0 then parryUntilCd = os.clock() + n end
-        parryLastWord = ok and "parried" or "no hit"
-    end))
-end)
-
-local parryOnLunge = 0
-pcall(function()
-    track(RS_.Remotes.Attacks.Lunge.OnClientEvent:Connect(function()
-        parryOnLunge = os.clock()
-    end))
-end)
-
-local function killerThreat()
-    local kp = getKillerPlayer()
-    local kroot = kp and kp.Character and kp.Character:FindFirstChild("HumanoidRootPart")
-    local hrp = myHRP()
-    if not (kroot and hrp) then return nil end
-    local to = hrp.Position - kroot.Position
-    local d = to.Magnitude
-    if d < 1e-3 then return nil end
-    local look = kroot.CFrame.LookVector
-    local flatTo = Vector3.new(to.X, 0, to.Z)
-    local flatLook = Vector3.new(look.X, 0, look.Z)
-    if flatTo.Magnitude < 1e-3 or flatLook.Magnitude < 1e-3 then return nil end
-    local ang = math.deg(math.acos(math.clamp(flatLook.Unit:Dot(flatTo.Unit), -1, 1)))
-    local hit, lunge = rangeFor(kp)
-    return { dist = d, angle = ang, hit = hit, lunge = lunge }
-end
-
-local parryState = "off"
-local function stepAutoParry()
-    if not S.autoParry or activeItem() ~= "Parrying Dagger" then
-        parryState = "off"
-        return
-    end
-    local c = LocalPlayer.Character
-    local hum = c and c:FindFirstChildOfClass("Humanoid")
-    if not (isSurvivor(LocalPlayer) and hum and hum.Health > 0) then
-        parryState = "not playing"
-        return
-    end
-    if c:GetAttribute("Knocked") or c:GetAttribute("IsHooked") then
-        parryState = "down"
-        return
-    end
-    local now = os.clock()
-    if now < parryUntilCd then
-        parryState = ("cooldown %.1fs"):format(parryUntilCd - now)
-        return
-    end
-    if now - lastParryAt < 0.45 then return end     -- our own retry throttle
-
-    local why
-    if S.parryLunge and (now - parryOnLunge) <= 0.35 then
-        why = "lunge"
-    else
-        local t = killerThreat()
-        if t then
-            local reach = math.max(t.hit, 1) * (S.parryReach / 100)
-            if t.dist <= reach and t.angle <= S.parryCone then
-                why = ("%dm in reach"):format(math.floor(t.dist + 0.5))
-            end
-        end
-    end
-    if not why then
-        parryState = parryLastWord ~= "" and ("ready (" .. parryLastWord .. ")") or "ready"
-        return
-    end
-    lastParryAt = now
-    parryState = "parry: " .. why
-    -- M2 is the game's own bind, so its CanUse gate, animation, action tag and
-    -- slow all still run; firing the remote by hand would skip every one
-    pcall(function() mouse2click() end)
-end
-
 -- ---------- Veil spear ----------
 -- Two throws, learned separately. ProjectileHandler turns the aura particles on
 -- when speed > 150, so that threshold splits the charged throw from the normal
@@ -1846,9 +1752,15 @@ local function aimSolution(kp, kc, kroot)
     -- itself threw every flask about 19 degrees high.
     local camDir = pr.aimFor(dir)
     -- A charged spear and an Abysswalker wave pass through geometry by design,
-    -- so for those the answer is always no and the raycasts are skipped
+    -- so for those the answer is always no and the raycasts are skipped. The
+    -- speed test is the same one the live-spear path uses (>150 is the aura),
+    -- and it is here as well as the charge flag on purpose: that flag comes
+    -- from spotting the aura emitters on the viewmodel, so if the lookup ever
+    -- comes up empty a charged spear would otherwise be told it is blocked by
+    -- a wall it was always going to fly straight through.
+    local phases = charged or (speed > 150)
     local blocked = false
-    if (S.lockLos or S.autoThrow) and not charged then
+    if (S.lockLos or S.autoThrow) and not phases then
         blocked = pathBlocked(origin, pr.launch(camDir), speed, gmult, flight, pr.closed)
     end
     return {
@@ -2288,7 +2200,6 @@ local wasChased = false
 local lastIntel = 0
 track(RunService.Heartbeat:Connect(function()
     stepMoonwalk()
-    stepAutoParry()
     local kp = getKillerPlayer()
     local kc = kp and kp.Character
     local chased = false
@@ -2368,8 +2279,8 @@ track(RunService.Heartbeat:Connect(function()
         if intelLabels.lock then intelLabels.lock:SetText("Lock: " .. lockState) end
         if intelLabels.item then
             local it = activeItem()
-            intelLabels.item:SetText(("Item: %s%s  --  %s")
-                :format(it or "none", (S.itemPick == "Auto") and " (auto)" or " (manual)", parryState))
+            intelLabels.item:SetText(("Item: %s%s")
+                :format(it or "none", (S.itemPick == "Auto") and " (auto)" or " (manual)"))
         end
 
         if intelLabels.power then
@@ -2496,14 +2407,6 @@ do
         end)(),
         Callback = function(v) S.itemPick = (type(v) == "table" and v[1]) or v or "Auto" end })
     intelLabels.item = ISec:Label({ Name = "Item: -" })
-    ISec:Toggle({ Name = "Auto parry (Parrying Dagger)", Flag = "VD_AutoParry", Default = false,
-        Callback = function(v) S.autoParry = v end })
-    ISec:Toggle({ Name = "React to lunges", Flag = "VD_ParryLunge", Default = true,
-        Callback = function(v) S.parryLunge = v end })
-    ISec:Slider({ Name = "Parry at reach", Flag = "VD_ParryReach", Min = 60, Max = 200, Default = 115,
-        Decimals = 0, Suffix = " %", Callback = function(v) S.parryReach = v end })
-    ISec:Slider({ Name = "Facing cone", Flag = "VD_ParryCone", Min = 15, Max = 120, Default = 50,
-        Decimals = 0, Suffix = " deg", Callback = function(v) S.parryCone = v end })
 
     local FSec = Surv:Section({ Name = "Flashlight", Side = 2 })
     FSec:Toggle({ Name = "Blind progress bar", Flag = "VD_BlindMeter", Default = false,
@@ -2635,7 +2538,7 @@ local function cleanup()
     S.hitRing, S.lungeRing, S.spearLine, S.spearLive, S.spearAlways, S.blindMeter =
         false, false, false, false, false, false
     S.powerHud, S.aimMarker, S.aimLock, lockHeld = false, false, false, false
-    S.autoThrow, S.ghostLead, S.autoParry, S.itemEsp = false, false, false, false
+    S.autoThrow, S.ghostLead, S.itemEsp = false, false, false
     -- a strafe key left down would walk the character sideways forever
     S.moonwalk = false
     pcall(moonRelease)
